@@ -1,0 +1,6 @@
+# Install as /etc/containerd/certs.d/_default/hosts.toml on each node.
+# With server set to SIC, containerd will not fall through directly to the Internet.
+server = "https://127.0.0.1:5000"
+capabilities = ["pull", "resolve"]
+ca = "/etc/steady-image-cache/ca.crt"
+client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]
