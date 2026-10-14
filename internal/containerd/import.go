@@ -5,12 +5,12 @@ import (
 	"io"
 	"strings"
 
+	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	containerd "github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/namespaces"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
 
 type Importer struct {

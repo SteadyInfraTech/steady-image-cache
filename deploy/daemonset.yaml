@@ -44,6 +44,11 @@ spec:
         - {name: SIC_POD_LABEL_SELECTOR, value: "app=steady-image-cache"}
         - {name: SIC_PEER_PORT, value: "5000"}
         - {name: SIC_UPSTREAM_ENABLED, value: "false"}
+        # Only used when upstream fallback is enabled; e.g. "docker.io,ghcr.io".
+        - {name: SIC_UPSTREAM_REGISTRIES, value: ""}
+        # Plain-HTTP health/metrics on loopback: kubelet cannot present the client
+        # certificate the main listener requires.
+        - {name: SIC_ADMIN_LISTEN, value: "127.0.0.1:5001"}
         - {name: SIC_CONTAINERD_IMPORT, value: "true"}
         - {name: SIC_CONTAINERD_ADDRESS, value: "/run/containerd/containerd.sock"}
         - {name: SIC_CONTAINERD_NAMESPACE, value: "k8s.io"}
@@ -65,7 +70,7 @@ spec:
         - {name: cache, mountPath: /var/lib/steady-image-cache}
         - {name: containerd-socket, mountPath: /run/containerd/containerd.sock, readOnly: true}
         - {name: tls, mountPath: /tls, readOnly: true}
-        readinessProbe: {httpGet: {scheme: HTTPS, path: /healthz, port: 5000}, initialDelaySeconds: 2, periodSeconds: 10}
+        readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
       volumes:
       - name: cache
         hostPath: {path: /var/lib/steady-image-cache, type: DirectoryOrCreate}
