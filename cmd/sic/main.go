@@ -4,24 +4,36 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/config"
-	cd "github.com/SteadyInfraTech/steady-image-cache/internal/containerd"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
-	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/config"
+	cd "github.com/SteadyInfraTech/steady-image-cache/internal/containerd"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
+
+func healthz(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
+}
 
 func main() {
 	cfg := config.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
+		log.Fatal("SIC_TLS_CERT and SIC_TLS_KEY must be set together")
+	}
+	useTLS := cfg.TLSCert != ""
+
 	st, err := store.New(cfg.CacheDir)
 	if err != nil {
 		log.Fatal(err)
@@ -32,7 +44,7 @@ func main() {
 		finders = append(finders, peer.NewStatic(cfg.Peers))
 	}
 	scheme := "http"
-	if cfg.TLSCert != "" {
+	if useTLS {
 		scheme = "https"
 	}
 	if cfg.KubernetesDiscovery {
@@ -44,12 +56,16 @@ func main() {
 			go k.Run(ctx, 30*time.Second, log.Printf)
 		}
 	}
+
+	// The import walks the whole containerd content store, which can take a long
+	// time on a busy node. It runs in the background so the registry is already
+	// serving while it works.
 	if cfg.ContainerdImport {
 		imp := &cd.Importer{Address: cfg.ContainerdAddress, Namespace: cfg.ContainerdNamespace, Store: st, Metrics: m}
-		if err := imp.Import(ctx); err != nil {
-			log.Printf("initial %s import: %v", imp, err)
-		}
 		go func() {
+			if err := imp.Import(ctx); err != nil {
+				log.Printf("initial %s import: %v", imp, err)
+			}
 			t := time.NewTicker(cfg.ImportInterval)
 			defer t.Stop()
 			for {
@@ -64,17 +80,47 @@ func main() {
 			}
 		}()
 	}
-	h, err := proxy.New(st, finders, cfg.UpstreamTimeout, m, cfg.UpstreamEnabled, cfg.TLSCA, cfg.ClientCert, cfg.ClientKey, cfg.TLSServerName)
+
+	h, err := proxy.New(st, finders, m, proxy.Options{
+		Timeout:            cfg.UpstreamTimeout,
+		Upstream:           cfg.UpstreamEnabled,
+		UpstreamRegistries: cfg.UpstreamRegistries,
+		CA:                 cfg.TLSCA,
+		Cert:               cfg.ClientCert,
+		Key:                cfg.ClientKey,
+		ServerName:         cfg.TLSServerName,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
+	if cfg.UpstreamEnabled && len(cfg.UpstreamRegistries) == 0 {
+		log.Printf("upstream fallback is enabled but SIC_UPSTREAM_REGISTRIES is empty: no upstream registry will be contacted")
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/v2/", h)
 	mux.Handle("/v2", h)
 	mux.Handle("/metrics", m)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200); _, _ = w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/healthz", healthz)
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	if cfg.TLSCert != "" && cfg.TLSKey != "" {
+
+	// Health and metrics on a plain-HTTP address for kubelet probes and local
+	// scraping; they stay on the main listener too.
+	var admin *http.Server
+	if cfg.AdminListen != "" {
+		am := http.NewServeMux()
+		am.Handle("/metrics", m)
+		am.HandleFunc("/healthz", healthz)
+		admin = &http.Server{Addr: cfg.AdminListen, Handler: am, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Printf("SIC admin HTTP %s", cfg.AdminListen)
+			if e := admin.ListenAndServe(); e != nil && e != http.ErrServerClosed {
+				log.Fatal(e)
+			}
+		}()
+	}
+
+	if useTLS {
 		tc := &tls.Config{MinVersion: tls.VersionTLS12}
 		if cfg.TLSCA != "" {
 			b, e := os.ReadFile(cfg.TLSCA)
@@ -82,7 +128,9 @@ func main() {
 				log.Fatal(e)
 			}
 			pool := x509.NewCertPool()
-			pool.AppendCertsFromPEM(b)
+			if !pool.AppendCertsFromPEM(b) {
+				log.Fatal("SIC_TLS_CA contains no valid certificates")
+			}
 			tc.ClientCAs = pool
 			tc.ClientAuth = tls.RequireAndVerifyClientCert
 		}
@@ -101,8 +149,12 @@ func main() {
 			}
 		}()
 	}
+
 	<-ctx.Done()
 	c, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
 	_ = srv.Shutdown(c)
+	if admin != nil {
+		_ = admin.Shutdown(c)
+	}
 }
