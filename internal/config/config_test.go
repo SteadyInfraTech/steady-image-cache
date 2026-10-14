@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,5 +36,70 @@ func TestNonPositiveDurationsIgnored(t *testing.T) {
 	c := FromEnv()
 	if c.ImportInterval != 5*time.Minute || c.UpstreamTimeout != 30*time.Second {
 		t.Fatalf("got %v %v", c.ImportInterval, c.UpstreamTimeout)
+	}
+}
+
+func full() Config {
+	return Config{TLSCert: "c", TLSKey: "k", TLSCA: "ca", ClientCert: "cc", ClientKey: "ck"}
+}
+
+func TestValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string // substring; empty means valid
+	}{
+		{"complete mTLS", func(c *Config) {}, ""},
+		{"no TLS at all", func(c *Config) { *c = Config{} }, "SIC_TLS_CERT"},
+		{"TLS without a CA would not authenticate clients", func(c *Config) { c.TLSCA = "" }, "SIC_TLS_CA is not set"},
+		{"cert without key", func(c *Config) { c.TLSKey = "" }, "must be set together"},
+		{"key without cert", func(c *Config) { c.TLSCert = "" }, "must be set together"},
+		{"no client certificate for peer calls", func(c *Config) { c.ClientCert, c.ClientKey = "", "" }, "SIC_TLS_CLIENT_CERT, SIC_TLS_CLIENT_KEY are not set"},
+		{"explicitly insecure", func(c *Config) { *c = Config{Insecure: true} }, ""},
+	}
+	for _, tc := range cases {
+		c := full()
+		tc.mutate(&c)
+		err := c.Validate()
+		switch {
+		case tc.wantErr == "" && err != nil:
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+		case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+			t.Errorf("%s: error %v, want one containing %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestClientCertDefaultsToServerCert(t *testing.T) {
+	t.Setenv("SIC_TLS_CERT", "/tls/tls.crt")
+	t.Setenv("SIC_TLS_KEY", "/tls/tls.key")
+	c := FromEnv()
+	if c.ClientCert != "/tls/tls.crt" || c.ClientKey != "/tls/tls.key" {
+		t.Fatalf("client cert = %q %q", c.ClientCert, c.ClientKey)
+	}
+	t.Setenv("SIC_TLS_CLIENT_CERT", "/other.crt")
+	t.Setenv("SIC_TLS_CLIENT_KEY", "/other.key")
+	if c := FromEnv(); c.ClientCert != "/other.crt" || c.ClientKey != "/other.key" {
+		t.Fatalf("explicit client cert ignored: %q %q", c.ClientCert, c.ClientKey)
+	}
+}
+
+func TestPeerAndDiskSettings(t *testing.T) {
+	c := FromEnv()
+	if c.PeerTimeout != 5*time.Second || c.PeerBackoff != 30*time.Second || c.MinFreeBytes != 1<<30 {
+		t.Fatalf("defaults: %v %v %d", c.PeerTimeout, c.PeerBackoff, c.MinFreeBytes)
+	}
+	t.Setenv("SIC_PEER_TIMEOUT", "2s")
+	t.Setenv("SIC_PEER_BACKOFF", "0s")
+	t.Setenv("SIC_MIN_FREE_BYTES", "0")
+	c = FromEnv()
+	if c.PeerTimeout != 2*time.Second || c.PeerBackoff != 0 || c.MinFreeBytes != 0 {
+		t.Fatalf("overrides: %v %v %d", c.PeerTimeout, c.PeerBackoff, c.MinFreeBytes)
+	}
+	t.Setenv("SIC_PEER_TIMEOUT", "0s")
+	t.Setenv("SIC_MIN_FREE_BYTES", "-1")
+	c = FromEnv()
+	if c.PeerTimeout != 5*time.Second || c.MinFreeBytes != 1<<30 {
+		t.Fatalf("invalid values must fall back to defaults: %v %d", c.PeerTimeout, c.MinFreeBytes)
 	}
 }

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -9,12 +11,21 @@ import (
 
 type Config struct {
 	Listen, CacheDir string
+	// Insecure turns off TLS and client authentication altogether: plain HTTP,
+	// open to anyone who can reach the port. For development only.
+	Insecure bool
 	// AdminListen, when set, serves /healthz and /metrics over plain HTTP on a
 	// separate address. The main listener may require client certificates,
 	// which kubelet probes cannot present.
 	AdminListen string
 	Peers       []string
 	PeerPort    int
+	// PeerTimeout is how long a peer may take to accept a connection and start
+	// answering before it counts as failed. PeerBackoff is how long a failed
+	// peer is then left alone.
+	PeerTimeout, PeerBackoff time.Duration
+	// MinFreeBytes is the free disk space that must remain after a download.
+	MinFreeBytes int64
 
 	UpstreamTimeout time.Duration
 	UpstreamEnabled bool
@@ -68,8 +79,12 @@ func FromEnv() Config {
 	c := Config{
 		Listen:              env("SIC_LISTEN", ":5000"),
 		CacheDir:            env("SIC_CACHE_DIR", "/var/lib/steady-image-cache"),
+		Insecure:            boolenv("SIC_INSECURE", false),
 		AdminListen:         os.Getenv("SIC_ADMIN_LISTEN"),
 		PeerPort:            5000,
+		PeerTimeout:         5 * time.Second,
+		PeerBackoff:         30 * time.Second,
+		MinFreeBytes:        1 << 30,
 		UpstreamTimeout:     30 * time.Second,
 		UpstreamEnabled:     boolenv("SIC_UPSTREAM_ENABLED", false),
 		UpstreamRegistries:  list(os.Getenv("SIC_UPSTREAM_REGISTRIES")),
@@ -81,8 +96,9 @@ func FromEnv() Config {
 		TLSCert:             os.Getenv("SIC_TLS_CERT"),
 		TLSKey:              os.Getenv("SIC_TLS_KEY"),
 		TLSCA:               os.Getenv("SIC_TLS_CA"),
-		ClientCert:          os.Getenv("SIC_TLS_CLIENT_CERT"),
-		ClientKey:           os.Getenv("SIC_TLS_CLIENT_KEY"),
+		// Nodes normally use one certificate both to serve and to call peers.
+		ClientCert:          env("SIC_TLS_CLIENT_CERT", os.Getenv("SIC_TLS_CERT")),
+		ClientKey:           env("SIC_TLS_CLIENT_KEY", os.Getenv("SIC_TLS_KEY")),
 		TLSServerName:       env("SIC_TLS_SERVER_NAME", "steady-image-cache"),
 		ContainerdAddress:   env("SIC_CONTAINERD_ADDRESS", "/run/containerd/containerd.sock"),
 		ContainerdNamespace: env("SIC_CONTAINERD_NAMESPACE", "k8s.io"),
@@ -100,6 +116,21 @@ func FromEnv() Config {
 			c.UpstreamTimeout = d
 		}
 	}
+	if v := os.Getenv("SIC_PEER_TIMEOUT"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil && d > 0 {
+			c.PeerTimeout = d
+		}
+	}
+	if v := os.Getenv("SIC_PEER_BACKOFF"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil && d >= 0 {
+			c.PeerBackoff = d
+		}
+	}
+	if v := os.Getenv("SIC_MIN_FREE_BYTES"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
+			c.MinFreeBytes = n
+		}
+	}
 	if v := os.Getenv("SIC_IMPORT_INTERVAL"); v != "" {
 		// A non-positive interval would make time.NewTicker panic.
 		if d, e := time.ParseDuration(v); e == nil && d > 0 {
@@ -107,4 +138,42 @@ func FromEnv() Config {
 		}
 	}
 	return c
+}
+
+// Validate rejects configurations that would leave the registry open or unable
+// to talk to its peers. Without it, a missing SIC_TLS_CA quietly turns "mutual
+// TLS" into TLS that accepts any client, and a missing certificate into plain
+// HTTP on every interface.
+func (c Config) Validate() error {
+	if c.Insecure {
+		return nil
+	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return errors.New("SIC_TLS_CERT and SIC_TLS_KEY must be set together")
+	}
+	var missing []string
+	for _, v := range []struct{ name, val string }{
+		{"SIC_TLS_CERT", c.TLSCert}, {"SIC_TLS_KEY", c.TLSKey}, {"SIC_TLS_CA", c.TLSCA},
+		{"SIC_TLS_CLIENT_CERT", c.ClientCert}, {"SIC_TLS_CLIENT_KEY", c.ClientKey},
+	} {
+		if v.val == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("mutual TLS is required but %s not set; set the missing settings, or set SIC_INSECURE=true to run without any authentication (development only)",
+			plural(missing))
+	}
+	return nil
+}
+
+func plural(names []string) string {
+	out := names[0]
+	for _, n := range names[1:] {
+		out += ", " + n
+	}
+	if len(names) == 1 {
+		return out + " is"
+	}
+	return out + " are"
 }

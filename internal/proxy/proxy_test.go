@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,8 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil/tlstest"
 )
 
 func digestOf(b []byte) string {
@@ -279,26 +283,50 @@ func TestPeerCannotAnswerDigestManifestWithDifferentDigest(t *testing.T) {
 	}
 }
 
-func TestManifestDigest(t *testing.T) {
-	d := digestOf([]byte("m"))
-	other := digestOf([]byte("n"))
+func respWith(body, header string) *http.Response {
+	r := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	if header != "" {
+		r.Header.Set("Docker-Content-Digest", header)
+	}
+	return r
+}
+
+func TestReadManifest(t *testing.T) {
+	body := `{"schemaVersion":2}`
+	d := digestOf([]byte(body))
+	other := digestOf([]byte("other"))
 	cases := []struct {
-		header, ref string
-		want        string
-		ok          bool
+		name, ref, header string
+		ok                bool
 	}{
-		{"", d, d, true},
-		{d, d, d, true},
-		{other, d, "", false},
-		{d, "v1", d, true},
-		{"", "v1", "", false},
-		{"sha256:../x", "v1", "", false},
+		{"tag, header matches", "v1", d, true},
+		{"tag, no header (it is optional upstream)", "v1", "", true},
+		{"tag, header names other content", "v1", other, false},
+		{"tag, header with another algorithm is not checked", "v1", "sha512:abc", true},
+		{"digest ref matches", d, "", true},
+		{"digest ref, content differs", other, "", false},
+		{"digest ref, header lies", d, other, false},
 	}
 	for _, c := range cases {
-		got, ok := manifestDigest(c.header, c.ref)
-		if got != c.want || ok != c.ok {
-			t.Errorf("manifestDigest(%q,%q) = %q,%v want %q,%v", c.header, c.ref, got, ok, c.want, c.ok)
+		got, b, err := readManifest(respWith(body, c.header), c.ref)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v", c.name, err)
+			continue
 		}
+		if c.ok && (got != d || string(b) != body) {
+			t.Errorf("%s: digest %q body %q", c.name, got, b)
+		}
+	}
+}
+
+func TestReadManifestSizeCap(t *testing.T) {
+	atMax := strings.Repeat("x", maxManifestSize)
+	if _, _, err := readManifest(respWith(atMax, ""), "v1"); err != nil {
+		t.Fatalf("a manifest of exactly the maximum size must be accepted: %v", err)
+	}
+	over := strings.Repeat("x", maxManifestSize+1)
+	if _, _, err := readManifest(respWith(over, ""), "v1"); err == nil {
+		t.Fatal("an oversize manifest must be refused")
 	}
 }
 
@@ -355,6 +383,7 @@ func TestSlowButSteadyTransferSucceeds(t *testing.T) {
 	body := []byte(strings.Repeat("x", 10*1024))
 	d := digestOf(body)
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		fl := w.(http.Flusher)
 		chunk := len(body) / 10
 		for i := 0; i < 10; i++ {
@@ -379,6 +408,7 @@ func TestSlowButSteadyTransferSucceeds(t *testing.T) {
 func TestStalledTransferTimesOut(t *testing.T) {
 	d := digestOf([]byte("never completes"))
 	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100") // promises more than it sends
 		w.Write([]byte("start"))
 		w.(http.Flusher).Flush()
 		select {
@@ -459,3 +489,248 @@ func TestPeerOrderIsShuffled(t *testing.T) {
 		t.Fatal("every miss would hit the same first peer")
 	}
 }
+
+// A peer that does not say how long its answer is could stream data until the
+// disk is full, since the digest is only checked at the end.
+func TestPeerWithoutContentLengthIsRejected(t *testing.T) {
+	body := []byte("a perfectly good blob")
+	d := digestOf(body)
+	chunked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+		w.(http.Flusher).Flush() // sending headers early forces chunked encoding
+	}))
+	defer chunked.Close()
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{chunked.URL})
+	resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d, want 404", resp.StatusCode)
+	}
+	if a.m.VerifyErrors.Load() != 1 {
+		t.Fatalf("VerifyErrors = %d", a.m.VerifyErrors.Load())
+	}
+	if _, err := a.st.Stat(d); err == nil {
+		t.Fatal("content of unknown length must not be stored")
+	}
+}
+
+func TestOversizeManifestFromPeerIsRejected(t *testing.T) {
+	big := strings.Repeat("x", maxManifestSize+10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(big)))
+		io.WriteString(w, big)
+	}))
+	defer srv.Close()
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{srv.URL})
+	resp, _ := get(t, a.srv.URL+"/v2/lib/app/manifests/v1")
+	if resp.StatusCode != 404 || a.m.VerifyErrors.Load() != 1 {
+		t.Fatalf("status %d, VerifyErrors %d", resp.StatusCode, a.m.VerifyErrors.Load())
+	}
+}
+
+// Registries are allowed to omit Docker-Content-Digest, so the digest of a
+// manifest fetched by tag comes from its content.
+func TestManifestWithoutDigestHeaderIsAccepted(t *testing.T) {
+	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(doc) }))
+	defer srv.Close()
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{srv.URL})
+	resp, got := get(t, a.srv.URL+"/v2/lib/app/manifests/v1?ns=reg.example")
+	if resp.StatusCode != 200 || string(got) != string(doc) {
+		t.Fatalf("status %d body %q", resp.StatusCode, got)
+	}
+	if d, ok := a.st.Resolve("reg.example", "lib/app", "v1"); !ok || d != digestOf(doc) {
+		t.Fatalf("alias = %q %v", d, ok)
+	}
+}
+
+func TestPeerManifestHeaderMustMatchContent(t *testing.T) {
+	doc := []byte(`{"schemaVersion":2,"layers":[]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Content-Digest", digestOf([]byte("something else")))
+		w.Write(doc)
+	}))
+	defer srv.Close()
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{srv.URL})
+	resp, _ := get(t, a.srv.URL+"/v2/lib/app/manifests/v1")
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d, want 404", resp.StatusCode)
+	}
+	if _, ok := a.st.Resolve("", "lib/app", "v1"); ok {
+		t.Fatal("no alias may be created for refused content")
+	}
+}
+
+// Go would decompress a gzip-encoded response by itself, which changes the
+// bytes that are hashed. Layers are already compressed and must pass untouched.
+func TestPeerRequestsDoNotAskForCompression(t *testing.T) {
+	var enc atomic.Value
+	enc.Store("unset")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enc.Store(r.Header.Get("Accept-Encoding"))
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{srv.URL})
+	get(t, a.srv.URL+"/v2/lib/app/blobs/"+digestOf([]byte("x")))
+	if v := enc.Load().(string); v != "" {
+		t.Fatalf("Accept-Encoding = %q, want none", v)
+	}
+}
+
+func TestNoSpaceStopsTheFetchWithoutWriting(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("free disk space is only measured on Linux")
+	}
+	a, b := newNode(t, Options{}), newNode(t, Options{})
+	a.setPeers(b)
+	d := put(t, b, []byte("some layer"))
+	a.st.SetMinFree(1 << 60) // more than any disk has
+	resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d, want 404", resp.StatusCode)
+	}
+	if _, err := a.st.Stat(d); err == nil {
+		t.Fatal("blob stored despite the reserve")
+	}
+	if len(a.p.shuffledPeers()) != 1 {
+		t.Fatal("a full disk is not the peer's fault; it must not be skipped")
+	}
+}
+
+// A peer that never answers must cost one slow request, not one per miss.
+func TestHungPeerIsSkippedAfterFirstFailure(t *testing.T) {
+	release := make(chan struct{})
+	var hits atomic.Int32
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer hung.Close()
+	defer close(release)
+
+	a := newNode(t, Options{Timeout: 30 * time.Second, PeerTimeout: 200 * time.Millisecond, PeerBackoff: time.Minute})
+	good := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{hung.URL, good.srv.URL})
+
+	start := time.Now()
+	for i := 0; i < 6; i++ {
+		d := put(t, good, []byte(fmt.Sprintf("layer %d", i)))
+		resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+		if resp.StatusCode != 200 {
+			t.Fatalf("request %d: status %d", i, resp.StatusCode)
+		}
+	}
+	// The hung peer can be tried at most once (when it happened to come first).
+	if n := hits.Load(); n > 1 {
+		t.Fatalf("hung peer was asked %d times", n)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("six fetches took %v; a dead peer is stalling every miss", el)
+	}
+}
+
+func TestPeerErrorStatusBacksOffButNotFoundDoesNot(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", 503) }))
+	defer failing.Close()
+	missing := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	defer missing.Close()
+	a := newNode(t, Options{PeerBackoff: time.Minute})
+	a.fin.urls.Store(&[]string{failing.URL, missing.URL})
+	get(t, a.srv.URL+"/v2/lib/app/blobs/"+digestOf([]byte("x")))
+	got := a.p.shuffledPeers()
+	if len(got) != 1 || got[0] != missing.URL {
+		t.Fatalf("peers after one miss = %v; only the failing one should be skipped", got)
+	}
+}
+
+func TestBackoffExpires(t *testing.T) {
+	a := newNode(t, Options{PeerBackoff: 30 * time.Second})
+	a.fin.urls.Store(&[]string{"http://10.0.0.1:5000", "http://10.0.0.2:5000"})
+	clock := time.Now()
+	a.p.now = func() time.Time { return clock }
+
+	a.p.markDown("http://10.0.0.1:5000")
+	if got := a.p.shuffledPeers(); len(got) != 1 || got[0] != "http://10.0.0.2:5000" {
+		t.Fatalf("down peer still offered: %v", got)
+	}
+	clock = clock.Add(29 * time.Second)
+	if len(a.p.shuffledPeers()) != 1 {
+		t.Fatal("peer came back before its back-off passed")
+	}
+	clock = clock.Add(2 * time.Second)
+	if len(a.p.shuffledPeers()) != 2 {
+		t.Fatal("peer was not offered again after its back-off")
+	}
+}
+
+func TestNoBackoffWhenDisabled(t *testing.T) {
+	a := newNode(t, Options{PeerBackoff: 0})
+	a.fin.urls.Store(&[]string{"http://10.0.0.1:5000"})
+	a.p.markDown("http://10.0.0.1:5000")
+	if len(a.p.shuffledPeers()) != 1 {
+		t.Fatal("PeerBackoff=0 must disable skipping")
+	}
+}
+
+// Peers talk mutual TLS. After the certificates and the CA were rotated on disk,
+// a running node must go on reaching its peers without a restart.
+func TestPeerTrafficSurvivesCertificateRotation(t *testing.T) {
+	f := tlstest.NewFiles(t)
+	t0 := time.Now().Add(-time.Minute)
+	f.Write(t, tlstest.New(t, "one"), t0)
+	rl, err := tlsutil.New(f.Cert, f.Key, f.CA, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl.SetCheckInterval(0)
+
+	// Peer B serves over mutual TLS.
+	bst, _ := store.New(t.TempDir())
+	bp, _ := New(bst, &swapFinder{}, &metrics.Metrics{}, Options{})
+	bsrv := httptest.NewUnstartedServer(bp)
+	bsrv.TLS = rl.ServerConfig()
+	bsrv.StartTLS()
+	defer bsrv.Close()
+
+	// Node A reaches B with a client certificate.
+	ast, _ := store.New(t.TempDir())
+	ap, err := New(ast, &swapFinder{}, &metrics.Metrics{}, Options{TLS: rl, ServerName: tlstest.ServerName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls := []string{bsrv.URL}
+	ap.peers = fixed(urls)
+
+	fetch := func(body string) int {
+		d := digestOf([]byte(body))
+		if _, err := bst.PutVerified(d, strings.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		ap.ServeHTTP(rec, httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d, nil))
+		return rec.Code
+	}
+	if code := fetch("before rotation"); code != 200 {
+		t.Fatalf("before rotation: status %d", code)
+	}
+	// Rotate to a new CA and certificate, as a new issuer would.
+	f.Write(t, tlstest.New(t, "two"), t0.Add(time.Minute/2))
+	// Drop the kept-alive connection: in production it would end sooner or
+	// later, and the next one needs a new handshake with the new material.
+	bsrv.CloseClientConnections()
+	if code := fetch("after rotation"); code != 200 {
+		t.Fatalf("after rotation: status %d (the peer client kept the old certificates)", code)
+	}
+}
+
+type fixed []string
+
+func (f fixed) Candidates() []string { return append([]string(nil), f...) }

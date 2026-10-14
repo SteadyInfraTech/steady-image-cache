@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +15,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
 )
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
@@ -29,15 +28,33 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
-		log.Fatal("SIC_TLS_CERT and SIC_TLS_KEY must be set together")
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
 	}
-	useTLS := cfg.TLSCert != ""
+	useTLS := !cfg.Insecure
+	// One reloader serves the listener and, when the node uses the same
+	// certificate to call its peers, the peer client too.
+	var serverTLS, clientTLS *tlsutil.Reloader
+	if useTLS {
+		var err error
+		if serverTLS, err = tlsutil.New(cfg.TLSCert, cfg.TLSKey, cfg.TLSCA, log.Printf); err != nil {
+			log.Fatalf("tls: %v", err)
+		}
+		clientTLS = serverTLS
+		if cfg.ClientCert != cfg.TLSCert || cfg.ClientKey != cfg.TLSKey {
+			if clientTLS, err = tlsutil.New(cfg.ClientCert, cfg.ClientKey, cfg.TLSCA, log.Printf); err != nil {
+				log.Fatalf("tls client: %v", err)
+			}
+		}
+	} else {
+		log.Printf("WARNING: SIC_INSECURE=true: serving plain HTTP with no authentication; anyone who can reach %s can read the cache", cfg.Listen)
+	}
 
 	st, err := store.New(cfg.CacheDir)
 	if err != nil {
 		log.Fatal(err)
 	}
+	st.SetMinFree(cfg.MinFreeBytes)
 	m := &metrics.Metrics{}
 	var finders peer.Multi
 	if len(cfg.Peers) > 0 {
@@ -83,11 +100,11 @@ func main() {
 
 	h, err := proxy.New(st, finders, m, proxy.Options{
 		Timeout:            cfg.UpstreamTimeout,
+		PeerTimeout:        cfg.PeerTimeout,
+		PeerBackoff:        cfg.PeerBackoff,
 		Upstream:           cfg.UpstreamEnabled,
 		UpstreamRegistries: cfg.UpstreamRegistries,
-		CA:                 cfg.TLSCA,
-		Cert:               cfg.ClientCert,
-		Key:                cfg.ClientKey,
+		TLS:                clientTLS,
 		ServerName:         cfg.TLSServerName,
 	})
 	if err != nil {
@@ -121,23 +138,10 @@ func main() {
 	}
 
 	if useTLS {
-		tc := &tls.Config{MinVersion: tls.VersionTLS12}
-		if cfg.TLSCA != "" {
-			b, e := os.ReadFile(cfg.TLSCA)
-			if e != nil {
-				log.Fatal(e)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(b) {
-				log.Fatal("SIC_TLS_CA contains no valid certificates")
-			}
-			tc.ClientCAs = pool
-			tc.ClientAuth = tls.RequireAndVerifyClientCert
-		}
-		srv.TLSConfig = tc
+		srv.TLSConfig = serverTLS.ServerConfig()
 		go func() {
 			log.Printf("SIC HTTPS %s peers=%v", cfg.Listen, finders.Candidates())
-			if e := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); e != nil && e != http.ErrServerClosed {
+			if e := srv.ListenAndServeTLS("", ""); e != nil && e != http.ErrServerClosed {
 				log.Fatal(e)
 			}
 		}()

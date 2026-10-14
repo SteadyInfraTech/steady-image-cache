@@ -37,7 +37,9 @@ func (i *Importer) Import(ctx context.Context) error {
 			return nil
 		}
 		defer ra.Close()
-		n, err := i.Store.PutVerified(d, io.NewSectionReader(ra, 0, ra.Size()))
+		// The size is known, so it also bounds the copy and keeps the import from
+		// filling the disk (see Store.SetMinFree).
+		n, err := i.Store.PutVerifiedLimit(d, io.NewSectionReader(ra, 0, ra.Size()), ra.Size())
 		if err == nil {
 			i.Metrics.ImportedBlobs.Add(1)
 			i.Metrics.ImportedBytes.Add(uint64(n))
@@ -60,20 +62,32 @@ func (i *Importer) Import(ctx context.Context) error {
 	return nil
 }
 
+// splitImageRef splits an image name into registry, repository and tag. A name
+// may be name, name:tag, name@digest or name:tag@digest. A reference that is
+// only a digest is not worth an alias, since a digest resolves to itself, so
+// it is reported as not ok; with both tag and digest the tag is the alias.
 func splitImageRef(s string) (registry, repo, ref string, ok bool) {
 	slash := strings.IndexByte(s, '/')
 	if slash <= 0 {
 		return "", "", "", false
 	}
 	registry, rest := s[:slash], s[slash+1:]
+	hasDigest := false
 	if at := strings.LastIndex(rest, "@"); at > 0 {
-		return registry, rest[:at], rest[at+1:], true
+		rest, hasDigest = rest[:at], true
 	}
-	colon := strings.LastIndex(rest, ":")
-	if colon <= strings.LastIndex(rest, "/") {
-		return registry, rest, "latest", true
+	repo, tag := rest, ""
+	if colon := strings.LastIndex(rest, ":"); colon > strings.LastIndex(rest, "/") {
+		repo, tag = rest[:colon], rest[colon+1:]
 	}
-	return registry, rest[:colon], rest[colon+1:], true
+	switch {
+	case tag != "":
+		return registry, repo, tag, true
+	case hasDigest:
+		return "", "", "", false
+	default:
+		return registry, repo, "latest", true
+	}
 }
 
 func (i *Importer) String() string {

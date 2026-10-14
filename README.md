@@ -49,6 +49,17 @@ The containerd account/socket permissions must allow the SIC process to call the
 
 Requests that SIC sends to its peers carry an `X-SIC-Peer` header. A SIC that receives one answers from its own cache only and never forwards it to other peers or upstream, so two nodes that both miss cannot ask each other in a loop.
 
+A peer that does not accept a connection and start answering within `SIC_PEER_TIMEOUT` (default `5s`) is skipped for `SIC_PEER_BACKOFF` (default `30s`; `0` disables skipping), so a dead node slows one request instead of every miss. Peers discovered through Kubernetes must be Ready and not terminating.
+
+## Download limits
+
+A digest can only be checked once a download has finished, so SIC bounds what it will accept before then:
+
+* A blob from a peer or registry must declare its `Content-Length`; that length is the most SIC will write, and it must fit on the disk.
+* A manifest may be at most 4 MiB. Its digest is computed from its content; a `Docker-Content-Digest` header is only cross-checked, never required.
+* `SIC_MIN_FREE_BYTES` (default 1 GiB, `0` for none) is the free disk space that has to remain after a download. When it would not, the download is refused. This also applies to the containerd import.
+* Responses are never decompressed on the way in, so the stored bytes are exactly what the digest covers.
+
 ## Upstream fallback
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes), so the image needs a CA bundle in that case. The `scratch` base image has none.
@@ -71,6 +82,12 @@ The sample DaemonSet expects a `steady-image-cache-tls` Secret containing:
 
 Peer certificates should contain the DNS SAN configured by `SIC_TLS_SERVER_NAME` (default `steady-image-cache`). Peers are discovered by IP, but TLS verifies this stable server name.
 
+SIC refuses to start unless mutual TLS is fully configured: `SIC_TLS_CERT`, `SIC_TLS_KEY` and `SIC_TLS_CA` are all required (`SIC_TLS_CLIENT_CERT` and `SIC_TLS_CLIENT_KEY` default to the server certificate). Without them it would either serve plain HTTP on every interface or accept any client. For local development only, `SIC_INSECURE=true` turns TLS and authentication off completely and logs a warning.
+
+The certificate, key and CA files are re-checked every 10 seconds and reloaded when they change, for the listener and for connections to peers alike, so a rotated Secret takes effect without restarting the pod. If a new set is unusable (a half-finished rotation, say) SIC logs it and keeps the previous one. The Kubernetes service account token used for peer discovery is likewise read afresh for every request.
+
+A cache serves any client that presents a valid certificate. It does not check registry credentials, so a blob that was pulled with credentials can be read by anyone holding a client certificate and the blob's digest. Treat the client CA as the access boundary.
+
 ## Build
 
 ```bash
@@ -92,5 +109,7 @@ The build requires the containerd Go client dependency declared in `go.mod`.
 ## Production notes
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.
+
+Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node, and a blob that cannot be imported is skipped without a log line. There is no cache eviction.
 
 For a large cluster, the next scalability step would be peer indexing (Bloom filters or a digest advertisement protocol) so a miss does not probe peers sequentially. The current implementation intentionally keeps discovery simple and deterministic.
