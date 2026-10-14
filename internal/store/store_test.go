@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,5 +199,106 @@ func TestStartupRemovesPartialDownloads(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(blobs, keep)); err != nil {
 		t.Fatal("completed blobs must be kept")
+	}
+}
+
+func TestPutVerifiedLimitRejectsExcess(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	body := []byte("0123456789")
+	d := digestOf(body)
+
+	if _, err := s.PutVerifiedLimit(d, strings.NewReader(string(body)), int64(len(body))-1); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	if _, err := s.Stat(d); err == nil {
+		t.Fatal("over-long content must not be stored")
+	}
+	entries, _ := os.ReadDir(filepath.Join(root, "blobs", "sha256"))
+	if len(entries) != 0 {
+		t.Fatalf("temporary file left behind: %v", entries)
+	}
+	if _, err := s.PutVerifiedLimit(d, strings.NewReader(string(body)), int64(len(body))); err != nil {
+		t.Fatalf("content of exactly the limit must be accepted: %v", err)
+	}
+}
+
+type endless struct{ n int64 }
+
+func (e *endless) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	e.n += int64(len(p))
+	return len(p), nil
+}
+
+// An endless source must be cut off at the limit rather than read forever.
+func TestPutVerifiedLimitStopsAnEndlessStream(t *testing.T) {
+	s, _ := New(t.TempDir())
+	src := &endless{}
+	if _, err := s.PutVerifiedLimit(digestOf([]byte("x")), src, 1<<20); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+	if src.n > 2<<20 {
+		t.Fatalf("read %d bytes for a 1 MiB limit", src.n)
+	}
+}
+
+func TestZeroLimitAllowsOnlyEmptyContent(t *testing.T) {
+	s, _ := New(t.TempDir())
+	empty := digestOf(nil)
+	if _, err := s.PutVerifiedLimit(empty, strings.NewReader(""), 0); err != nil {
+		t.Fatalf("empty blob: %v", err)
+	}
+	if _, err := s.PutVerifiedLimit(digestOf([]byte("a")), strings.NewReader("a"), 0); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestPutVerifiedLimitChecksFreeSpace(t *testing.T) {
+	s, _ := New(t.TempDir())
+	body := []byte("0123456789")
+	d := digestOf(body)
+	free := uint64(100)
+	s.free = func(string) (uint64, bool) { return free, true }
+
+	// 10 bytes fit in 100 free bytes with a 50 byte reserve.
+	s.SetMinFree(50)
+	if _, err := s.PutVerifiedLimit(d, strings.NewReader(string(body)), 10); err != nil {
+		t.Fatal(err)
+	}
+
+	d2 := digestOf([]byte("another one"))
+	// 11 bytes + 95 byte reserve > 100 free.
+	s.SetMinFree(95)
+	if _, err := s.PutVerifiedLimit(d2, strings.NewReader("another one"), 11); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("err = %v, want ErrNoSpace", err)
+	}
+	if _, err := s.Stat(d2); err == nil {
+		t.Fatal("nothing may be stored when the disk is too full")
+	}
+	// Nothing was written, not even a partial file.
+	entries, _ := os.ReadDir(filepath.Join(s.root, "blobs", "sha256"))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".part-") {
+			t.Fatalf("partial file created before the space check: %s", e.Name())
+		}
+	}
+}
+
+func TestUnknownFreeSpaceDoesNotBlock(t *testing.T) {
+	s, _ := New(t.TempDir())
+	s.free = func(string) (uint64, bool) { return 0, false }
+	s.SetMinFree(1 << 40)
+	body := []byte("fine")
+	if _, err := s.PutVerifiedLimit(digestOf(body), strings.NewReader(string(body)), 4); err != nil {
+		t.Fatalf("a platform without free-space support must still work: %v", err)
+	}
+}
+
+func TestFreeBytesOnRealDisk(t *testing.T) {
+	if free, ok := freeBytes(t.TempDir()); ok && free == 0 {
+		t.Fatal("freeBytes reported a full disk for the temp dir")
 	}
 }

@@ -10,12 +10,47 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+)
+
+var (
+	// ErrTooLarge means the content was longer than the limit it was given.
+	ErrTooLarge = errors.New("content exceeds the size limit")
+	// ErrDigestMismatch means the content does not hash to the expected digest.
+	ErrDigestMismatch = errors.New("digest mismatch")
+	// ErrNoSpace means storing the content would leave less free disk space
+	// than the configured reserve.
+	ErrNoSpace = errors.New("not enough free disk space")
 )
 
 type Store struct {
 	root    string
 	mu      sync.RWMutex
 	aliases map[string]string
+
+	minFree atomic.Int64
+	free    func(path string) (uint64, bool) // replaced in tests
+}
+
+// SetMinFree sets how many bytes of free disk space must remain after a
+// download. Zero only requires that the download itself fits.
+func (s *Store) SetMinFree(n int64) { s.minFree.Store(n) }
+
+// checkSpace reports ErrNoSpace if need more bytes plus the reserve do not fit.
+// Where free space cannot be determined the check is skipped.
+func (s *Store) checkSpace(need int64) error {
+	free, ok := s.free(s.root)
+	if !ok {
+		return nil
+	}
+	reserve := s.minFree.Load()
+	if reserve < 0 {
+		reserve = 0
+	}
+	if free < uint64(need)+uint64(reserve) {
+		return ErrNoSpace
+	}
+	return nil
 }
 
 // ValidDigest reports whether d is a well-formed sha256 digest: "sha256:"
@@ -44,7 +79,7 @@ func New(root string) (*Store, error) {
 		return nil, err
 	}
 	removePartials(blobs)
-	s := &Store{root: root, aliases: map[string]string{}}
+	s := &Store{root: root, aliases: map[string]string{}, free: freeBytes}
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
 	switch {
@@ -98,8 +133,19 @@ func (s *Store) Stat(d string) (os.FileInfo, error) {
 }
 
 // PutVerified stores the content of r under digest d. The content only becomes
-// visible once it has been fully written, flushed and checked against d.
+// visible once it has been fully written, flushed and checked against d. It
+// places no limit on the size; use PutVerifiedLimit for untrusted sources.
 func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
+	return s.PutVerifiedLimit(d, r, -1)
+}
+
+// PutVerifiedLimit is PutVerified for content that may be hostile: the digest
+// can only be checked once everything has been written, so without a bound a
+// peer or registry could stream data until the disk is full. max is an upper
+// bound on the size (negative means none). A positive max also has to fit in
+// the free disk space, above the reserve set by SetMinFree, before any data is
+// written.
+func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
 	p, e := s.path(d)
 	if e != nil {
 		return 0, e
@@ -107,20 +153,33 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 	if st, e := os.Stat(p); e == nil {
 		return st.Size(), nil
 	}
+	if max > 0 {
+		if e := s.checkSpace(max); e != nil {
+			return 0, e
+		}
+	}
 	tmp, e := os.CreateTemp(filepath.Dir(p), ".part-")
 	if e != nil {
 		return 0, e
 	}
 	defer os.Remove(tmp.Name())
+	src := r
+	if max >= 0 {
+		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
+	}
 	h := sha256.New()
-	n, e := io.Copy(io.MultiWriter(tmp, h), r)
+	n, e := io.Copy(io.MultiWriter(tmp, h), src)
 	if e != nil {
 		tmp.Close()
 		return n, e
 	}
+	if max >= 0 && n > max {
+		tmp.Close()
+		return n, ErrTooLarge
+	}
 	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") {
 		tmp.Close()
-		return n, errors.New("digest mismatch")
+		return n, ErrDigestMismatch
 	}
 	if e = tmp.Sync(); e != nil {
 		tmp.Close()

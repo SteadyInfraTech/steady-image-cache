@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +41,13 @@ func (m Multi) Candidates() []string {
 	return out
 }
 
+// Paths of the service account files inside a pod. Variables so tests can point
+// them elsewhere.
+var (
+	tokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	caFile    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+)
+
 type Kubernetes struct {
 	namespace, selector, selfIP string
 	port                        int
@@ -46,44 +56,87 @@ type Kubernetes struct {
 	mu                          sync.RWMutex
 	peers                       []string
 }
+
 type podList struct {
 	Items []struct {
 		Metadata struct {
-			Name string `json:"name"`
+			Name              string  `json:"name"`
+			DeletionTimestamp *string `json:"deletionTimestamp"`
 		} `json:"metadata"`
 		Status struct {
-			HostIP string `json:"hostIP"`
-			Phase  string `json:"phase"`
+			HostIP     string `json:"hostIP"`
+			Phase      string `json:"phase"`
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
 		} `json:"status"`
 	} `json:"items"`
 }
 
 func NewKubernetes(namespace, selector, selfIP string, port int, scheme string) (*Kubernetes, error) {
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-	if err != nil {
+	// Read the token once so a missing service account fails at startup. It is
+	// read again for every request, because the kubelet rotates it.
+	if _, err := os.ReadFile(tokenFile); err != nil {
 		return nil, err
 	}
-	ca, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	ca, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, err
 	}
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(ca)
-	k := &Kubernetes{namespace: namespace, selector: selector, selfIP: selfIP, port: port, scheme: scheme, client: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}}}
-	k.client.Transport = &authTransport{token: strings.TrimSpace(string(token)), base: k.client.Transport}
+	base := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+	k := &Kubernetes{
+		namespace: namespace, selector: selector, selfIP: selfIP, port: port, scheme: scheme,
+		client: &http.Client{Timeout: 10 * time.Second, Transport: &authTransport{tokenFile: tokenFile, base: base}},
+	}
 	return k, nil
 }
 
+// authTransport adds the pod's current service account token to every request.
 type authTransport struct {
-	token string
-	base  http.RoundTripper
+	tokenFile string
+	base      http.RoundTripper
 }
 
 func (a *authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	token, err := os.ReadFile(a.tokenFile)
+	if err != nil {
+		return nil, err
+	}
 	r = r.Clone(r.Context())
-	r.Header.Set("Authorization", "Bearer "+a.token)
+	r.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	return a.base.RoundTrip(r)
 }
+
+// parsePeers turns a pod list into peer base URLs. It keeps only pods that are
+// running, Ready and not being deleted: a pod on a failed node can stay
+// "Running" for minutes, and every request sent to it waits for a timeout.
+func parsePeers(pl podList, selfIP, scheme string, port int) []string {
+	var peers []string
+	seen := map[string]bool{}
+	for _, p := range pl.Items {
+		ip := p.Status.HostIP
+		if ip == "" || ip == selfIP || p.Status.Phase != "Running" || p.Metadata.DeletionTimestamp != nil || seen[ip] {
+			continue
+		}
+		ready := false
+		for _, c := range p.Status.Conditions {
+			if c.Type == "Ready" && c.Status == "True" {
+				ready = true
+			}
+		}
+		if !ready {
+			continue
+		}
+		seen[ip] = true
+		peers = append(peers, scheme+"://"+net.JoinHostPort(ip, strconv.Itoa(port)))
+	}
+	sort.Strings(peers)
+	return peers
+}
+
 func (k *Kubernetes) Refresh(ctx context.Context) error {
 	host := os.Getenv("KUBERNETES_SERVICE_HOST")
 	port := os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS")
@@ -93,8 +146,12 @@ func (k *Kubernetes) Refresh(ctx context.Context) error {
 	if host == "" {
 		return fmt.Errorf("KUBERNETES_SERVICE_HOST is empty")
 	}
-	u := fmt.Sprintf("https://%s:%s/api/v1/namespaces/%s/pods?labelSelector=%s", host, port, k.namespace, strings.ReplaceAll(k.selector, "=", "%3D"))
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	u := fmt.Sprintf("https://%s/api/v1/namespaces/%s/pods?%s",
+		net.JoinHostPort(host, port), url.PathEscape(k.namespace), url.Values{"labelSelector": {k.selector}}.Encode())
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := k.client.Do(req)
 	if err != nil {
 		return err
@@ -108,27 +165,19 @@ func (k *Kubernetes) Refresh(ctx context.Context) error {
 	if err := json.NewDecoder(resp.Body).Decode(&pl); err != nil {
 		return err
 	}
-	var peers []string
-	seen := map[string]bool{}
-	for _, p := range pl.Items {
-		ip := p.Status.HostIP
-		if ip == "" || ip == k.selfIP || p.Status.Phase != "Running" || seen[ip] {
-			continue
-		}
-		seen[ip] = true
-		peers = append(peers, fmt.Sprintf("%s://%s:%d", k.scheme, ip, k.port))
-	}
-	sort.Strings(peers)
+	peers := parsePeers(pl, k.selfIP, k.scheme, k.port)
 	k.mu.Lock()
 	k.peers = peers
 	k.mu.Unlock()
 	return nil
 }
+
 func (k *Kubernetes) Candidates() []string {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	return append([]string(nil), k.peers...)
 }
+
 func (k *Kubernetes) Run(ctx context.Context, interval time.Duration, logf func(string, ...any)) {
 	for {
 		if err := k.Refresh(ctx); err != nil {
