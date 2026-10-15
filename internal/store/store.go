@@ -97,9 +97,9 @@ func local(err error) error {
 		return nil
 	}
 	if errors.Is(err, syscall.ENOSPC) {
-		return fmt.Errorf("%w: %v", ErrNoSpace, err)
+		return fmt.Errorf("%w: %w", ErrNoSpace, err)
 	}
-	return fmt.Errorf("%w: %v", ErrLocal, err)
+	return fmt.Errorf("%w: %w", ErrLocal, err)
 }
 
 // localWriter tags errors from writing to the cache, so that they can be told
@@ -351,7 +351,7 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 // bound on the size (negative means none). A positive max also has to fit in
 // the free disk space, above the reserve set by SetMinFree, before any data is
 // written.
-func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
+func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (written int64, retErr error) {
 	unlock := s.lockBlob(d)
 	defer unlock()
 	p, e := s.path(d)
@@ -391,7 +391,15 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	if e != nil {
 		return 0, local(e)
 	}
-	defer s.removeBlob(tmp.Name())
+	cleanup := true
+	defer func() {
+		if !cleanup {
+			return
+		}
+		if removeErr := s.removeBlob(tmp.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			retErr = errors.Join(retErr, local(removeErr))
+		}
+	}()
 	src := r
 	if max >= 0 {
 		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
@@ -403,20 +411,31 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	}
 	n, e := io.Copy(io.MultiWriter(dst, h), src)
 	if e != nil {
-		tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			e = errors.Join(e, local(closeErr))
+		}
 		return n, e
 	}
 	if max >= 0 && n > max {
-		tmp.Close()
-		return n, ErrTooLarge
+		e = ErrTooLarge
+		if closeErr := tmp.Close(); closeErr != nil {
+			e = errors.Join(e, local(closeErr))
+		}
+		return n, e
 	}
 	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") {
-		tmp.Close()
-		return n, ErrDigestMismatch
+		e = ErrDigestMismatch
+		if closeErr := tmp.Close(); closeErr != nil {
+			e = errors.Join(e, local(closeErr))
+		}
+		return n, e
 	}
 	if e = tmp.Sync(); e != nil {
-		tmp.Close()
-		return n, local(e)
+		e = local(e)
+		if closeErr := tmp.Close(); closeErr != nil {
+			e = errors.Join(e, local(closeErr))
+		}
+		return n, e
 	}
 	if e = tmp.Close(); e != nil {
 		return n, local(e)
@@ -424,6 +443,7 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	if e = s.renameBlob(tmp.Name(), p); e != nil {
 		return n, local(e)
 	}
+	cleanup = false
 	return n, nil
 }
 
