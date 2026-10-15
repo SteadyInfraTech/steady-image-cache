@@ -34,8 +34,9 @@ func digestOf(b []byte) string {
 // each other the way they do in a cluster.
 type node struct {
 	p   *Proxy
-	st  *store.Store
-	m   *metrics.Metrics
+	st   *store.Store
+	root string
+	m    *metrics.Metrics
 	fin *swapFinder
 	srv *httptest.Server
 }
@@ -44,12 +45,13 @@ type node struct {
 // nodes need each other's URLs.
 func newNode(t *testing.T, o Options) *node {
 	t.Helper()
-	st, err := store.New(t.TempDir())
+	root := t.TempDir()
+	st, err := store.New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := &metrics.Metrics{}
-	n := &node{st: st, m: m, fin: &swapFinder{}}
+	n := &node{st: st, m: m, fin: &swapFinder{}, root: root}
 	p, err := New(st, n.fin, m, o)
 	if err != nil {
 		t.Fatal(err)
@@ -1235,7 +1237,7 @@ func TestCorruptedLocalBlobRecoversFromPeer(t *testing.T) {
 
 	body := []byte("healthy layer bytes")
 	d := put(t, b, body)
-	corruptPath := filepath.Join(a.st.Root(), "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	corruptPath := filepath.Join(a.root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
 	if err := os.MkdirAll(filepath.Dir(corruptPath), 0755); err != nil {
 		t.Fatal(err)
 	}
