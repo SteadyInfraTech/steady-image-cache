@@ -22,6 +22,14 @@ type Importer struct {
 	Metrics            *metrics.Metrics
 }
 
+// contentWalker is the narrow portion of containerd's content store needed by
+// the importer. Keeping it narrow lets tests exercise the import orchestration
+// without a running containerd daemon.
+type contentWalker interface {
+	Walk(context.Context, content.WalkFunc, ...string) error
+	ReaderAt(context.Context, ocispec.Descriptor) (content.ReaderAt, error)
+}
+
 func (i *Importer) Import(ctx context.Context) error {
 	c, err := containerd.New(i.Address)
 	if err != nil {
@@ -29,8 +37,29 @@ func (i *Importer) Import(ctx context.Context) error {
 	}
 	defer c.Close()
 	ctx = namespaces.WithNamespace(ctx, i.Namespace)
-	cs := c.ContentStore()
-	if err := cs.Walk(ctx, func(info content.Info) error {
+	if err := i.importContent(ctx, c.ContentStore()); err != nil {
+		return err
+	}
+	imgs, err := c.ListImages(ctx)
+	if err != nil {
+		return err
+	}
+	for _, img := range imgs {
+		registry, repo, ref, ok := splitImageRef(img.Name())
+		if !ok {
+			continue
+		}
+		if err := i.Store.SetAlias(registry, repo, ref, img.Target().Digest.String()); err != nil {
+			return fmt.Errorf("persist alias for image %q: %w", img.Name(), err)
+		}
+	}
+	return nil
+}
+
+// importContent imports missing or corrupt content and leaves already-verified
+// cache entries untouched.
+func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
+	return cs.Walk(ctx, func(info content.Info) error {
 		d := info.Digest.String()
 		cached, err := cachedContentValid(i.Store, d)
 		if err != nil {
@@ -53,23 +82,7 @@ func (i *Importer) Import(ctx context.Context) error {
 		i.Metrics.ImportedBlobs.Add(1)
 		i.Metrics.ImportedBytes.Add(uint64(n))
 		return nil
-	}); err != nil {
-		return err
-	}
-	imgs, err := c.ListImages(ctx)
-	if err != nil {
-		return err
-	}
-	for _, img := range imgs {
-		registry, repo, ref, ok := splitImageRef(img.Name())
-		if !ok {
-			continue
-		}
-		if err := i.Store.SetAlias(registry, repo, ref, img.Target().Digest.String()); err != nil {
-			return fmt.Errorf("persist alias for image %q: %w", img.Name(), err)
-		}
-	}
-	return nil
+	})
 }
 
 // cachedContentValid distinguishes a valid cached blob from a missing or corrupt
