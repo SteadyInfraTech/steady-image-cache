@@ -59,14 +59,15 @@ type Store struct {
 }
 
 type blobWriteLock struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex // writers hold it exclusively, readers share it
 	refs int
 }
 
-// lockBlob serializes operations on one digest without blocking unrelated
-// layer downloads. Reference counting removes idle locks from the map.
-func (s *Store) lockBlob(d string) func() {
+// blobLock returns the lock for d and counts a reference to it. Reference
+// counting removes idle locks from the map.
+func (s *Store) blobLock(d string) *blobWriteLock {
 	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if s.writes == nil {
 		s.writes = make(map[string]*blobWriteLock)
 	}
@@ -76,18 +77,42 @@ func (s *Store) lockBlob(d string) func() {
 		s.writes[d] = l
 	}
 	l.refs++
-	s.writeMu.Unlock()
+	return l
+}
 
+func (s *Store) dropBlobLock(d string, l *blobWriteLock) {
+	s.writeMu.Lock()
+	l.refs--
+	if l.refs == 0 {
+		delete(s.writes, d)
+	}
+	s.writeMu.Unlock()
+}
+
+// lockBlob serializes operations on one digest without blocking unrelated
+// layer downloads.
+func (s *Store) lockBlob(d string) func() {
+	l := s.blobLock(d)
 	l.mu.Lock()
 	return func() {
 		l.mu.Unlock()
-		s.writeMu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(s.writes, d)
-		}
-		s.writeMu.Unlock()
+		s.dropBlobLock(d, l)
 	}
+}
+
+// tryRLockBlob takes the lock for reading, sharing it with other readers, but
+// gives up instead of waiting for a writer. A writer holds the lock for the
+// whole download, so a reader that waited would stall until it finished.
+func (s *Store) tryRLockBlob(d string) (func(), bool) {
+	l := s.blobLock(d)
+	if !l.mu.TryRLock() {
+		s.dropBlobLock(d, l)
+		return nil, false
+	}
+	return func() {
+		l.mu.RUnlock()
+		s.dropBlobLock(d, l)
+	}, true
 }
 
 // local tags an error as a local storage failure. A full disk is reported as
@@ -272,13 +297,21 @@ func (s *Store) path(d string) (string, error) {
 	return filepath.Join(s.root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:")), nil
 }
 
+// Open returns the stored blob d after checking it against its digest. While
+// the blob is being written Open does not wait for the write to finish: it
+// reports the blob as missing (os.ErrNotExist), since it is not available yet.
+// Waiting would hold up a peer asking for a layer this node is still
+// downloading until the peer's timeout expires, and get a healthy node skipped.
 func (s *Store) Open(d string) (*os.File, error) {
-	unlock := s.lockBlob(d)
-	defer unlock()
 	p, e := s.path(d)
 	if e != nil {
 		return nil, e
 	}
+	unlock, ok := s.tryRLockBlob(d)
+	if !ok {
+		return nil, fmt.Errorf("blob %s is still being written: %w", d, os.ErrNotExist)
+	}
+	defer unlock()
 	f, err := os.Open(p)
 	if err != nil {
 		return nil, err
