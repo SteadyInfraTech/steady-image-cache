@@ -2,8 +2,10 @@ package containerd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
@@ -30,7 +32,11 @@ func (i *Importer) Import(ctx context.Context) error {
 	cs := c.ContentStore()
 	if err := cs.Walk(ctx, func(info content.Info) error {
 		d := info.Digest.String()
-		if _, err := i.Store.Stat(d); err == nil {
+		cached, err := cachedContentValid(i.Store, d)
+		if err != nil {
+			return fmt.Errorf("verify cached containerd content %s: %w", d, err)
+		}
+		if cached {
 			return nil
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
@@ -64,6 +70,23 @@ func (i *Importer) Import(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// cachedContentValid distinguishes a valid cached blob from a missing or corrupt
+// one. Missing/corrupt blobs should be imported from containerd; other errors
+// indicate that validation itself failed and must stop the import.
+func cachedContentValid(s *store.Store, d string) (bool, error) {
+	f, err := s.Open(d)
+	if err == nil {
+		if closeErr := f.Close(); closeErr != nil {
+			return false, closeErr
+		}
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, store.ErrDigestMismatch) {
+		return false, nil
+	}
+	return false, err
 }
 
 // cacheContent stores a containerd reader and closes it immediately. Returning

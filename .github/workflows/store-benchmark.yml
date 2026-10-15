@@ -1,0 +1,27 @@
+name: Store read benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/read-integrity-capacity-reservations
+  pull_request:
+    paths:
+      - "internal/store/**"
+      - ".github/workflows/store-benchmark.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Benchmark verified and unverified reads
+        run: go test ./internal/store -run '^$' -bench '^BenchmarkOpenRead$' -benchmem -benchtime=1s

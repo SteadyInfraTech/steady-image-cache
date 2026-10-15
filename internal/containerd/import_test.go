@@ -6,11 +6,64 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	"github.com/containerd/containerd/content"
 )
+
+func TestCorruptedCachedContentIsMarkedForReimport(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("valid containerd source blob")
+	d := testDigest(original)
+	if _, err := s.PutVerified(d, bytes.NewReader(original)); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(path, []byte("corrupted containerd blob"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := cachedContentValid(s, d)
+	if err != nil {
+		t.Fatalf("cachedContentValid: %v", err)
+	}
+	if cached {
+		t.Fatal("corrupted cache entry must be marked for reimport")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted entry should be removed, stat error = %v", err)
+	}
+
+	// Simulate the importer's recovery step using the still-valid containerd
+	// source reader, then ensure subsequent validation accepts the restored blob.
+	if _, err := cacheContent(s, d, newTestReaderAt(original)); err != nil {
+		t.Fatalf("restore from source: %v", err)
+	}
+	cached, err = cachedContentValid(s, d)
+	if err != nil || !cached {
+		t.Fatalf("restored cache valid = %v, err = %v", cached, err)
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) || testDigest(got) != d {
+		t.Fatalf("restored bytes = %q, digest = %s; want original bytes and %s", got, testDigest(got), d)
+	}
+}
 
 func TestSplitImageRef(t *testing.T) {
 	d := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

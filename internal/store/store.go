@@ -38,6 +38,12 @@ type Store struct {
 
 	minFree atomic.Int64
 	free    func(path string) (uint64, bool) // replaced in tests
+
+	capacityMu sync.Mutex // guards reservations across distinct digest writes
+	reserved   int64
+
+	verifiedMu sync.Mutex // guards metadata for blobs whose digest was verified
+	verified   map[string]os.FileInfo
 }
 
 type blobWriteLock struct {
@@ -117,6 +123,72 @@ func (s *Store) checkSpace(need int64) error {
 	return nil
 }
 
+// capacityReservation tracks only the portion of a write that has not yet
+// been reflected in the filesystem's free-space measurement.
+type capacityReservation struct {
+	store     *Store
+	remaining int64
+}
+
+func (r *capacityReservation) consume(n int64) {
+	if n <= 0 {
+		return
+	}
+	r.store.capacityMu.Lock()
+	if n > r.remaining {
+		n = r.remaining
+	}
+	r.remaining -= n
+	r.store.reserved -= n
+	r.store.capacityMu.Unlock()
+}
+
+func (r *capacityReservation) release() {
+	r.store.capacityMu.Lock()
+	r.store.reserved -= r.remaining
+	r.remaining = 0
+	r.store.capacityMu.Unlock()
+}
+
+// reservingWriter reduces the outstanding reservation as bytes are actually
+// written. This avoids double-counting bytes already reflected in free space.
+type reservingWriter struct {
+	w           io.Writer
+	reservation *capacityReservation
+}
+
+func (w reservingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if n > 0 {
+		w.reservation.consume(int64(n))
+	}
+	return n, err
+}
+
+// reserveSpace checks the configured free-space reserve and reserves capacity
+// for an in-flight write. Outstanding reservations cover only bytes not yet
+// written, because written bytes are already reflected in the filesystem's
+// free-space measurement.
+func (s *Store) reserveSpace(need int64) (*capacityReservation, error) {
+	s.capacityMu.Lock()
+	free, ok := s.free(s.root)
+	reserve := s.minFree.Load()
+	if reserve < 0 {
+		reserve = 0
+	}
+	if ok {
+		required := uint64(need) + uint64(reserve) + uint64(s.reserved)
+		if free < required {
+			s.capacityMu.Unlock()
+			return nil, ErrNoSpace
+		}
+	}
+	s.reserved += need
+	r := &capacityReservation{store: s, remaining: need}
+	s.capacityMu.Unlock()
+	return r, nil
+}
+
 // ValidDigest reports whether d is a well-formed sha256 digest: "sha256:"
 // followed by exactly 64 lowercase hex characters. Digests end up in file
 // paths, so everything that reaches the store must pass this check.
@@ -143,7 +215,7 @@ func New(root string) (*Store, error) {
 		return nil, err
 	}
 	removePartials(blobs)
-	s := &Store{root: root, aliases: map[string]string{}, free: freeBytes}
+	s := &Store{root: root, aliases: map[string]string{}, free: freeBytes, verified: map[string]os.FileInfo{}}
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
 	switch {
@@ -181,11 +253,61 @@ func (s *Store) path(d string) (string, error) {
 }
 
 func (s *Store) Open(d string) (*os.File, error) {
+	unlock := s.lockBlob(d)
+	defer unlock()
 	p, e := s.path(d)
 	if e != nil {
 		return nil, e
 	}
-	return os.Open(p)
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	before, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
+	// A previously verified immutable blob can be trusted while its file
+	// identity and metadata remain unchanged. This avoids hashing every read.
+	s.verifiedMu.Lock()
+	verified := s.verified[d]
+	s.verifiedMu.Unlock()
+	if verified != nil && os.SameFile(verified, before) &&
+		verified.Size() == before.Size() && verified.ModTime().Equal(before.ModTime()) {
+		return f, nil
+	}
+
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	unchanged := os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
+	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") || !unchanged {
+		_ = f.Close()
+		s.verifiedMu.Lock()
+		delete(s.verified, d)
+		s.verifiedMu.Unlock()
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, local(err)
+		}
+		return nil, ErrDigestMismatch
+	}
+	s.verifiedMu.Lock()
+	s.verified[d] = after
+	s.verifiedMu.Unlock()
+	return f, nil
 }
 
 func (s *Store) Stat(d string) (os.FileInfo, error) {
@@ -236,10 +358,14 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return 0, local(e)
 	}
+	var reservation *capacityReservation
 	if max > 0 {
-		if e := s.checkSpace(max); e != nil {
-			return 0, e
+		var err error
+		reservation, err = s.reserveSpace(max)
+		if err != nil {
+			return 0, err
 		}
+		defer reservation.release()
 	}
 	tmp, e := os.CreateTemp(filepath.Dir(p), ".part-")
 	if e != nil {
@@ -251,7 +377,11 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
 	}
 	h := sha256.New()
-	n, e := io.Copy(io.MultiWriter(localWriter{tmp}, h), src)
+	var dst io.Writer = localWriter{tmp}
+	if reservation != nil {
+		dst = reservingWriter{w: dst, reservation: reservation}
+	}
+	n, e := io.Copy(io.MultiWriter(dst, h), src)
 	if e != nil {
 		tmp.Close()
 		return n, e

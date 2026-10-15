@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func digestOf(b []byte) string {
@@ -366,6 +368,91 @@ func TestMinFreeIsReadable(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsAndRemovesCorruptedBlob(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("verified cache data")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(p, []byte("tampered"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := s.Open(d); err == nil {
+		_ = f.Close()
+		t.Fatal("Open must not return corrupted content")
+	} else if !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Open error = %v, want ErrDigestMismatch", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted blob should be removed, stat error = %v", err)
+	}
+}
+
+type gatedReader struct {
+	started chan struct{}
+	release <-chan struct{}
+	reader  io.Reader
+}
+
+func (r *gatedReader) Read(p []byte) (int, error) {
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	<-r.release
+	return r.reader.Read(p)
+}
+
+func TestConcurrentDifferentDigestWritesReserveCapacity(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the reported free-space value fixed so this test specifically
+	// exercises reservation accounting rather than relying on filesystem timing.
+	s.free = func(string) (uint64, bool) { return 100, true }
+	s.SetMinFree(20)
+
+	firstBody := []byte("first blob")
+	firstDigest := digestOf(firstBody)
+	releaseFirst := make(chan struct{})
+	started := make(chan struct{}, 1)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := s.PutVerifiedLimit(firstDigest, &gatedReader{
+			started: started,
+			release: releaseFirst,
+			reader:  bytes.NewReader(firstBody),
+		}, 60)
+		firstDone <- err
+	}()
+
+	// The first write has reserved 60 bytes before its reader is entered.
+	<-started
+	secondBody := []byte("second blob")
+	_, err = s.PutVerifiedLimit(digestOf(secondBody), bytes.NewReader(secondBody), 21)
+	if !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("second concurrent write error = %v, want ErrNoSpace", err)
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+
+	// Once the first write is complete, its unused reservation is released.
+	thirdBody := []byte("third blob")
+	if _, err := s.PutVerifiedLimit(digestOf(thirdBody), bytes.NewReader(thirdBody), 80); err != nil {
+		t.Fatalf("write after reservation release: %v", err)
+	}
+}
+
 func TestPutVerifiedReplacesCorruptedExistingBlob(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
@@ -455,5 +542,107 @@ func TestSetAliasSaveFailureDoesNotPublishAlias(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".aliases-") {
 			t.Errorf("temporary alias file left behind: %s", entry.Name())
 		}
+	}
+}
+
+// BenchmarkOpenRead compares the normal cached read path (which verifies the
+// digest before returning the file) with opening and reading the same cache
+// file without verification. The difference approximates the extra I/O and
+// hashing cost paid by callers that consume the full blob.
+func BenchmarkOpenRead(b *testing.B) {
+	for _, size := range []int{64 << 10, 1 << 20, 8 << 20} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			root := b.TempDir()
+			s, err := New(root)
+			if err != nil {
+				b.Fatal(err)
+			}
+			body := bytes.Repeat([]byte("x"), size)
+			d := digestOf(body)
+			if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+				b.Fatal(err)
+			}
+			path, err := s.path(d)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(int64(size))
+
+			b.Run("verified", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					f, err := s.Open(d)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if _, err := io.Copy(io.Discard, f); err != nil {
+						_ = f.Close()
+						b.Fatal(err)
+					}
+					if err := f.Close(); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+
+			b.Run("open-and-read-only", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					f, err := os.Open(path)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if _, err := io.Copy(io.Discard, f); err != nil {
+						_ = f.Close()
+						b.Fatal(err)
+					}
+					if err := f.Close(); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
+	}
+}
+
+// A cached verification must be invalidated when the same file is modified
+// without changing its size or inode.
+func TestOpenRevalidatesBlobWhenMetadataChanges(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("verified cache data")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(p, []byte("tampered cache data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := s.Open(d); err == nil {
+		_ = f.Close()
+		t.Fatal("Open must re-hash a blob whose metadata changed")
+	} else if !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Open error = %v, want ErrDigestMismatch", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted blob should be removed, stat error = %v", err)
 	}
 }
