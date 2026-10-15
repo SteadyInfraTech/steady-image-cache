@@ -647,7 +647,6 @@ func TestOpenRevalidatesBlobWhenMetadataChanges(t *testing.T) {
 	}
 }
 
-
 func TestOpenRevalidatesAtomicallyReplacedBlobWithSameMetadata(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
