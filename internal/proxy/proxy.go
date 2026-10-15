@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -59,6 +60,9 @@ type Options struct {
 	// re-checked for changes. Nil means plain HTTP between peers.
 	TLS        *tlsutil.Reloader
 	ServerName string
+	// Logf receives warnings about refused or failed transfers, at most one
+	// per kind and peer per minute. Nil discards them.
+	Logf func(string, ...any)
 }
 
 type Proxy struct {
@@ -69,7 +73,7 @@ type Proxy struct {
 	upstream       bool
 	registries     map[string]bool
 	idle           time.Duration
-	flights        flight.Group
+	flights        flight.Group[fetchResult]
 
 	peerTimeout, backoff time.Duration
 	tls                  *tlsutil.Reloader
@@ -80,6 +84,11 @@ type Proxy struct {
 	dmu                  sync.Mutex // guards down
 	down                 map[string]time.Time
 	now                  func() time.Time
+
+	logf    func(string, ...any)
+	lmu     sync.Mutex // guards lastLog and skipped
+	lastLog map[string]time.Time
+	skipped map[string]int
 }
 
 func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, error) {
@@ -111,6 +120,9 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		serverName:     o.ServerName,
 		down:           map[string]time.Time{},
 		now:            time.Now,
+		logf:           o.Logf,
+		lastLog:        map[string]time.Time{},
+		skipped:        map[string]int{},
 	}
 	if o.TLS != nil {
 		snap := o.TLS.Current()
@@ -207,19 +219,13 @@ func ns(r *http.Request) string {
 
 func isPeer(r *http.Request) bool { return r.Header.Get(PeerHeader) != "" }
 
-// validRepo accepts slash-separated names and rejects anything that could
-// escape the /v2/<repo>/... path when it is forwarded.
-func validRepo(repo string) bool {
-	if repo == "" || len(repo) > 255 || strings.ContainsAny(repo, "\\?#%\x00") {
-		return false
-	}
-	for _, seg := range strings.Split(repo, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return false
-		}
-	}
-	return true
-}
+// repoRE is the repository name grammar of the OCI distribution spec, with
+// upper case letters also allowed because some registries do. Anything else,
+// notably control characters, spaces and '%', is refused before it is used to
+// build a URL for a peer.
+var repoRE = regexp.MustCompile(`^[a-zA-Z0-9]+(?:(?:[._]|__|-+)[a-zA-Z0-9]+)*(?:/[a-zA-Z0-9]+(?:(?:[._]|__|-+)[a-zA-Z0-9]+)*)*$`)
+
+func validRepo(repo string) bool { return len(repo) <= 255 && repoRE.MatchString(repo) }
 
 func validRef(ref string) bool {
 	if strings.HasPrefix(ref, "sha256:") {
@@ -301,6 +307,22 @@ func manifestType(f io.ReadSeeker) string {
 	}
 }
 
+// fetchResult is the outcome of getting content from peers or upstream. When
+// the failure is on this node (full disk, unwritable cache) status is the HTTP
+// status to give the client instead of "not found", and no other source is
+// worth trying.
+type fetchResult struct {
+	ok     bool
+	status int
+}
+
+var fetched = fetchResult{ok: true}
+
+// refuse answers a request that failed because of this node's cache.
+func refuse(w http.ResponseWriter, what string, status int) {
+	http.Error(w, "cannot cache "+what+": "+http.StatusText(status), status)
+}
+
 func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	if !validRepo(repo) || !store.ValidDigest(d) {
 		http.Error(w, "invalid blob reference", 400)
@@ -316,21 +338,27 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	in := newInfo(r)
 	path := "/v2/" + repo + "/blobs/" + d
-	ok := p.flights.Do("blob:"+d, func() bool {
+	res := p.flights.Do("blob:"+d, func() fetchResult {
 		if _, err := p.store.Stat(d); err == nil {
-			return true
+			return fetched
 		}
-		if p.fetchPeers(in, path, d) {
+		if r := p.fetchPeers(in, path, d); r.ok {
 			p.metrics.PeerHits.Add(1)
-			return true
+			return r
+		} else if r.status != 0 {
+			return r
 		}
-		if p.fetchUpstream(in, path, d) {
+		r := p.fetchUpstream(in, path, d)
+		if r.ok {
 			p.metrics.UpstreamHits.Add(1)
-			return true
 		}
-		return false
+		return r
 	})
-	if ok && p.serveDigest(w, r, d, nil) {
+	if res.ok && p.serveDigest(w, r, d, nil) {
+		return
+	}
+	if res.status != 0 {
+		refuse(w, "blob", res.status)
 		return
 	}
 	p.metrics.Misses.Add(1)
@@ -354,27 +382,33 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	in := newInfo(r)
 	byDigest := strings.HasPrefix(ref, "sha256:")
 	path := "/v2/" + repo + "/manifests/" + ref
-	ok := p.flights.Do("manifest:"+namespace+"/"+repo+"@"+ref, func() bool {
+	res := p.flights.Do("manifest:"+namespace+"/"+repo+"@"+ref, func() fetchResult {
 		if d, found := p.store.Resolve(namespace, repo, ref); found {
 			if _, err := p.store.Stat(d); err == nil {
-				return true
+				return fetched
 			}
 		}
-		d, found := p.fetchManifestPeers(in, path, ref)
-		if found {
+		d, r := p.fetchManifestPeers(in, path, ref)
+		if r.ok {
 			p.metrics.PeerHits.Add(1)
-		} else if d, found = p.fetchManifestUpstream(in, path, ref); found {
-			p.metrics.UpstreamHits.Add(1)
+		} else if r.status == 0 {
+			if d, r = p.fetchManifestUpstream(in, path, ref); r.ok {
+				p.metrics.UpstreamHits.Add(1)
+			}
 		}
-		if found && !byDigest {
+		if r.ok && !byDigest {
 			_ = p.store.SetAlias(namespace, repo, ref, d)
 		}
-		return found
+		return r
 	})
-	if ok {
+	if res.ok {
 		if d, found := p.store.Resolve(namespace, repo, ref); found && p.serveDigest(w, r, d, manifestType) {
 			return
 		}
+	}
+	if res.status != 0 {
+		refuse(w, "manifest", res.status)
+		return
 	}
 	p.metrics.Misses.Add(1)
 	http.Error(w, "manifest unavailable", 404)
@@ -388,14 +422,51 @@ func (p *Proxy) peerURL(base, path, namespace string) string {
 	return u + "?" + url.Values{"ns": {namespace}}.Encode()
 }
 
+// warn logs a warning, but not more than once a minute for the same key; the
+// messages that were held back are counted in the next one. A node that cannot
+// reach a peer, or has no disk space, would otherwise log on every request.
+func (p *Proxy) warn(key, format string, args ...any) {
+	if p.logf == nil {
+		return
+	}
+	now := p.now()
+	p.lmu.Lock()
+	if last, ok := p.lastLog[key]; ok && now.Sub(last) < time.Minute {
+		p.skipped[key]++
+		p.lmu.Unlock()
+		return
+	}
+	held := p.skipped[key]
+	delete(p.skipped, key)
+	p.lastLog[key] = now
+	p.lmu.Unlock()
+	msg := fmt.Sprintf(format, args...)
+	if held > 0 {
+		msg += fmt.Sprintf(" (%d similar messages suppressed)", held)
+	}
+	p.logf("%s", msg)
+}
+
 // markDown leaves a peer alone for the back-off period after it failed.
-func (p *Proxy) markDown(base string) {
+func (p *Proxy) markDown(base string, why error) {
 	if p.backoff <= 0 {
 		return
 	}
 	p.dmu.Lock()
 	p.down[base] = p.now().Add(p.backoff)
 	p.dmu.Unlock()
+	p.warn("down:"+base, "peer %s failed (%v); skipping it for %s", base, why, p.backoff)
+}
+
+// peerFailed records that a request to a peer could not be completed. A request
+// that could not even be built is not the peer's doing and does not count.
+func (p *Proxy) peerFailed(base string, e error) {
+	if errors.Is(e, errBuildRequest) {
+		p.warn("build:"+base, "cannot build a request for peer %q: %v", base, e)
+		return
+	}
+	p.metrics.PeerErrors.Add(1)
+	p.markDown(base, e)
 }
 
 // shuffledPeers returns the peers worth asking, in random order so misses are
@@ -452,7 +523,7 @@ func (p *Proxy) get(ctx context.Context, c *http.Client, u string, hdr map[strin
 	if err != nil {
 		t.Stop()
 		cancel()
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errBuildRequest, err)
 	}
 	for k, v := range hdr {
 		if v != "" {
@@ -470,8 +541,12 @@ func (p *Proxy) get(ctx context.Context, c *http.Client, u string, hdr map[strin
 	return resp, nil
 }
 
-// errBadContent marks content that was refused rather than lost in transit.
-var errBadContent = errors.New("refused content")
+// errBadContent marks content that was refused rather than lost in transit;
+// errBuildRequest a request that could not be built from what the client sent.
+var (
+	errBadContent   = errors.New("refused content")
+	errBuildRequest = errors.New("cannot build request")
+)
 
 // putBlob stores a response body as the blob d. The server must declare how
 // long the body is: that length is the bound on what gets written, and it has
@@ -479,45 +554,69 @@ var errBadContent = errors.New("refused content")
 // the disk is full, because the digest can only be checked at the end.
 func (p *Proxy) putBlob(d string, resp *http.Response) error {
 	if resp.ContentLength < 0 {
-		return errBadContent
+		return fmt.Errorf("%w: no Content-Length", errBadContent)
 	}
 	_, err := p.store.PutVerifiedLimit(d, resp.Body, resp.ContentLength)
 	if errors.Is(err, store.ErrTooLarge) {
-		return errBadContent
+		return fmt.Errorf("%w: longer than the declared %d bytes", errBadContent, resp.ContentLength)
 	}
 	return err
 }
 
-func (p *Proxy) fetchPeers(in info, path, d string) bool {
+// localFailure recognises an error that is this node's own problem, counts and
+// logs it, and returns what to tell the client. size is what was being stored.
+func (p *Proxy) localFailure(e error, d string, size int64) (fetchResult, bool) {
+	switch {
+	case errors.Is(e, store.ErrNoSpace):
+		p.metrics.DiskFull.Add(1)
+		p.warn("space", "not caching %s (%d bytes): free disk space would drop below SIC_MIN_FREE_BYTES=%d, or the disk is full",
+			d, size, p.store.MinFree())
+		return fetchResult{status: http.StatusInsufficientStorage}, true
+	case errors.Is(e, store.ErrLocal):
+		p.metrics.StoreErrors.Add(1)
+		p.warn("local", "cannot write to the cache directory: %v", e)
+		return fetchResult{status: http.StatusInternalServerError}, true
+	}
+	return fetchResult{}, false
+}
+
+// refused reports whether e means the content itself was unacceptable.
+func refused(e error) bool {
+	return errors.Is(e, errBadContent) || errors.Is(e, errBadManifest) || errors.Is(e, store.ErrDigestMismatch)
+}
+
+func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	for _, base := range p.shuffledPeers() {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
-			p.metrics.PeerErrors.Add(1)
-			p.markDown(base)
+			p.peerFailed(base, e)
 			continue
 		}
 		if resp.StatusCode != 200 {
 			resp.Body.Close()
 			if resp.StatusCode >= 500 {
-				p.markDown(base)
+				p.markDown(base, fmt.Errorf("answered %s", resp.Status))
 			}
 			continue
 		}
+		size := resp.ContentLength
 		e = p.putBlob(d, resp)
 		resp.Body.Close()
-		switch {
-		case e == nil:
-			return true
-		case errors.Is(e, store.ErrNoSpace):
-			return false // no other peer can help; the disk is the problem
-		case errors.Is(e, errBadContent) || errors.Is(e, store.ErrDigestMismatch):
-			p.metrics.VerifyErrors.Add(1)
-		default:
-			p.metrics.PeerErrors.Add(1)
+		if e == nil {
+			return fetched
 		}
-		p.markDown(base)
+		if r, ours := p.localFailure(e, d, size); ours {
+			return r // no other peer can help, and this one did nothing wrong
+		}
+		if refused(e) {
+			p.metrics.VerifyErrors.Add(1)
+			p.warn("verify:"+base, "refused blob %s from peer %s: %v", d, base, e)
+			p.markDown(base, e)
+		} else {
+			p.peerFailed(base, e)
+		}
 	}
-	return false
+	return fetchResult{}
 }
 
 // errBadManifest marks a manifest that was refused.
@@ -533,51 +632,61 @@ func readManifest(resp *http.Response, ref string) (string, []byte, error) {
 		return "", nil, err
 	}
 	if len(b) > maxManifestSize {
-		return "", nil, errBadManifest
+		return "", nil, fmt.Errorf("%w: larger than %d bytes", errBadManifest, maxManifestSize)
 	}
 	sum := sha256.Sum256(b)
 	d := "sha256:" + hex.EncodeToString(sum[:])
 	if strings.HasPrefix(ref, "sha256:") && d != ref {
-		return "", nil, errBadManifest
+		return "", nil, fmt.Errorf("%w: content hashes to %s, not the requested digest", errBadManifest, d)
 	}
 	if h := resp.Header.Get("Docker-Content-Digest"); strings.HasPrefix(h, "sha256:") && h != d {
-		return "", nil, errBadManifest
+		return "", nil, fmt.Errorf("%w: Docker-Content-Digest %s does not match the content (%s)", errBadManifest, h, d)
 	}
 	return d, b, nil
 }
 
+// storeManifest reads a manifest from resp and stores it.
+func (p *Proxy) storeManifest(resp *http.Response, ref string) (string, int64, error) {
+	d, b, e := readManifest(resp, ref)
+	if e != nil {
+		return "", int64(len(b)), e
+	}
+	_, e = p.store.PutVerified(d, bytes.NewReader(b))
+	return d, int64(len(b)), e
+}
+
 // fetchManifestPeers returns the digest of the manifest it stored.
-func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, bool) {
+func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
 	for _, base := range p.shuffledPeers() {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1", "Accept": in.accept})
 		if e != nil {
-			p.metrics.PeerErrors.Add(1)
-			p.markDown(base)
+			p.peerFailed(base, e)
 			continue
 		}
 		if resp.StatusCode != 200 {
 			resp.Body.Close()
 			if resp.StatusCode >= 500 {
-				p.markDown(base)
+				p.markDown(base, fmt.Errorf("answered %s", resp.Status))
 			}
 			continue
 		}
-		d, b, e := readManifest(resp, ref)
+		d, size, e := p.storeManifest(resp, ref)
 		resp.Body.Close()
 		if e == nil {
-			_, e = p.store.PutVerified(d, bytes.NewReader(b))
+			return d, fetched
 		}
-		switch {
-		case e == nil:
-			return d, true
-		case errors.Is(e, errBadManifest):
+		if r, ours := p.localFailure(e, d, size); ours {
+			return "", r
+		}
+		if refused(e) {
 			p.metrics.VerifyErrors.Add(1)
-		default:
-			p.metrics.PeerErrors.Add(1)
+			p.warn("verify:"+base, "refused manifest %s from peer %s: %v", ref, base, e)
+			p.markDown(base, e)
+		} else {
+			p.peerFailed(base, e)
 		}
-		p.markDown(base)
 	}
-	return "", false
+	return "", fetchResult{}
 }
 
 // upstreamHost returns the registry host to contact for a namespace, or false if
@@ -598,50 +707,84 @@ func (p *Proxy) upstreamHost(namespace string) (string, bool) {
 	return namespace, true
 }
 
-func (p *Proxy) fetchUpstream(in info, path, d string) bool {
+// upstreamFailed logs a failed request to an upstream registry.
+func (p *Proxy) upstreamFailed(host string, e error) {
+	if errors.Is(e, errBuildRequest) {
+		p.warn("build:"+host, "cannot build a request for upstream %q: %v", host, e)
+		return
+	}
+	p.warn("upstream:"+host, "upstream %s: %v", host, e)
+}
+
+// upstreamAnswered logs an upstream reply that is neither success nor "not
+// found". Most important is 401: the registry wants the client to authenticate
+// (Docker Hub and GHCR do even for public images), and SIC does not pass that
+// challenge on, so the client only ever sees "not found".
+func (p *Proxy) upstreamAnswered(host string, resp *http.Response) {
+	if resp.StatusCode == http.StatusNotFound {
+		return
+	}
+	hint := ""
+	if resp.StatusCode == http.StatusUnauthorized {
+		hint = "; SIC does not relay authentication challenges, so registries that require a token cannot be used for upstream fallback"
+	}
+	p.warn(fmt.Sprintf("upstream:%s:%d", host, resp.StatusCode), "upstream %s answered %s%s", host, resp.Status, hint)
+}
+
+func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 	host, ok := p.upstreamHost(in.ns)
 	if !ok {
-		return false
+		return fetchResult{}
 	}
 	resp, e := p.get(in.ctx, p.upstreamClient, "https://"+host+path, map[string]string{"Authorization": in.auth})
 	if e != nil {
-		return false
+		p.upstreamFailed(host, e)
+		return fetchResult{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return false
+		p.upstreamAnswered(host, resp)
+		return fetchResult{}
 	}
+	size := resp.ContentLength
 	if e = p.putBlob(d, resp); e != nil {
-		if errors.Is(e, errBadContent) || errors.Is(e, store.ErrDigestMismatch) {
-			p.metrics.VerifyErrors.Add(1)
+		if r, ours := p.localFailure(e, d, size); ours {
+			return r
 		}
-		return false
+		if refused(e) {
+			p.metrics.VerifyErrors.Add(1)
+			p.warn("verify:"+host, "refused blob %s from upstream %s: %v", d, host, e)
+		}
+		return fetchResult{}
 	}
-	return true
+	return fetched
 }
 
-func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, bool) {
+func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchResult) {
 	host, ok := p.upstreamHost(in.ns)
 	if !ok {
-		return "", false
+		return "", fetchResult{}
 	}
 	resp, e := p.get(in.ctx, p.upstreamClient, "https://"+host+path, map[string]string{"Authorization": in.auth, "Accept": in.accept})
 	if e != nil {
-		return "", false
+		p.upstreamFailed(host, e)
+		return "", fetchResult{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", false
+		p.upstreamAnswered(host, resp)
+		return "", fetchResult{}
 	}
-	d, b, e := readManifest(resp, ref)
-	if e == nil {
-		_, e = p.store.PutVerified(d, bytes.NewReader(b))
-	}
+	d, size, e := p.storeManifest(resp, ref)
 	if e != nil {
-		if errors.Is(e, errBadManifest) {
-			p.metrics.VerifyErrors.Add(1)
+		if r, ours := p.localFailure(e, d, size); ours {
+			return "", r
 		}
-		return "", false
+		if refused(e) {
+			p.metrics.VerifyErrors.Add(1)
+			p.warn("verify:"+host, "refused manifest %s from upstream %s: %v", ref, host, e)
+		}
+		return "", fetchResult{}
 	}
-	return d, true
+	return d, fetched
 }

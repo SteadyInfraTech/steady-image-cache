@@ -3,13 +3,17 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -582,23 +586,104 @@ func TestPeerRequestsDoNotAskForCompression(t *testing.T) {
 	}
 }
 
-func TestNoSpaceStopsTheFetchWithoutWriting(t *testing.T) {
+// A full disk is this node's problem: the client must hear "insufficient
+// storage", not "not found", the operator must see why, and the peer that
+// would have served the blob must not be blamed.
+func TestFullDiskIsReportedAs507(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("free disk space is only measured on Linux")
 	}
-	a, b := newNode(t, Options{}), newNode(t, Options{})
+	sink := &logSink{}
+	a, b := newNode(t, Options{Logf: sink.logf, PeerBackoff: time.Minute}), newNode(t, Options{})
 	a.setPeers(b)
 	d := put(t, b, []byte("some layer"))
 	a.st.SetMinFree(1 << 60) // more than any disk has
-	resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
-	if resp.StatusCode != 404 {
-		t.Fatalf("status %d, want 404", resp.StatusCode)
+	resp, body := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+	if resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("status %d, want 507", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Insufficient Storage") {
+		t.Fatalf("body %q", body)
 	}
 	if _, err := a.st.Stat(d); err == nil {
 		t.Fatal("blob stored despite the reserve")
 	}
+	if a.m.DiskFull.Load() != 1 || a.m.Misses.Load() != 0 || a.m.PeerErrors.Load() != 0 {
+		t.Fatalf("DiskFull=%d Misses=%d PeerErrors=%d", a.m.DiskFull.Load(), a.m.Misses.Load(), a.m.PeerErrors.Load())
+	}
+	if !strings.Contains(sink.all(), "SIC_MIN_FREE_BYTES") {
+		t.Fatalf("the operator was not told why; log: %q", sink.all())
+	}
 	if len(a.p.shuffledPeers()) != 1 {
 		t.Fatal("a full disk is not the peer's fault; it must not be skipped")
+	}
+}
+
+type logSink struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logSink) logf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+func (l *logSink) all() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
+// breakCache replaces the blob directory with a file, so that every write to
+// the cache fails. (File permissions would not do: tests may run as root.)
+func breakCache(t *testing.T, dir string) {
+	t.Helper()
+	blobs := filepath.Join(dir, "blobs", "sha256")
+	if err := os.RemoveAll(blobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blobs, []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnwritableCacheIs500AndNotThePeersFault(t *testing.T) {
+	good := newNode(t, Options{})
+	blob := put(t, good, []byte("a layer"))
+	doc := []byte(`{"schemaVersion":2,"layers":[]}`)
+	man := put(t, good, doc)
+
+	dir := t.TempDir()
+	st, err := store.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakCache(t, dir)
+	sink := &logSink{}
+	m := &metrics.Metrics{}
+	fin := &swapFinder{}
+	fin.urls.Store(&[]string{good.srv.URL})
+	p, err := New(st, fin, m, Options{Logf: sink.logf, PeerBackoff: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/v2/lib/app/blobs/" + blob, "/v2/lib/app/manifests/" + man} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 500 {
+			t.Errorf("%s: status %d, want 500", path, rec.Code)
+		}
+	}
+	if m.StoreErrors.Load() == 0 || m.PeerErrors.Load() != 0 || m.Misses.Load() != 0 {
+		t.Errorf("StoreErrors=%d PeerErrors=%d Misses=%d", m.StoreErrors.Load(), m.PeerErrors.Load(), m.Misses.Load())
+	}
+	if len(p.shuffledPeers()) != 1 {
+		t.Error("a peer was skipped for a failure of this node's own disk")
+	}
+	if !strings.Contains(sink.all(), "cannot write to the cache directory") {
+		t.Errorf("log: %q", sink.all())
 	}
 }
 
@@ -657,7 +742,7 @@ func TestBackoffExpires(t *testing.T) {
 	clock := time.Now()
 	a.p.now = func() time.Time { return clock }
 
-	a.p.markDown("http://10.0.0.1:5000")
+	a.p.markDown("http://10.0.0.1:5000", errors.New("boom"))
 	if got := a.p.shuffledPeers(); len(got) != 1 || got[0] != "http://10.0.0.2:5000" {
 		t.Fatalf("down peer still offered: %v", got)
 	}
@@ -674,7 +759,7 @@ func TestBackoffExpires(t *testing.T) {
 func TestNoBackoffWhenDisabled(t *testing.T) {
 	a := newNode(t, Options{PeerBackoff: 0})
 	a.fin.urls.Store(&[]string{"http://10.0.0.1:5000"})
-	a.p.markDown("http://10.0.0.1:5000")
+	a.p.markDown("http://10.0.0.1:5000", errors.New("boom"))
 	if len(a.p.shuffledPeers()) != 1 {
 		t.Fatal("PeerBackoff=0 must disable skipping")
 	}
@@ -734,3 +819,219 @@ func TestPeerTrafficSurvivesCertificateRotation(t *testing.T) {
 type fixed []string
 
 func (f fixed) Candidates() []string { return append([]string(nil), f...) }
+
+func TestValidRepo(t *testing.T) {
+	for _, ok := range []string{
+		"alpine", "library/alpine", "team/api", "a/b/c/d", "My_App.v2", "Lib/App", "a--b", "a__b", "a.b", "x1/y2",
+	} {
+		if !validRepo(ok) {
+			t.Errorf("validRepo(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "a b", "a\nb", "a\x7fb", "a\x00b", "a%b", "a?b", "a#b", "a\\b", "/a", "a/", "a//b", ".", "..", "a/../b", "a/./b",
+		"-a", "a-", "_a", "a_", "a..b", "a._b", "a___b", "é", strings.Repeat("a", 256),
+	} {
+		if validRepo(bad) {
+			t.Errorf("validRepo(%q) = true, want false", bad)
+		}
+	}
+}
+
+// One odd request used to take every peer out of rotation: building the peer
+// URL failed, and that was counted as the peer failing.
+func TestMalformedRequestsDoNotTakePeersOffline(t *testing.T) {
+	a, good := newNode(t, Options{PeerBackoff: time.Minute}), newNode(t, Options{})
+	a.setPeers(good)
+	d := digestOf([]byte("x"))
+	for _, repo := range []string{"a%0Ab", "a%7Fb", "a%20b", "a%00b", "a%09b", "a%2F..%2Fb", "a%3Fb"} {
+		rec := httptest.NewRecorder()
+		a.p.ServeHTTP(rec, httptest.NewRequest("GET", "/v2/"+repo+"/blobs/"+d, nil))
+		if rec.Code != 400 {
+			t.Errorf("%s: status %d, want 400", repo, rec.Code)
+		}
+	}
+	if len(a.p.shuffledPeers()) != 1 || a.m.PeerErrors.Load() != 0 {
+		t.Fatalf("peers offered: %d, PeerErrors: %d", len(a.p.shuffledPeers()), a.m.PeerErrors.Load())
+	}
+	// A legitimate mixed-case name still goes through to the peers.
+	rec := httptest.NewRecorder()
+	a.p.ServeHTTP(rec, httptest.NewRequest("GET", "/v2/Team/My_App.v2/blobs/"+d, nil))
+	if rec.Code != 404 {
+		t.Fatalf("mixed-case repository: status %d, want 404 (not found, not invalid)", rec.Code)
+	}
+}
+
+// A peer address that cannot be turned into a request is a configuration
+// problem: it is logged, and it does not count as the peer failing.
+func TestUnbuildablePeerURLIsLoggedNotBlamedOnThePeer(t *testing.T) {
+	sink := &logSink{}
+	a := newNode(t, Options{PeerBackoff: time.Minute, Logf: sink.logf})
+	a.fin.urls.Store(&[]string{"http://bad host:5000"})
+	resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+digestOf([]byte("x")))
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if len(a.p.shuffledPeers()) != 1 || a.m.PeerErrors.Load() != 0 {
+		t.Fatalf("peers offered: %d, PeerErrors: %d", len(a.p.shuffledPeers()), a.m.PeerErrors.Load())
+	}
+	if !strings.Contains(sink.all(), "cannot build a request") {
+		t.Fatalf("log: %q", sink.all())
+	}
+}
+
+func TestWarningsAreRateLimited(t *testing.T) {
+	sink := &logSink{}
+	a := newNode(t, Options{Logf: sink.logf})
+	clock := time.Now()
+	a.p.now = func() time.Time { return clock }
+
+	a.p.warn("k", "problem %d", 1)
+	a.p.warn("k", "problem %d", 2)
+	a.p.warn("k", "problem %d", 3)
+	a.p.warn("other", "different problem")
+	if n := len(sink.lines); n != 2 {
+		t.Fatalf("%d lines, want 2 (one per key): %q", n, sink.all())
+	}
+	clock = clock.Add(59 * time.Second)
+	a.p.warn("k", "problem %d", 4)
+	if len(sink.lines) != 2 {
+		t.Fatal("logged again before a minute had passed")
+	}
+	clock = clock.Add(2 * time.Second)
+	a.p.warn("k", "problem %d", 5)
+	last := sink.lines[len(sink.lines)-1]
+	if !strings.Contains(last, "problem 5") || !strings.Contains(last, "3 similar messages suppressed") {
+		t.Fatalf("last line %q", last)
+	}
+}
+
+func TestWarnWithoutALoggerIsHarmless(t *testing.T) {
+	a := newNode(t, Options{})
+	a.p.warn("k", "nobody is listening")
+}
+
+// Refused content is logged with the peer's address, so that a misbehaving
+// node can be found.
+func TestRefusedContentNamesThePeerInTheLog(t *testing.T) {
+	sink := &logSink{}
+	lying := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("not it")) }))
+	defer lying.Close()
+	a := newNode(t, Options{Logf: sink.logf})
+	a.fin.urls.Store(&[]string{lying.URL})
+	get(t, a.srv.URL+"/v2/lib/app/blobs/"+digestOf([]byte("the real one")))
+	log := sink.all()
+	if !strings.Contains(log, lying.URL) || !strings.Contains(log, "digest mismatch") {
+		t.Fatalf("log: %q", log)
+	}
+}
+
+// upstreamProxy builds a proxy that may contact the given TLS test server as a
+// registry, trusting its certificate.
+func upstreamProxy(t *testing.T, srv *httptest.Server, sink *logSink) (*Proxy, *metrics.Metrics, string) {
+	t.Helper()
+	host := srv.Listener.Addr().String() // 127.0.0.1:port, a valid registry name
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &metrics.Metrics{}
+	p, err := New(st, &swapFinder{}, m, Options{Upstream: true, UpstreamRegistries: []string{host}, Logf: sink.logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = srv.Client()
+	return p, m, host
+}
+
+func serve(p *Proxy, path string, hdr ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", path, nil)
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	return rec
+}
+
+// The upstream path had no end-to-end test: this one covers a blob and a
+// manifest fetched from a registry, and that the caller's credentials are
+// passed on.
+func TestUpstreamFetchEndToEnd(t *testing.T) {
+	blob := []byte("a layer from the registry")
+	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
+	var auth atomic.Value
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/blobs/"+digestOf(blob)):
+			w.Write(blob)
+		case strings.HasSuffix(r.URL.Path, "/manifests/v1"):
+			w.Header().Set("Docker-Content-Digest", digestOf(doc))
+			w.Write(doc)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	sink := &logSink{}
+	p, m, host := upstreamProxy(t, srv, sink)
+
+	rec := serve(p, "/v2/lib/app/blobs/"+digestOf(blob)+"?ns="+host, "Authorization", "Bearer s3cret")
+	if rec.Code != 200 || rec.Body.String() != string(blob) {
+		t.Fatalf("blob: status %d body %q", rec.Code, rec.Body.String())
+	}
+	if auth.Load() != "Bearer s3cret" {
+		t.Fatalf("upstream saw Authorization %q", auth.Load())
+	}
+	rec = serve(p, "/v2/lib/app/manifests/v1?ns="+host)
+	if rec.Code != 200 || rec.Body.String() != string(doc) {
+		t.Fatalf("manifest: status %d body %q", rec.Code, rec.Body.String())
+	}
+	if m.UpstreamHits.Load() != 2 {
+		t.Fatalf("UpstreamHits = %d", m.UpstreamHits.Load())
+	}
+	if sink.all() != "" {
+		t.Fatalf("a successful fetch must not log: %q", sink.all())
+	}
+	// A second request is served from the cache.
+	if rec = serve(p, "/v2/lib/app/blobs/"+digestOf(blob)+"?ns="+host); rec.Code != 200 || m.LocalHits.Load() != 1 {
+		t.Fatalf("not cached: status %d LocalHits %d", rec.Code, m.LocalHits.Load())
+	}
+}
+
+// A registry that asks the client to authenticate is told apart from one that
+// simply does not have the content: the former is logged, the latter is not.
+func TestUpstreamAuthChallengeIsLoggedNotSilent(t *testing.T) {
+	status := atomic.Int32{}
+	status.Store(401)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status.Load() == 401 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="https://auth.example/token"`)
+		}
+		http.Error(w, "no", int(status.Load()))
+	}))
+	defer srv.Close()
+	sink := &logSink{}
+	p, _, host := upstreamProxy(t, srv, sink)
+
+	for _, path := range []string{"/v2/lib/app/blobs/" + digestOf([]byte("x")), "/v2/lib/app/manifests/v1"} {
+		if rec := serve(p, path+"?ns="+host); rec.Code != 404 {
+			t.Errorf("%s: status %d", path, rec.Code)
+		}
+	}
+	log := sink.all()
+	if !strings.Contains(log, "401") || !strings.Contains(log, "authentication challenges") {
+		t.Fatalf("a 401 from upstream went unlogged: %q", log)
+	}
+
+	status.Store(404)
+	sink2 := &logSink{}
+	p2, _, host2 := upstreamProxy(t, srv, sink2)
+	if rec := serve(p2, "/v2/lib/app/blobs/"+digestOf([]byte("y"))+"?ns="+host2); rec.Code != 404 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if sink2.all() != "" {
+		t.Fatalf("an ordinary not-found must not be logged: %q", sink2.all())
+	}
+}

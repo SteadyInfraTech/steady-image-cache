@@ -64,6 +64,18 @@ A digest can only be checked once a download has finished, so SIC bounds what it
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes), so the image needs a CA bundle in that case. The `scratch` base image has none.
 
+SIC does not relay an authentication challenge to the client. A registry that answers `401` (most private registries, and Docker Hub for anonymous pulls) therefore cannot be used for fallback; the request ends as a 404 and the `401` is logged. Use it for registries that serve images without a token.
+
+## Failures
+
+When SIC cannot cache something it says why, instead of answering 404 as if the image did not exist:
+
+* `507` when the free disk space would drop below `SIC_MIN_FREE_BYTES` (or the disk is full); counted in `sic_disk_full_total`.
+* `500` when the cache directory cannot be written; counted in `sic_store_errors_total`.
+* `400` for a repository name that is not valid per the OCI distribution spec. This is the caller's mistake and does not take any peer out of rotation.
+
+Both conditions, and non-404 answers from peers and upstream registries, are logged at most once per minute per cause, with a count of the lines held back.
+
 ## Health and metrics
 
 With mTLS enabled the main listener requires a client certificate on every path, including `/healthz`, which kubelet cannot present. Set `SIC_ADMIN_LISTEN` (the sample DaemonSet uses `127.0.0.1:5001`) to serve `/healthz` and `/metrics` over plain HTTP on that address as well.

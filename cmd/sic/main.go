@@ -106,6 +106,7 @@ func main() {
 		UpstreamRegistries: cfg.UpstreamRegistries,
 		TLS:                clientTLS,
 		ServerName:         cfg.TLSServerName,
+		Logf:               log.Printf,
 	})
 	if err != nil {
 		log.Fatal(err)
