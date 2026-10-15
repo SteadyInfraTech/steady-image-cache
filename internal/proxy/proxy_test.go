@@ -1035,3 +1035,114 @@ func TestUpstreamAuthChallengeIsLoggedNotSilent(t *testing.T) {
 		t.Fatalf("an ordinary not-found must not be logged: %q", sink2.all())
 	}
 }
+
+func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T) {
+	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
+	seen := make(chan string, 2)
+	release := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Accept")
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", digestOf(doc))
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+
+	p, _, host := upstreamProxy(t, srv, &logSink{})
+	proxySrv := httptest.NewServer(p)
+	defer proxySrv.Close()
+	url := proxySrv.URL + "/v2/lib/app/manifests/v1?ns=" + host
+	accepts := []string{
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(accepts))
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, accept := range accepts {
+		accept := accept
+		go func() {
+			<-start
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			req.Header.Set("Accept", accept)
+			resp, err := client.Do(req)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			results <- result{status: resp.StatusCode, body: string(body), err: err}
+		}()
+	}
+	close(start)
+
+	got := map[string]bool{}
+	for i := 0; i < len(accepts); i++ {
+		select {
+		case accept := <-seen:
+			got[accept] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("upstream did not receive both Accept variants; got %v", got)
+		}
+	}
+	for _, accept := range accepts {
+		if !got[accept] {
+			t.Errorf("upstream did not receive Accept %q; saw %v", accept, got)
+		}
+	}
+	close(release)
+	for range accepts {
+		res := <-results
+		if res.err != nil || res.status != http.StatusOK || res.body != string(doc) {
+			t.Errorf("manifest response = status %d, body %q, err %v", res.status, res.body, res.err)
+		}
+	}
+}
+
+func TestManifestAliasPersistenceFailureReturnsServerError(t *testing.T) {
+	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+	host := srv.Listener.Addr().String()
+	root := t.TempDir()
+	st, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force the atomic aliases.json rename to fail, without relying on
+	// permissions (which are ineffective when tests run as root).
+	if err := os.Mkdir(filepath.Join(root, "aliases.json"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{Upstream: true, UpstreamRegistries: []string{host}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = srv.Client()
+	req := httptest.NewRequest(http.MethodGet, "/v2/lib/app/manifests/v1?ns="+host, nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500; body %q", rec.Code, rec.Body.String())
+	}
+	if _, ok := st.Resolve(host, "lib/app", "v1"); ok {
+		t.Fatal("manifest alias became visible despite persistence failure")
+	}
+}

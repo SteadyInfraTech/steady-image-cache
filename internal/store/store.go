@@ -31,11 +31,45 @@ var (
 
 type Store struct {
 	root    string
+	writeMu sync.Mutex // guards the per-digest writer-lock map
+	writes  map[string]*blobWriteLock
 	mu      sync.RWMutex
 	aliases map[string]string
 
 	minFree atomic.Int64
 	free    func(path string) (uint64, bool) // replaced in tests
+}
+
+type blobWriteLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockBlob serializes operations on one digest without blocking unrelated
+// layer downloads. Reference counting removes idle locks from the map.
+func (s *Store) lockBlob(d string) func() {
+	s.writeMu.Lock()
+	if s.writes == nil {
+		s.writes = make(map[string]*blobWriteLock)
+	}
+	l := s.writes[d]
+	if l == nil {
+		l = &blobWriteLock{}
+		s.writes[d] = l
+	}
+	l.refs++
+	s.writeMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		s.writeMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(s.writes, d)
+		}
+		s.writeMu.Unlock()
+	}
 }
 
 // local tags an error as a local storage failure. A full disk is reported as
@@ -176,12 +210,31 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 // the free disk space, above the reserve set by SetMinFree, before any data is
 // written.
 func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
+	unlock := s.lockBlob(d)
+	defer unlock()
 	p, e := s.path(d)
 	if e != nil {
 		return 0, e
 	}
 	if st, e := os.Stat(p); e == nil {
-		return st.Size(), nil
+		// A digest-named file is not proof that its bytes are valid: the file
+		// may have been truncated or modified after the original write.
+		// Re-hash it before trusting it. Remove corrupt content so the caller
+		// can fetch and store a verified replacement.
+		f, openErr := os.Open(p)
+		if openErr == nil {
+			h := sha256.New()
+			_, hashErr := io.Copy(h, f)
+			closeErr := f.Close()
+			if hashErr == nil && closeErr == nil && hex.EncodeToString(h.Sum(nil)) == strings.TrimPrefix(d, "sha256:") {
+				return st.Size(), nil
+			}
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 0, local(err)
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return 0, local(e)
 	}
 	if max > 0 {
 		if e := s.checkSpace(max); e != nil {
@@ -239,8 +292,18 @@ func (s *Store) SetAlias(ns, repo, ref, d string) error {
 	if s.aliases[k] == d {
 		return nil
 	}
+	previous, existed := s.aliases[k]
 	s.aliases[k] = d
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		// Do not expose an alias in memory when its durable update failed.
+		if existed {
+			s.aliases[k] = previous
+		} else {
+			delete(s.aliases, k)
+		}
+		return err
+	}
+	return nil
 }
 
 // saveLocked writes the alias file via a temporary file and a rename, so a
