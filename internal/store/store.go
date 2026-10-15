@@ -38,6 +38,9 @@ type Store struct {
 
 	minFree atomic.Int64
 	free    func(path string) (uint64, bool) // replaced in tests
+
+	capacityMu sync.Mutex // guards reservations across distinct digest writes
+	reserved   int64
 }
 
 type blobWriteLock struct {
@@ -117,6 +120,36 @@ func (s *Store) checkSpace(need int64) error {
 	return nil
 }
 
+// reserveSpace checks the configured free-space reserve and reserves capacity
+// for an in-flight write. The reservation is held until the write finishes, so
+// simultaneous downloads of different digests cannot all pass against the same
+// observed free-space value.
+func (s *Store) reserveSpace(need int64) (func(), error) {
+	s.capacityMu.Lock()
+	free, ok := s.free(s.root)
+	reserve := s.minFree.Load()
+	if reserve < 0 {
+		reserve = 0
+	}
+	if ok {
+		required := uint64(need) + uint64(reserve)
+		if s.reserved > 0 {
+			required += uint64(s.reserved)
+		}
+		if free < required {
+			s.capacityMu.Unlock()
+			return nil, ErrNoSpace
+		}
+	}
+	s.reserved += need
+	s.capacityMu.Unlock()
+	return func() {
+		s.capacityMu.Lock()
+		s.reserved -= need
+		s.capacityMu.Unlock()
+	}, nil
+}
+
 // ValidDigest reports whether d is a well-formed sha256 digest: "sha256:"
 // followed by exactly 64 lowercase hex characters. Digests end up in file
 // paths, so everything that reaches the store must pass this check.
@@ -181,11 +214,33 @@ func (s *Store) path(d string) (string, error) {
 }
 
 func (s *Store) Open(d string) (*os.File, error) {
+	unlock := s.lockBlob(d)
+	defer unlock()
 	p, e := s.path(d)
 	if e != nil {
 		return nil, e
 	}
-	return os.Open(p)
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") {
+		_ = f.Close()
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, local(err)
+		}
+		return nil, ErrDigestMismatch
+	}
+	return f, nil
 }
 
 func (s *Store) Stat(d string) (os.FileInfo, error) {
@@ -237,9 +292,11 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		return 0, local(e)
 	}
 	if max > 0 {
-		if e := s.checkSpace(max); e != nil {
-			return 0, e
+		release, err := s.reserveSpace(max)
+		if err != nil {
+			return 0, err
 		}
+		defer release()
 	}
 	tmp, e := os.CreateTemp(filepath.Dir(p), ".part-")
 	if e != nil {
