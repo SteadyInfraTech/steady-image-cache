@@ -1,14 +1,16 @@
 package store
 
 import (
-	"bytes"\n\t"crypto/sha256"
+	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"\n\t"sync"
+	"syscall"
+	"sync"
 	"testing"
 )
 
