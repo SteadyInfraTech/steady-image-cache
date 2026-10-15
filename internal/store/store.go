@@ -97,9 +97,9 @@ func local(err error) error {
 		return nil
 	}
 	if errors.Is(err, syscall.ENOSPC) {
-		return fmt.Errorf("%w: %v", ErrNoSpace, err)
+		return fmt.Errorf("%w: %w", ErrNoSpace, err)
 	}
-	return fmt.Errorf("%w: %v", ErrLocal, err)
+	return fmt.Errorf("%w: %w", ErrLocal, err)
 }
 
 // localWriter tags errors from writing to the cache, so that they can be told
