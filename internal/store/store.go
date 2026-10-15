@@ -120,11 +120,53 @@ func (s *Store) checkSpace(need int64) error {
 	return nil
 }
 
+// capacityReservation tracks only the portion of a write that has not yet
+// been reflected in the filesystem's free-space measurement.
+type capacityReservation struct {
+	store     *Store
+	remaining int64
+}
+
+func (r *capacityReservation) consume(n int64) {
+	if n <= 0 {
+		return
+	}
+	r.store.capacityMu.Lock()
+	if n > r.remaining {
+		n = r.remaining
+	}
+	r.remaining -= n
+	r.store.reserved -= n
+	r.store.capacityMu.Unlock()
+}
+
+func (r *capacityReservation) release() {
+	r.store.capacityMu.Lock()
+	r.store.reserved -= r.remaining
+	r.remaining = 0
+	r.store.capacityMu.Unlock()
+}
+
+// reservingWriter reduces the outstanding reservation as bytes are actually
+// written. This avoids double-counting bytes already reflected in free space.
+type reservingWriter struct {
+	w           io.Writer
+	reservation *capacityReservation
+}
+
+func (w reservingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if n > 0 {
+		w.reservation.consume(int64(n))
+	}
+	return n, err
+}
+
 // reserveSpace checks the configured free-space reserve and reserves capacity
-// for an in-flight write. The reservation is held until the write finishes, so
-// simultaneous downloads of different digests cannot all pass against the same
-// observed free-space value.
-func (s *Store) reserveSpace(need int64) (func(), error) {
+// for an in-flight write. Outstanding reservations cover only bytes not yet
+// written, because written bytes are already reflected in the filesystem's
+// free-space measurement.
+func (s *Store) reserveSpace(need int64) (*capacityReservation, error) {
 	s.capacityMu.Lock()
 	free, ok := s.free(s.root)
 	reserve := s.minFree.Load()
@@ -132,22 +174,16 @@ func (s *Store) reserveSpace(need int64) (func(), error) {
 		reserve = 0
 	}
 	if ok {
-		required := uint64(need) + uint64(reserve)
-		if s.reserved > 0 {
-			required += uint64(s.reserved)
-		}
+		required := uint64(need) + uint64(reserve) + uint64(s.reserved)
 		if free < required {
 			s.capacityMu.Unlock()
 			return nil, ErrNoSpace
 		}
 	}
 	s.reserved += need
+	r := &capacityReservation{store: s, remaining: need}
 	s.capacityMu.Unlock()
-	return func() {
-		s.capacityMu.Lock()
-		s.reserved -= need
-		s.capacityMu.Unlock()
-	}, nil
+	return r, nil
 }
 
 // ValidDigest reports whether d is a well-formed sha256 digest: "sha256:"
@@ -292,11 +328,11 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		return 0, local(e)
 	}
 	if max > 0 {
-		release, err := s.reserveSpace(max)
+		reservation, err := s.reserveSpace(max)
 		if err != nil {
 			return 0, err
 		}
-		defer release()
+		defer reservation.release()
 	}
 	tmp, e := os.CreateTemp(filepath.Dir(p), ".part-")
 	if e != nil {
@@ -308,7 +344,11 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
 	}
 	h := sha256.New()
-	n, e := io.Copy(io.MultiWriter(localWriter{tmp}, h), src)
+	var dst io.Writer = localWriter{tmp}
+	if reservation != nil {
+		dst = reservingWriter{w: dst, reservation: reservation}
+	}
+	n, e := io.Copy(io.MultiWriter(dst, h), src)
 	if e != nil {
 		tmp.Close()
 		return n, e
