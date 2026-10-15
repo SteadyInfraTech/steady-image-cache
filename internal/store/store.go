@@ -181,7 +181,24 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		return 0, e
 	}
 	if st, e := os.Stat(p); e == nil {
-		return st.Size(), nil
+		// A digest-named file is not proof that its bytes are valid: the file
+		// may have been truncated or modified after the original write.
+		// Re-hash it before trusting it. Remove corrupt content so the caller
+		// can fetch and store a verified replacement.
+		f, openErr := os.Open(p)
+		if openErr == nil {
+			h := sha256.New()
+			_, hashErr := io.Copy(h, f)
+			closeErr := f.Close()
+			if hashErr == nil && closeErr == nil && hex.EncodeToString(h.Sum(nil)) == strings.TrimPrefix(d, "sha256:") {
+				return st.Size(), nil
+			}
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 0, local(err)
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return 0, local(e)
 	}
 	if max > 0 {
 		if e := s.checkSpace(max); e != nil {
