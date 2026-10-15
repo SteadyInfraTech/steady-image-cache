@@ -37,7 +37,6 @@ func TestSplitImageRef(t *testing.T) {
 	}
 }
 
-
 type testReaderAt struct {
 	*bytes.Reader
 	closed bool
