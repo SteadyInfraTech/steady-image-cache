@@ -2,8 +2,10 @@ package containerd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
@@ -30,8 +32,11 @@ func (i *Importer) Import(ctx context.Context) error {
 	cs := c.ContentStore()
 	if err := cs.Walk(ctx, func(info content.Info) error {
 		d := info.Digest.String()
-		if _, err := i.Store.Stat(d); err == nil {
+		if f, err := i.Store.Open(d); err == nil {
+			_ = f.Close()
 			return nil
+		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, store.ErrDigestMismatch) {
+			return fmt.Errorf("verify cached containerd content %s: %w", d, err)
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
 		if err != nil {
