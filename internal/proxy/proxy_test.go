@@ -1036,7 +1036,6 @@ func TestUpstreamAuthChallengeIsLoggedNotSilent(t *testing.T) {
 	}
 }
 
-
 func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T) {
 	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
 	seen := make(chan string, 2)
