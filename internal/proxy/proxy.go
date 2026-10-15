@@ -382,7 +382,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	in := newInfo(r)
 	byDigest := strings.HasPrefix(ref, "sha256:")
 	path := "/v2/" + repo + "/manifests/" + ref
-	res := p.flights.Do("manifest:"+namespace+"/"+repo+"@"+ref, func() fetchResult {
+	res := p.flights.Do("manifest:"+namespace+"/"+repo+"@"+ref+"|accept:"+in.accept+"|auth:"+in.auth, func() fetchResult {
 		if d, found := p.store.Resolve(namespace, repo, ref); found {
 			if _, err := p.store.Stat(d); err == nil {
 				return fetched
