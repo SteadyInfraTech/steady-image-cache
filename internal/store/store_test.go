@@ -392,27 +392,63 @@ func TestOpenRejectsAndRemovesCorruptedBlob(t *testing.T) {
 	}
 }
 
-func TestReserveSpaceAccountsForConcurrentWrites(t *testing.T) {
+type gatedReader struct {
+	started chan struct{}
+	release <-chan struct{}
+	reader  io.Reader
+}
+
+func (r *gatedReader) Read(p []byte) (int, error) {
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	<-r.release
+	return r.reader.Read(p)
+}
+
+func TestConcurrentDifferentDigestWritesReserveCapacity(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep the reported free-space value fixed so this test specifically
+	// exercises reservation accounting rather than relying on filesystem timing.
 	s.free = func(string) (uint64, bool) { return 100, true }
 	s.SetMinFree(20)
 
-	releaseFirst, err := s.reserveSpace(60)
-	if err != nil {
-		t.Fatalf("first reservation: %v", err)
+	firstBody := []byte("first blob")
+	firstDigest := digestOf(firstBody)
+	releaseFirst := make(chan struct{})
+	started := make(chan struct{}, 1)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := s.PutVerifiedLimit(firstDigest, &gatedReader{
+			started: started,
+			release: releaseFirst,
+			reader:  bytes.NewReader(firstBody),
+		}, 60)
+		firstDone <- err
+	}()
+
+	// The first write has reserved 60 bytes before its reader is entered.
+	<-started
+	secondBody := []byte("second blob")
+	_, err = s.PutVerifiedLimit(digestOf(secondBody), bytes.NewReader(secondBody), 21)
+	if !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("second concurrent write error = %v, want ErrNoSpace", err)
 	}
-	if _, err := s.reserveSpace(21); !errors.Is(err, ErrNoSpace) {
-		t.Fatalf("second reservation error = %v, want ErrNoSpace", err)
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first write: %v", err)
 	}
-	releaseFirst()
-	releaseSecond, err := s.reserveSpace(80)
-	if err != nil {
-		t.Fatalf("reservation after release: %v", err)
+
+	// Once the first write is complete, its unused reservation is released.
+	thirdBody := []byte("third blob")
+	if _, err := s.PutVerifiedLimit(digestOf(thirdBody), bytes.NewReader(thirdBody), 80); err != nil {
+		t.Fatalf("write after reservation release: %v", err)
 	}
-	releaseSecond()
 }
 
 func TestPutVerifiedReplacesCorruptedExistingBlob(t *testing.T) {
