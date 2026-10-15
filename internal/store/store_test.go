@@ -649,8 +649,8 @@ func TestOpenRevalidatesBlobWhenMetadataChanges(t *testing.T) {
 
 
 type partialFailureReader struct {
-	data []byte
-	err  error
+	data	[]byte
+	err	error
 }
 
 func (r partialFailureReader) Read(p []byte) (int, error) {
