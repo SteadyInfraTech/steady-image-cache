@@ -115,3 +115,45 @@ func TestCacheContentReturnsReadErrorAndClosesReader(t *testing.T) {
 }
 
 var _ io.ReaderAt = (*testReaderAt)(nil)
+
+
+type closeFailReaderAt struct {
+	*bytes.Reader
+	closeErr error
+	closed   bool
+}
+
+func (r *closeFailReaderAt) Close() error {
+	r.closed = true
+	return r.closeErr
+}
+
+func (r *closeFailReaderAt) Size() int64 { return r.Reader.Size() }
+
+var _ content.ReaderAt = (*closeFailReaderAt)(nil)
+
+// A successful copy is not a successful import if the containerd reader
+// reports an error while being released.
+func TestCacheContentReturnsCloseError(t *testing.T) {
+	body := []byte("containerd blob")
+	d := testDigest(body)
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("close failed")
+	ra := &closeFailReaderAt{Reader: bytes.NewReader(body), closeErr: closeErr}
+
+	_, err = cacheContent(s, d, ra)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("cacheContent error = %v, want close error", err)
+	}
+	if !ra.closed {
+		t.Fatal("ReaderAt must be closed after the import attempt")
+	}
+	// The content was written, but the caller must still see the close error
+	// and may treat this import attempt as unsuccessful.
+	if _, err := s.Stat(d); err != nil {
+		t.Fatalf("stored content should exist after the successful copy: %v", err)
+	}
+}
