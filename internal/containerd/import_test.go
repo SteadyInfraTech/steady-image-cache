@@ -224,7 +224,7 @@ type fakeContentWalker struct {
 	walkErr     error
 }
 
-func (f *fakeContentWalker) Walk(_ context.Context, fn func(content.Info) error) error {
+func (f *fakeContentWalker) Walk(_ context.Context, fn content.WalkFunc, _ ...string) error {
 	for _, info := range f.infos {
 		if err := fn(info); err != nil {
 			return err
