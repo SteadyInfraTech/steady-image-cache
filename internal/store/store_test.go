@@ -1,14 +1,14 @@
 package store
 
 import (
-	"crypto/sha256"
+	"bytes"\n\t"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"syscall"\n\t"sync"
 	"testing"
 )
 
@@ -361,5 +361,98 @@ func TestMinFreeIsReadable(t *testing.T) {
 	s.SetMinFree(12345)
 	if s.MinFree() != 12345 {
 		t.Fatalf("MinFree = %d", s.MinFree())
+	}
+}
+
+
+func TestPutVerifiedReplacesCorruptedExistingBlob(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("the expected immutable layer")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, strings.NewReader(string(body))); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(p, []byte("corrupted bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PutVerified(d, strings.NewReader(string(body))); err != nil || n != int64(len(body)) {
+		t.Fatalf("PutVerified = %d, %v", n, err)
+	}
+	got, err := os.ReadFile(p)
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("blob after repair = %q, %v", got, err)
+	}
+}
+
+func TestConcurrentPutVerifiedSameDigest(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(strings.Repeat("same layer content", 4096))
+	d := digestOf(body)
+	const writers = 24
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.PutVerified(d, strings.NewReader(string(body)))
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent PutVerified: %v", err)
+		}
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("final blob has %d bytes, read error %v; want %d valid bytes", len(got), err, len(body))
+	}
+}
+
+func TestSetAliasSaveFailureDoesNotPublishAlias(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replacing a directory with the aliases file must fail on supported
+	// filesystems, without leaving an in-memory alias that was never persisted.
+	if err := os.Mkdir(filepath.Join(root, "aliases.json"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	d := digestOf([]byte("manifest"))
+	if err := s.SetAlias("registry", "team/app", "v1", d); err == nil {
+		t.Fatal("SetAlias should report the failed aliases.json rename")
+	}
+	if _, ok := s.Resolve("registry", "team/app", "v1"); ok {
+		t.Fatal("alias became visible despite failed persistence")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".aliases-") {
+			t.Errorf("temporary alias file left behind: %s", entry.Name())
+		}
 	}
 }
