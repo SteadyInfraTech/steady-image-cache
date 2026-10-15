@@ -214,7 +214,6 @@ func TestCacheContentReturnsCloseError(t *testing.T) {
 	}
 }
 
-
 // fakeContentWalker drives the same Walk/ReaderAt path used by Importer.Import.
 type fakeContentWalker struct {
 	infos       []content.Info
