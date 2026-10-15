@@ -310,7 +310,7 @@ func TestImporterContentWalkSkipsValidCachedBlob(t *testing.T) {
 		t.Fatal(err)
 	}
 	cs := &fakeContentWalker{
-		infos: []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
+		infos:   []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
 		readers: map[string]content.ReaderAt{},
 	}
 	m := &metrics.Metrics{}
