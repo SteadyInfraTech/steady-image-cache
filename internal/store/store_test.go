@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func digestOf(b []byte) string {
@@ -544,7 +545,6 @@ func TestSetAliasSaveFailureDoesNotPublishAlias(t *testing.T) {
 	}
 }
 
-
 // BenchmarkOpenRead compares the normal cached read path (which verifies the
 // digest before returning the file) with opening and reading the same cache
 // file without verification. The difference approximates the extra I/O and
@@ -604,5 +604,45 @@ func BenchmarkOpenRead(b *testing.B) {
 				}
 			})
 		})
+	}
+}
+
+// A cached verification must be invalidated when the same file is modified
+// without changing its size or inode.
+func TestOpenRevalidatesBlobWhenMetadataChanges(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("verified cache data")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(p, []byte("tampered cache data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := s.Open(d); err == nil {
+		_ = f.Close()
+		t.Fatal("Open must re-hash a blob whose metadata changed")
+	} else if !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Open error = %v, want ErrDigestMismatch", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted blob should be removed, stat error = %v", err)
 	}
 }
