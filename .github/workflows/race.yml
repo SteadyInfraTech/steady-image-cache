@@ -1,0 +1,25 @@
+name: Go race tests
+
+on:
+  push:
+    branches:
+      - fix/read-integrity-capacity-reservations
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run race detector
+        run: go test -race ./...
