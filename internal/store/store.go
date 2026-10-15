@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 var (
@@ -54,8 +55,27 @@ type Store struct {
 	capacityMu sync.Mutex // guards reservations across distinct digest writes
 	reserved   int64
 
-	verifiedMu sync.Mutex // guards metadata for blobs whose digest was verified
-	verified   map[string]os.FileInfo
+	verifiedMu    sync.Mutex // guards verified, verifiedDirty and lastScrub
+	verified      map[string]stamp
+	verifiedDirty bool
+	lastScrub     time.Time
+
+	corrupt atomic.Uint64
+	logf    func(string, ...any)
+}
+
+// stamp identifies one version of a blob file. A blob whose digest was checked
+// is trusted for as long as its stamp is unchanged: the file is replaced
+// atomically, never edited, so a different inode, size or modification time
+// means it is not the file that was checked.
+type stamp struct {
+	Size  int64  `json:"size"`
+	MTime int64  `json:"mtime"`
+	Ino   uint64 `json:"ino"`
+}
+
+func stampOf(fi os.FileInfo) stamp {
+	return stamp{Size: fi.Size(), MTime: fi.ModTime().UnixNano(), Ino: inode(fi)}
 }
 
 type blobWriteLock struct {
@@ -256,11 +276,12 @@ func New(root string) (*Store, error) {
 		root:           root,
 		aliases:        map[string]string{},
 		free:           freeBytes,
-		verified:       map[string]os.FileInfo{},
+		verified:       map[string]stamp{},
 		createBlobTemp: func(dir, pattern string) (blobTempFile, error) { return os.CreateTemp(dir, pattern) },
 		renameBlob:     os.Rename,
 		removeBlob:     os.Remove,
 	}
+	s.loadVerified()
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
 	switch {
@@ -322,13 +343,12 @@ func (s *Store) Open(d string) (*os.File, error) {
 		return nil, err
 	}
 
-	// A previously verified immutable blob can be trusted while its file
-	// identity and metadata remain unchanged. This avoids hashing every read.
+	// A blob whose digest was checked is trusted while its stamp is unchanged.
+	// Without this every read would hash the whole file first.
 	s.verifiedMu.Lock()
-	verified := s.verified[d]
+	known, ok := s.verified[d]
 	s.verifiedMu.Unlock()
-	if verified != nil && os.SameFile(verified, before) &&
-		verified.Size() == before.Size() && verified.ModTime().Equal(before.ModTime()) {
+	if ok && known == stampOf(before) {
 		return f, nil
 	}
 
@@ -346,20 +366,17 @@ func (s *Store) Open(d string) (*os.File, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	unchanged := os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
+	unchanged := stampOf(before) == stampOf(after)
 	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") || !unchanged {
 		_ = f.Close()
-		s.verifiedMu.Lock()
-		delete(s.verified, d)
-		s.verifiedMu.Unlock()
+		s.forgetVerified(d)
+		s.noteCorrupt(d)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, local(err)
 		}
 		return nil, ErrDigestMismatch
 	}
-	s.verifiedMu.Lock()
-	s.verified[d] = after
-	s.verifiedMu.Unlock()
+	s.markVerified(d, stampOf(after))
 	return f, nil
 }
 
@@ -477,6 +494,11 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (written int6
 		return n, local(e)
 	}
 	cleanup = false
+	// The digest was computed while the content was written, so this is a
+	// verified blob already; recording that saves hashing it again on first read.
+	if fi, err := os.Stat(p); err == nil {
+		s.markVerified(d, stampOf(fi))
+	}
 	return n, nil
 }
 

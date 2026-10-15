@@ -103,3 +103,22 @@ func TestPeerAndDiskSettings(t *testing.T) {
 		t.Fatalf("invalid values must fall back to defaults: %v %d", c.PeerTimeout, c.MinFreeBytes)
 	}
 }
+
+func TestScrubSettings(t *testing.T) {
+	c := FromEnv()
+	if c.ScrubInterval != 24*time.Hour || c.ScrubRate != 32<<20 {
+		t.Fatalf("defaults: interval %v, rate %d", c.ScrubInterval, c.ScrubRate)
+	}
+	t.Setenv("SIC_SCRUB_INTERVAL", "0")
+	t.Setenv("SIC_SCRUB_RATE", "1048576")
+	c = FromEnv()
+	if c.ScrubInterval != 0 || c.ScrubRate != 1<<20 {
+		t.Fatalf("interval %v, rate %d: 0 must turn the scrub off, and the rate must be read", c.ScrubInterval, c.ScrubRate)
+	}
+	t.Setenv("SIC_SCRUB_INTERVAL", "-1h")
+	t.Setenv("SIC_SCRUB_RATE", "0")
+	c = FromEnv()
+	if c.ScrubInterval != 24*time.Hour || c.ScrubRate != 32<<20 {
+		t.Fatalf("invalid values must keep the defaults: interval %v, rate %d", c.ScrubInterval, c.ScrubRate)
+	}
+}

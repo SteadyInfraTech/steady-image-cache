@@ -55,7 +55,18 @@ func main() {
 		log.Fatal(err)
 	}
 	st.SetMinFree(cfg.MinFreeBytes)
+	st.SetLogf(log.Printf)
 	m := &metrics.Metrics{}
+	m.Funcs = []metrics.Func{
+		{Name: "sic_corrupt_blobs_total", Type: "counter", Value: func() int64 { return int64(st.Corrupt()) }},
+	}
+	// Verification happens in the background, off the request path: the record
+	// of verified blobs is saved regularly and a slow pass re-checks them all.
+	bgDone := make(chan struct{})
+	go func() {
+		defer close(bgDone)
+		st.RunBackground(ctx, store.Background{ScrubEvery: cfg.ScrubInterval, ScrubRate: cfg.ScrubRate, Logf: log.Printf})
+	}()
 	var finders peer.Multi
 	if len(cfg.Peers) > 0 {
 		finders = append(finders, peer.NewStatic(cfg.Peers))
@@ -161,5 +172,9 @@ func main() {
 	_ = srv.Shutdown(c)
 	if admin != nil {
 		_ = admin.Shutdown(c)
+	}
+	select { // RunBackground saves the verified-blob record on its way out
+	case <-bgDone:
+	case <-c.Done():
 	}
 }
