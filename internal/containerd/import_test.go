@@ -6,9 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
