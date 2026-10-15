@@ -41,6 +41,9 @@ type Store struct {
 
 	capacityMu sync.Mutex // guards reservations across distinct digest writes
 	reserved   int64
+
+	verifiedMu sync.Mutex // guards metadata for blobs whose digest was verified
+	verified   map[string]os.FileInfo
 }
 
 type blobWriteLock struct {
@@ -212,7 +215,7 @@ func New(root string) (*Store, error) {
 		return nil, err
 	}
 	removePartials(blobs)
-	s := &Store{root: root, aliases: map[string]string{}, free: freeBytes}
+	s := &Store{root: root, aliases: map[string]string{}, free: freeBytes, verified: map[string]os.FileInfo{}}
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
 	switch {
@@ -260,8 +263,29 @@ func (s *Store) Open(d string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	before, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
+	// A previously verified immutable blob can be trusted while its file
+	// identity and metadata remain unchanged. This avoids hashing every read.
+	s.verifiedMu.Lock()
+	verified := s.verified[d]
+	s.verifiedMu.Unlock()
+	if verified != nil && os.SameFile(verified, before) &&
+		verified.Size() == before.Size() && verified.ModTime().Equal(before.ModTime()) {
+		return f, nil
+	}
+
 	h := sha256.New()
 	if _, err = io.Copy(h, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	after, err := f.Stat()
+	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -269,13 +293,20 @@ func (s *Store) Open(d string) (*os.File, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") {
+	unchanged := os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
+	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") || !unchanged {
 		_ = f.Close()
+		s.verifiedMu.Lock()
+		delete(s.verified, d)
+		s.verifiedMu.Unlock()
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, local(err)
 		}
 		return nil, ErrDigestMismatch
 	}
+	s.verifiedMu.Lock()
+	s.verified[d] = after
+	s.verifiedMu.Unlock()
 	return f, nil
 }
 
