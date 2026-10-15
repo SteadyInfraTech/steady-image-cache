@@ -29,12 +29,24 @@ var (
 	ErrNoSpace = errors.New("not enough free disk space")
 )
 
+type blobTempFile interface {
+	io.Writer
+	Sync() error
+	Close() error
+	Name() string
+}
+
 type Store struct {
-	root    string
-	writeMu sync.Mutex // guards the per-digest writer-lock map
-	writes  map[string]*blobWriteLock
-	mu      sync.RWMutex
-	aliases map[string]string
+	// Blob file operations are narrow seams for deterministic storage-failure tests.
+	// Alias persistence uses its own path and remains independently tested.
+	createBlobTemp func(string, string) (blobTempFile, error)
+	renameBlob     func(string, string) error
+	removeBlob     func(string) error
+	root           string
+	writeMu        sync.Mutex // guards the per-digest writer-lock map
+	writes         map[string]*blobWriteLock
+	mu             sync.RWMutex
+	aliases        map[string]string
 
 	minFree atomic.Int64
 	free    func(path string) (uint64, bool) // replaced in tests
@@ -215,7 +227,15 @@ func New(root string) (*Store, error) {
 		return nil, err
 	}
 	removePartials(blobs)
-	s := &Store{root: root, aliases: map[string]string{}, free: freeBytes, verified: map[string]os.FileInfo{}}
+	s := &Store{
+		root:           root,
+		aliases:        map[string]string{},
+		free:           freeBytes,
+		verified:       map[string]os.FileInfo{},
+		createBlobTemp: func(dir, pattern string) (blobTempFile, error) { return os.CreateTemp(dir, pattern) },
+		renameBlob:     os.Rename,
+		removeBlob:     os.Remove,
+	}
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
 	switch {
@@ -367,11 +387,11 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		}
 		defer reservation.release()
 	}
-	tmp, e := os.CreateTemp(filepath.Dir(p), ".part-")
+	tmp, e := s.createBlobTemp(filepath.Dir(p), ".part-")
 	if e != nil {
 		return 0, local(e)
 	}
-	defer os.Remove(tmp.Name())
+	defer s.removeBlob(tmp.Name())
 	src := r
 	if max >= 0 {
 		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
@@ -401,7 +421,7 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	if e = tmp.Close(); e != nil {
 		return n, local(e)
 	}
-	if e = os.Rename(tmp.Name(), p); e != nil {
+	if e = s.renameBlob(tmp.Name(), p); e != nil {
 		return n, local(e)
 	}
 	return n, nil
