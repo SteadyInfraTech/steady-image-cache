@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 
 	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -220,6 +222,7 @@ type fakeContentWalker struct {
 	infos       []content.Info
 	readers     map[string]content.ReaderAt
 	readerErr   error
+	readerErrs  map[string]error // per digest; checked before readerErr
 	readerCalls int
 	walkErr     error
 }
@@ -235,6 +238,9 @@ func (f *fakeContentWalker) Walk(_ context.Context, fn content.WalkFunc, _ ...st
 
 func (f *fakeContentWalker) ReaderAt(_ context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
 	f.readerCalls++
+	if err := f.readerErrs[desc.Digest.String()]; err != nil {
+		return nil, err
+	}
 	if f.readerErr != nil {
 		return nil, f.readerErr
 	}
@@ -367,5 +373,166 @@ func TestImporterContentWalkReturnsWalkFailure(t *testing.T) {
 	}
 	if cs.readerCalls != 0 {
 		t.Fatalf("ReaderAt calls = %d, want 0 when Walk fails before visiting content", cs.readerCalls)
+	}
+}
+
+// threeBlobs returns a walker over three blobs whose sources can be broken one
+// by one, and their digests.
+func threeBlobs() (*fakeContentWalker, [3]string) {
+	var ds [3]string
+	cs := &fakeContentWalker{readers: map[string]content.ReaderAt{}, readerErrs: map[string]error{}}
+	for n := range ds {
+		body := []byte(fmt.Sprintf("containerd blob number %d", n))
+		ds[n] = testDigest(body)
+		cs.infos = append(cs.infos, content.Info{Digest: digest.Digest(ds[n]), Size: int64(len(body))})
+		cs.readers[ds[n]] = newTestReaderAt(body)
+	}
+	return cs, ds
+}
+
+// One blob that cannot be read must not keep the others from being imported.
+func TestImportContinuesPastABlobThatFails(t *testing.T) {
+	cs, ds := threeBlobs()
+	broken := errors.New("containerd read failed")
+	cs.readerErrs[ds[1]] = broken
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &metrics.Metrics{}
+	err = (&Importer{Store: s, Metrics: m}).importContent(context.Background(), cs)
+	if !errors.Is(err, broken) {
+		t.Fatalf("err = %v, want it to report the failed blob", err)
+	}
+	if _, e := s.Stat(ds[0]); e != nil {
+		t.Fatal("the blob before the failure was not imported")
+	}
+	if _, e := s.Stat(ds[2]); e != nil {
+		t.Fatal("the blob after the failure was not imported")
+	}
+	if m.ImportedBlobs.Load() != 2 || m.ImportErrors.Load() != 1 {
+		t.Fatalf("ImportedBlobs=%d ImportErrors=%d, want 2 and 1", m.ImportedBlobs.Load(), m.ImportErrors.Load())
+	}
+}
+
+// containerd's garbage collector may delete a blob after it was listed. That is
+// not a failure of the import.
+func TestImportIgnoresBlobsContainerdDeletedMeanwhile(t *testing.T) {
+	cs, ds := threeBlobs()
+	cs.readerErrs[ds[1]] = fmt.Errorf("read %s: %w", ds[1], errdefs.ErrNotFound)
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &metrics.Metrics{}
+	if err := (&Importer{Store: s, Metrics: m}).importContent(context.Background(), cs); err != nil {
+		t.Fatalf("a vanished blob was reported as an error: %v", err)
+	}
+	if m.ImportedBlobs.Load() != 2 || m.ImportErrors.Load() != 0 {
+		t.Fatalf("ImportedBlobs=%d ImportErrors=%d, want 2 and 0", m.ImportedBlobs.Load(), m.ImportErrors.Load())
+	}
+}
+
+// When the cache has no room every later blob would fail the same way, so the
+// import stops, and says why.
+func TestImportStopsWhenTheCacheIsFull(t *testing.T) {
+	cs, _ := threeBlobs()
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetMinFree(1 << 60) // more than any disk has
+	m := &metrics.Metrics{}
+	err = (&Importer{Store: s, Metrics: m}).importContent(context.Background(), cs)
+	if !errors.Is(err, store.ErrNoSpace) {
+		t.Fatalf("err = %v, want ErrNoSpace", err)
+	}
+	if cs.readerCalls != 1 {
+		t.Fatalf("ReaderAt calls = %d, want 1: the import must stop at the first blob that does not fit", cs.readerCalls)
+	}
+	if m.ImportErrors.Load() != 1 {
+		t.Fatalf("ImportErrors = %d, want 1", m.ImportErrors.Load())
+	}
+}
+
+func TestImportStopsWhenCancelled(t *testing.T) {
+	cs, _ := threeBlobs()
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = (&Importer{Store: s, Metrics: &metrics.Metrics{}}).importContent(ctx, cs)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if cs.readerCalls != 0 {
+		t.Fatalf("ReaderAt calls = %d after cancellation", cs.readerCalls)
+	}
+}
+
+type fakeImage struct {
+	name string
+	d    string
+}
+
+func (f fakeImage) Name() string { return f.name }
+func (f fakeImage) Target() ocispec.Descriptor {
+	return ocispec.Descriptor{Digest: digest.Digest(f.d)}
+}
+
+// An alias that cannot be saved must not keep the others from being saved.
+func TestAliasImportContinuesPastAFailure(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	good1, good2 := testDigest([]byte("one")), testDigest([]byte("two"))
+	imgs := []namedImage{
+		fakeImage{"docker.io/library/a:1", good1},
+		fakeImage{"docker.io/library/b:1", "not-a-digest"},
+		fakeImage{"docker.io/library/c:1", good2},
+		fakeImage{"no-slash", good1}, // has no registry; skipped, not an error
+	}
+	err = (&Importer{Store: s, Metrics: &metrics.Metrics{}}).importAliases(imgs)
+	if err == nil || !strings.Contains(err.Error(), "docker.io/library/b:1") {
+		t.Fatalf("err = %v, want it to name the image that failed", err)
+	}
+	if d, ok := s.Resolve("docker.io", "library/a", "1"); !ok || d != good1 {
+		t.Fatal("alias before the failure missing")
+	}
+	if d, ok := s.Resolve("docker.io", "library/c", "1"); !ok || d != good2 {
+		t.Fatal("alias after the failure missing")
+	}
+}
+
+func TestImportFailuresAreCountedAndBounded(t *testing.T) {
+	var f importFailures
+	first := errors.New("the first failure")
+	f.add(first)
+	for n := 1; n < 20; n++ {
+		f.add(fmt.Errorf("failure %d", n))
+	}
+	if f.count != 20 || len(f.errs) != maxKeptErrors {
+		t.Fatalf("count=%d kept=%d", f.count, len(f.errs))
+	}
+	msg := f.Error()
+	if !strings.Contains(msg, "20 import steps failed") || !strings.Contains(msg, "15 more not shown") || !strings.Contains(msg, "the first failure") {
+		t.Fatalf("message %q", msg)
+	}
+	if !errors.Is(f.err(), first) {
+		t.Fatal("the kept errors must stay inspectable with errors.Is")
+	}
+	var none importFailures
+	if none.err() != nil {
+		t.Fatal("no failures must give a nil error")
+	}
+	// Merging keeps the counts and does not nest the message.
+	var outer importFailures
+	outer.addAll(f.err())
+	outer.add(errors.New("one more"))
+	if outer.count != 21 || strings.Count(outer.Error(), "import steps failed") != 1 {
+		t.Fatalf("merge: count=%d msg=%q", outer.count, outer.Error())
 	}
 }
