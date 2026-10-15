@@ -646,3 +646,52 @@ func TestOpenRevalidatesBlobWhenMetadataChanges(t *testing.T) {
 		t.Fatalf("corrupted blob should be removed, stat error = %v", err)
 	}
 }
+
+
+type partialFailureReader struct {
+	data []byte
+	err  error
+}
+
+func (r partialFailureReader) Read(p []byte) (int, error) {
+	return copy(p, r.data), r.err
+}
+
+func TestPartialSourceFailureReleasesReservationAndCleansTempFile(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A deterministic free-space report lets the follow-up write prove that
+	// the failed partial write released all of its reservation.
+	s.free = func(string) (uint64, bool) { return 100, true }
+	s.SetMinFree(20)
+
+	partial := []byte("partial bytes")
+	d := digestOf([]byte("complete expected blob"))
+	_, err = s.PutVerifiedLimit(d, partialFailureReader{
+		data: partial,
+		err:  errors.New("injected source read failure"),
+	}, 60)
+	if err == nil || errors.Is(err, ErrLocal) || errors.Is(err, ErrNoSpace) {
+		t.Fatalf("partial source write error = %v, want source error", err)
+	}
+	if _, err := s.Stat(d); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial blob became visible: stat error = %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "blobs", "sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".part-") {
+			t.Errorf("partial source failure left temporary file %q", entry.Name())
+		}
+	}
+
+	next := []byte("next complete blob")
+	if _, err := s.PutVerifiedLimit(digestOf(next), bytes.NewReader(next), 80); err != nil {
+		t.Fatalf("follow-up write after reservation cleanup: %v", err)
+	}
+}
