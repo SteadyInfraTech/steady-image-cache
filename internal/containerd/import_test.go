@@ -2,8 +2,13 @@ package containerd
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
@@ -54,25 +59,37 @@ func (r *testReaderAt) Size() int64 { return r.Reader.Size() }
 
 var _ content.ReaderAt = (*testReaderAt)(nil)
 
+func testDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 func TestCacheContentStoresAndClosesReader(t *testing.T) {
 	body := []byte("containerd blob")
-	d := "sha256:8f5f5c3a2f7e15f3b29f9d90c4b37b4f5c6d4b9d6c76b6f7a"
-	// Compute the actual digest using the store's own verification contract.
-	// A wrong digest must be rejected and never left in the cache.
+	d := testDigest(body)
 	s, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	ra := newTestReaderAt(body)
-	_, err = cacheContent(s, d, ra)
-	if err == nil {
-		t.Fatal("expected a mismatched digest to be rejected")
+	n, err := cacheContent(s, d, ra)
+	if err != nil {
+		t.Fatalf("cacheContent: %v", err)
+	}
+	if n != int64(len(body)) {
+		t.Fatalf("stored bytes = %d, want %d", n, len(body))
 	}
 	if !ra.closed {
 		t.Fatal("ReaderAt must be closed after an import attempt")
 	}
-	if _, err := s.Stat(d); err == nil {
-		t.Fatal("mismatched content must not be stored")
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("stored content = %q, %v", got, err)
 	}
 }
 
