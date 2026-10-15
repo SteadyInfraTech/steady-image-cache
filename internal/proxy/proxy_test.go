@@ -37,8 +37,8 @@ type node struct {
 	st   *store.Store
 	root string
 	m    *metrics.Metrics
-	fin *swapFinder
-	srv *httptest.Server
+	fin  *swapFinder
+	srv  *httptest.Server
 }
 
 // newNode starts a node. Its peers are filled in later with setPeers because
