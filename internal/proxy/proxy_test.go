@@ -1246,11 +1246,11 @@ func TestCorruptedLocalBlobRecoversFromPeer(t *testing.T) {
 	}
 
 	resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
-	if resp.StatusCode != http.StatusOK || !string(got) == string(body) {
+	if resp.StatusCode != http.StatusOK || string(got) != string(body) {
 		t.Fatalf("status %d body %q, want healthy peer bytes %q", resp.StatusCode, got, body)
 	}
 	stored, err := os.ReadFile(corruptPath)
-	if err != nil || !string(stored) == string(body) {
+	if err != nil || string(stored) != string(body) {
 		t.Fatalf("repaired cache contains %q, err %v", stored, err)
 	}
 	if a.m.PeerHits.Load() != 1 {
