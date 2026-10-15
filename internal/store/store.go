@@ -43,10 +43,10 @@ type Store struct {
 	renameBlob     func(string, string) error
 	removeBlob     func(string) error
 	root           string
-	writeMu sync.Mutex // guards the per-digest writer-lock map
-	writes  map[string]*blobWriteLock
-	mu      sync.RWMutex
-	aliases map[string]string
+	writeMu        sync.Mutex // guards the per-digest writer-lock map
+	writes          map[string]*blobWriteLock
+	mu              sync.RWMutex
+	aliases         map[string]string
 
 	minFree atomic.Int64
 	free    func(path string) (uint64, bool) // replaced in tests
