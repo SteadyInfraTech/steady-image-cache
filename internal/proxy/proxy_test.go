@@ -1052,7 +1052,6 @@ func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T
 		_, _ = w.Write(doc)
 	}))
 	defer srv.Close()
-	defer close(release)
 
 	p, _, host := upstreamProxy(t, srv, &logSink{})
 	proxySrv := httptest.NewServer(p)
@@ -1106,6 +1105,7 @@ func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T
 			t.Errorf("upstream did not receive Accept %q; saw %v", accept, got)
 		}
 	}
+	close(release)
 	for range accepts {
 		res := <-results
 		if res.err != nil || res.status != http.StatusOK || res.body != string(doc) {
