@@ -8,9 +8,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/containerd/containerd/content"
-
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
+	"github.com/containerd/containerd/content"
 )
 
 func TestSplitImageRef(t *testing.T) {
@@ -116,7 +115,6 @@ func TestCacheContentReturnsReadErrorAndClosesReader(t *testing.T) {
 }
 
 var _ io.ReaderAt = (*testReaderAt)(nil)
-
 
 type closeFailReaderAt struct {
 	*bytes.Reader
