@@ -3,6 +3,7 @@ name: Go race tests
 on:
   push:
     branches:
+      - main
       - fix/read-integrity-capacity-reservations
   pull_request:
 
