@@ -694,3 +694,88 @@ func TestPartialSourceFailureReleasesReservationAndCleansTempFile(t *testing.T) 
 		t.Fatalf("follow-up write after reservation cleanup: %v", err)
 	}
 }
+
+// A writer holds the digest lock for the whole download. A reader must not
+// queue behind it: a peer asking for a layer that is still arriving would run
+// into its timeout and be skipped as if it were dead.
+func TestOpenDoesNotWaitForAnInProgressWrite(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("a layer that is still arriving")
+	d := digestOf(body)
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.PutVerifiedLimit(d, &gatedReader{started: started, release: release, reader: bytes.NewReader(body)}, int64(len(body)))
+		done <- err
+	}()
+	<-started
+
+	opened := make(chan error, 1)
+	go func() {
+		f, err := s.Open(d)
+		if err == nil {
+			f.Close()
+		}
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Open during a write = %v, want os.ErrNotExist", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Open waited for the download to finish")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatalf("Open after the write finished: %v", err)
+	}
+	f.Close()
+}
+
+// Several clients pulling the same layer open it at the same moment; none of
+// them may be told it is missing.
+func TestConcurrentOpensOfOneBlobAllSucceed(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(strings.Repeat("popular layer", 1000))
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	const readers = 32
+	start := make(chan struct{})
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			f, err := s.Open(d)
+			if err == nil {
+				f.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Open: %v", err)
+		}
+	}
+}

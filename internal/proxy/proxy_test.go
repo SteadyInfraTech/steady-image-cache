@@ -1257,3 +1257,60 @@ func TestCorruptedLocalBlobRecoversFromPeer(t *testing.T) {
 		t.Fatalf("PeerHits = %d, want 1 after recovering corrupted cache", a.m.PeerHits.Load())
 	}
 }
+
+// slowSource serves a blob whose body does not arrive until release is closed.
+func slowSource(t *testing.T, body []byte) (url string, headersSent <-chan struct{}, release func()) {
+	t.Helper()
+	sent := make(chan struct{})
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		close(sent)
+		<-gate
+		w.Write(body)
+	}))
+	var once sync.Once
+	rel := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(func() { rel(); srv.Close() })
+	return srv.URL, sent, rel
+}
+
+// A node that is still downloading a layer answers a peer's request for it
+// straight away ("not here yet"). It used to keep the peer waiting until the
+// download was done, so the peer hit its timeout and skipped a healthy node.
+func TestPeerAskingForABlobThatIsStillArrivingIsNotSkipped(t *testing.T) {
+	body := []byte(strings.Repeat("a big layer ", 100))
+	d := digestOf(body)
+	src, headersSent, release := slowSource(t, body)
+
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{src})
+	b := newNode(t, Options{PeerTimeout: 500 * time.Millisecond, PeerBackoff: time.Minute})
+	b.setPeers(a)
+
+	done := make(chan struct{})
+	go func() { get(t, a.srv.URL+"/v2/lib/app/blobs/"+d); close(done) }()
+	<-headersSent
+	time.Sleep(200 * time.Millisecond) // let A start storing the body
+
+	start := time.Now()
+	resp, _ := get(t, b.srv.URL+"/v2/lib/app/blobs/"+d)
+	if took := time.Since(start); took > 400*time.Millisecond {
+		t.Fatalf("B waited %v for A; A should have answered immediately", took)
+	}
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d, want 404 (B has no other source)", resp.StatusCode)
+	}
+	if b.m.PeerErrors.Load() != 0 || len(b.p.shuffledPeers()) != 1 {
+		t.Fatalf("A was marked down: PeerErrors=%d, peers left=%d", b.m.PeerErrors.Load(), len(b.p.shuffledPeers()))
+	}
+
+	release()
+	<-done
+	resp, got := get(t, b.srv.URL+"/v2/lib/app/blobs/"+d)
+	if resp.StatusCode != 200 || string(got) != string(body) {
+		t.Fatalf("once A has the blob, B must get it: status %d", resp.StatusCode)
+	}
+}
