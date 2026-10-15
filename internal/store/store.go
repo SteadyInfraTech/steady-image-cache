@@ -42,7 +42,7 @@ type Store struct {
 	createBlobTemp func(string, string) (blobTempFile, error)
 	renameBlob     func(string, string) error
 	removeBlob     func(string) error
-	root    string
+	root           string
 	writeMu sync.Mutex // guards the per-digest writer-lock map
 	writes  map[string]*blobWriteLock
 	mu      sync.RWMutex
@@ -228,10 +228,13 @@ func New(root string) (*Store, error) {
 	}
 	removePartials(blobs)
 	s := &Store{
-		root: root, aliases: map[string]string{}, free: freeBytes, verified: map[string]os.FileInfo{},
+		root:           root,
+		aliases:        map[string]string{},
+		free:           freeBytes,
+		verified:       map[string]os.FileInfo{},
 		createBlobTemp: func(dir, pattern string) (blobTempFile, error) { return os.CreateTemp(dir, pattern) },
-		renameBlob: os.Rename,
-		removeBlob: os.Remove,
+		renameBlob:     os.Rename,
+		removeBlob:     os.Remove,
 	}
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
