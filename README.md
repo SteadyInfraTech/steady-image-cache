@@ -62,6 +62,17 @@ A digest can only be checked once a download has finished, so SIC bounds what it
 * `SIC_MIN_FREE_BYTES` (default 1 GiB, `0` for none) is the free disk space that has to remain after a download. When it would not, the download is refused. This also applies to the containerd import.
 * Responses are never decompressed on the way in, so the stored bytes are exactly what the digest covers.
 
+## Integrity
+
+A blob is hashed while it is written, so it is known to be good when it lands in the cache. SIC remembers that (the blob's inode, size and modification time, in `verified.json` in the cache directory, saved every 30 seconds and on shutdown), and serves such a blob without hashing it again, also after a restart. A blob whose file changed, or that SIC has no record of, is hashed the first time it is opened; if it does not match its digest it is deleted and fetched again.
+
+Hashing on the request path made the first read of every blob wait for a full pass over the file, and made every restart re-read the whole cache. To still find blobs that were damaged on disk without their metadata changing, a background scrubber checks every blob against its digest, slowly, and deletes the ones that do not match (logged, and counted in `sic_corrupt_blobs_total`):
+
+* `SIC_SCRUB_INTERVAL` (default `24h`, `0` turns it off) is the time between complete passes. The time of the last pass is saved, so restarts do not start a new one; a store that was never scrubbed waits ten minutes after start-up.
+* `SIC_SCRUB_RATE` (default 32 MiB/s, in bytes per second) limits how fast it reads.
+
+Whatever consumes a blob verifies it as well: containerd checks layer digests, and a peer hashes what it receives.
+
 ## Upstream fallback
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes), so the image needs a CA bundle in that case. The `scratch` base image has none.

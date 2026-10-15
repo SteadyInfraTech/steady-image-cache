@@ -27,6 +27,12 @@ type Config struct {
 	// MinFreeBytes is the free disk space that must remain after a download.
 	MinFreeBytes int64
 
+	// ScrubInterval is the time between complete background passes that check
+	// every cached blob against its digest (zero: never). ScrubRate limits how
+	// fast they read, in bytes per second.
+	ScrubInterval time.Duration
+	ScrubRate     int64
+
 	UpstreamTimeout time.Duration
 	UpstreamEnabled bool
 	// UpstreamRegistries lists the registries SIC may contact when upstream
@@ -85,6 +91,8 @@ func FromEnv() Config {
 		PeerTimeout:         5 * time.Second,
 		PeerBackoff:         30 * time.Second,
 		MinFreeBytes:        1 << 30,
+		ScrubInterval:       24 * time.Hour,
+		ScrubRate:           32 << 20,
 		UpstreamTimeout:     30 * time.Second,
 		UpstreamEnabled:     boolenv("SIC_UPSTREAM_ENABLED", false),
 		UpstreamRegistries:  list(os.Getenv("SIC_UPSTREAM_REGISTRIES")),
@@ -129,6 +137,16 @@ func FromEnv() Config {
 	if v := os.Getenv("SIC_MIN_FREE_BYTES"); v != "" {
 		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
 			c.MinFreeBytes = n
+		}
+	}
+	if v := os.Getenv("SIC_SCRUB_INTERVAL"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil && d >= 0 {
+			c.ScrubInterval = d
+		}
+	}
+	if v := os.Getenv("SIC_SCRUB_RATE"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n > 0 {
+			c.ScrubRate = n
 		}
 	}
 	if v := os.Getenv("SIC_IMPORT_INTERVAL"); v != "" {

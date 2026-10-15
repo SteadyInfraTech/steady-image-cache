@@ -24,3 +24,15 @@ func TestExposesEveryCounter(t *testing.T) {
 		}
 	}
 }
+
+func TestExposesFuncMetrics(t *testing.T) {
+	m := &Metrics{Funcs: []Func{{Name: "sic_corrupt_blobs_total", Type: "counter", Value: func() int64 { return 7 }}}}
+	rec := httptest.NewRecorder()
+	m.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{"# TYPE sic_corrupt_blobs_total counter", "sic_corrupt_blobs_total 7"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output lacks %q:\n%s", want, body)
+		}
+	}
+}
