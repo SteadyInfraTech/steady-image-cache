@@ -15,7 +15,6 @@ import (
 	"github.com/containerd/containerd/content"
 )
 
-
 func TestCorruptedCachedContentIsMarkedForReimport(t *testing.T) {
 	root := t.TempDir()
 	s, err := store.New(root)
