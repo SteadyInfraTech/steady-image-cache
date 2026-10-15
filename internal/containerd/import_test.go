@@ -8,8 +8,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	"github.com/containerd/containerd/content"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
 
 func TestSplitImageRef(t *testing.T) {
