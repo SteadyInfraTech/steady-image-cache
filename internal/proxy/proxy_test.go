@@ -1224,3 +1224,34 @@ func TestManifestAliasPersistenceFailureReturnsServerError(t *testing.T) {
 		t.Fatal("manifest alias became visible despite persistence failure")
 	}
 }
+
+
+// A corrupt local hit must not be served or turn into a permanent miss: the
+// proxy should discard it, fetch a verified copy from a healthy peer, and
+// replace the damaged file before responding.
+func TestCorruptedLocalBlobRecoversFromPeer(t *testing.T) {
+	a, b := newNode(t, Options{}), newNode(t, Options{})
+	a.setPeers(b)
+
+	body := []byte("healthy layer bytes")
+	d := put(t, b, body)
+	corruptPath := filepath.Join(a.st.Root(), "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.MkdirAll(filepath.Dir(corruptPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corruptPath, []byte("corrupted cached bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, body) {
+		t.Fatalf("status %d body %q, want healthy peer bytes %q", resp.StatusCode, got, body)
+	}
+	stored, err := os.ReadFile(corruptPath)
+	if err != nil || !bytes.Equal(stored, body) {
+		t.Fatalf("repaired cache contains %q, err %v", stored, err)
+	}
+	if a.m.PeerHits.Load() != 1 {
+		t.Fatalf("PeerHits = %d, want 1 after recovering corrupted cache", a.m.PeerHits.Load())
+	}
+}
