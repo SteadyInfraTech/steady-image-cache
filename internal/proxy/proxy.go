@@ -397,7 +397,11 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 			}
 		}
 		if r.ok && !byDigest {
-			_ = p.store.SetAlias(namespace, repo, ref, d)
+			if err := p.store.SetAlias(namespace, repo, ref, d); err != nil {
+				p.metrics.StoreErrors.Add(1)
+				p.warn("alias:"+namespace+"/"+repo+"@"+ref, "cannot persist manifest alias: %v", err)
+				return fetchResult{status: http.StatusInternalServerError}
+			}
 		}
 		return r
 	})
