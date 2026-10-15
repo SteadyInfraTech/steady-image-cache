@@ -1228,6 +1228,7 @@ func TestManifestAliasPersistenceFailureReturnsServerError(t *testing.T) {
 }
 
 
+// This end-to-end recovery test protects the integrity boundary.
 // A corrupt local hit must not be served or turn into a permanent miss: the
 // proxy should discard it, fetch a verified copy from a healthy peer, and
 // replace the damaged file before responding.
