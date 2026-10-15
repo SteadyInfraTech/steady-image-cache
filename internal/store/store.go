@@ -327,8 +327,10 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return 0, local(e)
 	}
+	var reservation *capacityReservation
 	if max > 0 {
-		reservation, err := s.reserveSpace(max)
+		var err error
+		reservation, err = s.reserveSpace(max)
 		if err != nil {
 			return 0, err
 		}
