@@ -351,3 +351,21 @@ func TestImporterContentWalkReturnsReaderAtFailure(t *testing.T) {
 		t.Fatalf("failed source read unexpectedly created blob, stat error = %v", err)
 	}
 }
+
+func TestImporterContentWalkReturnsWalkFailure(t *testing.T) {
+	walkErr := errors.New("containerd content walk failed")
+	cs := &fakeContentWalker{walkErr: walkErr}
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := &Importer{Store: s, Metrics: &metrics.Metrics{}}
+
+	err = i.importContent(context.Background(), cs)
+	if !errors.Is(err, walkErr) {
+		t.Fatalf("importContent error = %v, want wrapped Walk failure", err)
+	}
+	if cs.readerCalls != 0 {
+		t.Fatalf("ReaderAt calls = %d, want 0 when Walk fails before visiting content", cs.readerCalls)
+	}
+}
