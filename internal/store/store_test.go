@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
+	"errors"\n\t"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -540,5 +540,68 @@ func TestSetAliasSaveFailureDoesNotPublishAlias(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".aliases-") {
 			t.Errorf("temporary alias file left behind: %s", entry.Name())
 		}
+	}
+}
+
+
+// BenchmarkOpenRead compares the normal cached read path (which verifies the
+// digest before returning the file) with opening and reading the same cache
+// file without verification. The difference approximates the extra I/O and
+// hashing cost paid by callers that consume the full blob.
+func BenchmarkOpenRead(b *testing.B) {
+	for _, size := range []int{64 << 10, 1 << 20, 8 << 20} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			root := b.TempDir()
+			s, err := New(root)
+			if err != nil {
+				b.Fatal(err)
+			}
+			body := bytes.Repeat([]byte("x"), size)
+			d := digestOf(body)
+			if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+				b.Fatal(err)
+			}
+			path, err := s.path(d)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(int64(size))
+
+			b.Run("verified", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					f, err := s.Open(d)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if _, err := io.Copy(io.Discard, f); err != nil {
+						_ = f.Close()
+						b.Fatal(err)
+					}
+					if err := f.Close(); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+
+			b.Run("open-and-read-only", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					f, err := os.Open(path)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if _, err := io.Copy(io.Discard, f); err != nil {
+						_ = f.Close()
+						b.Fatal(err)
+					}
+					if err := f.Close(); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
 	}
 }
