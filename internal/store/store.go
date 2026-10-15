@@ -31,6 +31,7 @@ var (
 
 type Store struct {
 	root    string
+	writeMu sync.Mutex // serializes blob verification and publication
 	mu      sync.RWMutex
 	aliases map[string]string
 
@@ -176,6 +177,8 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 // the free disk space, above the reserve set by SetMinFree, before any data is
 // written.
 func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	p, e := s.path(d)
 	if e != nil {
 		return 0, e
@@ -256,8 +259,18 @@ func (s *Store) SetAlias(ns, repo, ref, d string) error {
 	if s.aliases[k] == d {
 		return nil
 	}
+	previous, existed := s.aliases[k]
 	s.aliases[k] = d
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		// Do not expose an alias in memory when its durable update failed.
+		if existed {
+			s.aliases[k] = previous
+		} else {
+			delete(s.aliases, k)
+		}
+		return err
+	}
+	return nil
 }
 
 // saveLocked writes the alias file via a temporary file and a rename, so a
