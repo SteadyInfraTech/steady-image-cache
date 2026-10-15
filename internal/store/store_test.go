@@ -366,7 +366,6 @@ func TestMinFreeIsReadable(t *testing.T) {
 	}
 }
 
-
 func TestPutVerifiedReplacesCorruptedExistingBlob(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
