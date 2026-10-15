@@ -2,6 +2,7 @@ package containerd
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 
@@ -34,16 +35,17 @@ func (i *Importer) Import(ctx context.Context) error {
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
 		if err != nil {
-			return nil
+			return fmt.Errorf("open containerd content %s: %w", d, err)
 		}
-		defer ra.Close()
 		// The size is known, so it also bounds the copy and keeps the import from
-		// filling the disk (see Store.SetMinFree).
-		n, err := i.Store.PutVerifiedLimit(d, io.NewSectionReader(ra, 0, ra.Size()), ra.Size())
-		if err == nil {
-			i.Metrics.ImportedBlobs.Add(1)
-			i.Metrics.ImportedBytes.Add(uint64(n))
+		// filling the disk (see Store.SetMinFree). Close the reader in this
+		// callback rather than deferring it until the entire content walk ends.
+		n, err := cacheContent(i.Store, d, ra)
+		if err != nil {
+			return fmt.Errorf("import containerd content %s: %w", d, err)
 		}
+		i.Metrics.ImportedBlobs.Add(1)
+		i.Metrics.ImportedBytes.Add(uint64(n))
 		return nil
 	}); err != nil {
 		return err
@@ -57,9 +59,26 @@ func (i *Importer) Import(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		_ = i.Store.SetAlias(registry, repo, ref, img.Target().Digest.String())
+		if err := i.Store.SetAlias(registry, repo, ref, img.Target().Digest.String()); err != nil {
+			return fmt.Errorf("persist alias for image %q: %w", img.Name(), err)
+		}
 	}
 	return nil
+}
+
+// cacheContent stores a containerd reader and closes it immediately. Returning
+// either error makes an incomplete import visible to the caller instead of
+// reporting a successful import with missing or unverified content.
+func cacheContent(dst *store.Store, d string, ra content.ReaderAt) (int64, error) {
+	n, putErr := dst.PutVerifiedLimit(d, io.NewSectionReader(ra, 0, ra.Size()), ra.Size())
+	closeErr := ra.Close()
+	if putErr != nil {
+		return n, fmt.Errorf("store content: %w", putErr)
+	}
+	if closeErr != nil {
+		return n, fmt.Errorf("close content reader: %w", closeErr)
+	}
+	return n, nil
 }
 
 // splitImageRef splits an image name into registry, repository and tag. A name

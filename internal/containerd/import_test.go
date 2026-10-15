@@ -1,6 +1,16 @@
 package containerd
 
-import "testing"
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"testing"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
+	"github.com/containerd/containerd/content"
+)
 
 func TestSplitImageRef(t *testing.T) {
 	d := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -24,5 +34,125 @@ func TestSplitImageRef(t *testing.T) {
 		if ok != x.ok || a != x.a || b != x.b || c != x.c {
 			t.Errorf("%s => %q %q %q %v, want %q %q %q %v", x.in, a, b, c, ok, x.a, x.b, x.c, x.ok)
 		}
+	}
+}
+
+type testReaderAt struct {
+	*bytes.Reader
+	closed bool
+}
+
+func newTestReaderAt(b []byte) *testReaderAt {
+	return &testReaderAt{Reader: bytes.NewReader(b)}
+}
+
+func (r *testReaderAt) Close() error {
+	r.closed = true
+	return nil
+}
+
+func (r *testReaderAt) Size() int64 { return r.Reader.Size() }
+
+var _ content.ReaderAt = (*testReaderAt)(nil)
+
+func testDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func TestCacheContentStoresAndClosesReader(t *testing.T) {
+	body := []byte("containerd blob")
+	d := testDigest(body)
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra := newTestReaderAt(body)
+	n, err := cacheContent(s, d, ra)
+	if err != nil {
+		t.Fatalf("cacheContent: %v", err)
+	}
+	if n != int64(len(body)) {
+		t.Fatalf("stored bytes = %d, want %d", n, len(body))
+	}
+	if !ra.closed {
+		t.Fatal("ReaderAt must be closed after an import attempt")
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("stored content = %q, %v", got, err)
+	}
+}
+
+type brokenReaderAt struct {
+	closed bool
+}
+
+func (r *brokenReaderAt) ReadAt([]byte, int64) (int, error) { return 0, errors.New("read failed") }
+func (r *brokenReaderAt) Close() error                      { r.closed = true; return nil }
+func (r *brokenReaderAt) Size() int64                       { return 16 }
+
+var _ content.ReaderAt = (*brokenReaderAt)(nil)
+
+func TestCacheContentReturnsReadErrorAndClosesReader(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra := &brokenReaderAt{}
+	_, err = cacheContent(s, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ra)
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("read failed")) {
+		t.Fatalf("cacheContent error = %v, want source read failure", err)
+	}
+	if !ra.closed {
+		t.Fatal("ReaderAt must be closed after a read failure")
+	}
+}
+
+var _ io.ReaderAt = (*testReaderAt)(nil)
+
+type closeFailReaderAt struct {
+	*bytes.Reader
+	closeErr error
+	closed   bool
+}
+
+func (r *closeFailReaderAt) Close() error {
+	r.closed = true
+	return r.closeErr
+}
+
+func (r *closeFailReaderAt) Size() int64 { return r.Reader.Size() }
+
+var _ content.ReaderAt = (*closeFailReaderAt)(nil)
+
+// A successful copy is not a successful import if the containerd reader
+// reports an error while being released.
+func TestCacheContentReturnsCloseError(t *testing.T) {
+	body := []byte("containerd blob")
+	d := testDigest(body)
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("close failed")
+	ra := &closeFailReaderAt{Reader: bytes.NewReader(body), closeErr: closeErr}
+
+	_, err = cacheContent(s, d, ra)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("cacheContent error = %v, want close error", err)
+	}
+	if !ra.closed {
+		t.Fatal("ReaderAt must be closed after the import attempt")
+	}
+	// The content was written, but the caller must still see the close error
+	// and may treat this import attempt as unsuccessful.
+	if _, err := s.Stat(d); err != nil {
+		t.Fatalf("stored content should exist after the successful copy: %v", err)
 	}
 }
