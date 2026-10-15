@@ -366,6 +366,55 @@ func TestMinFreeIsReadable(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsAndRemovesCorruptedBlob(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("verified cache data")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(p, []byte("tampered"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := s.Open(d); err == nil {
+		_ = f.Close()
+		t.Fatal("Open must not return corrupted content")
+	} else if !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Open error = %v, want ErrDigestMismatch", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted blob should be removed, stat error = %v", err)
+	}
+}
+
+func TestReserveSpaceAccountsForConcurrentWrites(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.free = func(string) (uint64, bool) { return 100, true }
+	s.SetMinFree(20)
+
+	releaseFirst, err := s.reserveSpace(60)
+	if err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	if _, err := s.reserveSpace(21); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("second reservation error = %v, want ErrNoSpace", err)
+	}
+	releaseFirst()
+	releaseSecond, err := s.reserveSpace(80)
+	if err != nil {
+		t.Fatalf("reservation after release: %v", err)
+	}
+	releaseSecond()
+}
+
 func TestPutVerifiedReplacesCorruptedExistingBlob(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
