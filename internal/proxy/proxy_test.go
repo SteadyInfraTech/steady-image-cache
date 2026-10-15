@@ -33,7 +33,7 @@ func digestOf(b []byte) string {
 // node is one SIC instance behind a real HTTP server, so that peers can talk to
 // each other the way they do in a cluster.
 type node struct {
-	p   *Proxy
+	p    *Proxy
 	st   *store.Store
 	root string
 	m    *metrics.Metrics
