@@ -26,7 +26,7 @@ type Importer struct {
 // the importer. Keeping it narrow lets tests exercise the import orchestration
 // without a running containerd daemon.
 type contentWalker interface {
-	Walk(context.Context, func(content.Info) error) error
+	Walk(context.Context, content.WalkFunc, ...string) error
 	ReaderAt(context.Context, ocispec.Descriptor) (content.ReaderAt, error)
 }
 
