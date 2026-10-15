@@ -43,6 +43,8 @@ SIC_CONTAINERD_NAMESPACE=k8s.io
 SIC_IMPORT_INTERVAL=5m
 ```
 
+A blob or image name that cannot be imported does not stop the import: the rest is still imported, and the failures are logged at the end of each run (the first few, with a count) and counted in `sic_containerd_import_errors_total`. Blobs that containerd's garbage collector deletes while the import runs are ignored. If the cache has no room left (see `SIC_MIN_FREE_BYTES`) the copying stops for that run, the image names are still imported, and the run reports the full cache.
+
 The containerd account/socket permissions must allow the SIC process to call the content and image services. The supplied DaemonSet runs the container as UID 0 for that reason; tighten this if your containerd socket group/ACL permits it.
 
 ## Peer requests
@@ -122,6 +124,6 @@ The build requires the containerd Go client dependency declared in `go.mod`.
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.
 
-Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node, and a blob that cannot be imported is skipped without a log line. There is no cache eviction.
+Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node. There is no cache eviction.
 
 For a large cluster, the next scalability step would be peer indexing (Bloom filters or a digest advertisement protocol) so a miss does not probe peers sequentially. The current implementation intentionally keeps discovery simple and deterministic.
