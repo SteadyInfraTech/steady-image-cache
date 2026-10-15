@@ -44,7 +44,6 @@ func TestValidDigest(t *testing.T) {
 	}
 }
 
-
 func TestPutVerified(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
