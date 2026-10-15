@@ -94,8 +94,8 @@ type brokenReaderAt struct {
 }
 
 func (r *brokenReaderAt) ReadAt([]byte, int64) (int, error) { return 0, errors.New("read failed") }
-func (r *brokenReaderAt) Close() error { r.closed = true; return nil }
-func (r *brokenReaderAt) Size() int64 { return 16 }
+func (r *brokenReaderAt) Close() error                      { r.closed = true; return nil }
+func (r *brokenReaderAt) Size() int64                       { return 16 }
 
 var _ content.ReaderAt = (*brokenReaderAt)(nil)
 
