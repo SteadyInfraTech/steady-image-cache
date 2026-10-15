@@ -33,23 +33,25 @@ func digestOf(b []byte) string {
 // node is one SIC instance behind a real HTTP server, so that peers can talk to
 // each other the way they do in a cluster.
 type node struct {
-	p   *Proxy
-	st  *store.Store
-	m   *metrics.Metrics
-	fin *swapFinder
-	srv *httptest.Server
+	p    *Proxy
+	st   *store.Store
+	root string
+	m    *metrics.Metrics
+	fin  *swapFinder
+	srv  *httptest.Server
 }
 
 // newNode starts a node. Its peers are filled in later with setPeers because
 // nodes need each other's URLs.
 func newNode(t *testing.T, o Options) *node {
 	t.Helper()
-	st, err := store.New(t.TempDir())
+	root := t.TempDir()
+	st, err := store.New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := &metrics.Metrics{}
-	n := &node{st: st, m: m, fin: &swapFinder{}}
+	n := &node{st: st, m: m, fin: &swapFinder{}, root: root}
 	p, err := New(st, n.fin, m, o)
 	if err != nil {
 		t.Fatal(err)
@@ -1222,5 +1224,36 @@ func TestManifestAliasPersistenceFailureReturnsServerError(t *testing.T) {
 	}
 	if _, ok := st.Resolve(host, "lib/app", "v1"); ok {
 		t.Fatal("manifest alias became visible despite persistence failure")
+	}
+}
+
+// This end-to-end recovery test protects the integrity boundary.
+// A corrupt local hit must not be served or turn into a permanent miss: the
+// proxy should discard it, fetch a verified copy from a healthy peer, and
+// replace the damaged file before responding.
+func TestCorruptedLocalBlobRecoversFromPeer(t *testing.T) {
+	a, b := newNode(t, Options{}), newNode(t, Options{})
+	a.setPeers(b)
+
+	body := []byte("healthy layer bytes")
+	d := put(t, b, body)
+	corruptPath := filepath.Join(a.root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.MkdirAll(filepath.Dir(corruptPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corruptPath, []byte("corrupted cached bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+	if resp.StatusCode != http.StatusOK || string(got) != string(body) {
+		t.Fatalf("status %d body %q, want healthy peer bytes %q", resp.StatusCode, got, body)
+	}
+	stored, err := os.ReadFile(corruptPath)
+	if err != nil || string(stored) != string(body) {
+		t.Fatalf("repaired cache contains %q, err %v", stored, err)
+	}
+	if a.m.PeerHits.Load() != 1 {
+		t.Fatalf("PeerHits = %d, want 1 after recovering corrupted cache", a.m.PeerHits.Load())
 	}
 }
