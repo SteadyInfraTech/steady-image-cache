@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 var (
@@ -18,6 +20,10 @@ var (
 	ErrTooLarge = errors.New("content exceeds the size limit")
 	// ErrDigestMismatch means the content does not hash to the expected digest.
 	ErrDigestMismatch = errors.New("digest mismatch")
+	// ErrLocal marks a failure of the local cache directory (it cannot be
+	// created, written, synced or renamed), as opposed to a problem with the
+	// content or with the source it was read from.
+	ErrLocal = errors.New("cache write failed")
 	// ErrNoSpace means storing the content would leave less free disk space
 	// than the configured reserve.
 	ErrNoSpace = errors.New("not enough free disk space")
@@ -31,6 +37,30 @@ type Store struct {
 	minFree atomic.Int64
 	free    func(path string) (uint64, bool) // replaced in tests
 }
+
+// local tags an error as a local storage failure. A full disk is reported as
+// ErrNoSpace, whether the reserve check or the operating system noticed it.
+func local(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return fmt.Errorf("%w: %v", ErrNoSpace, err)
+	}
+	return fmt.Errorf("%w: %v", ErrLocal, err)
+}
+
+// localWriter tags errors from writing to the cache, so that they can be told
+// apart from errors from the source being copied.
+type localWriter struct{ w io.Writer }
+
+func (l localWriter) Write(p []byte) (int, error) {
+	n, err := l.w.Write(p)
+	return n, local(err)
+}
+
+// MinFree returns the reserve set by SetMinFree.
+func (s *Store) MinFree() int64 { return s.minFree.Load() }
 
 // SetMinFree sets how many bytes of free disk space must remain after a
 // download. Zero only requires that the download itself fits.
@@ -160,7 +190,7 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	}
 	tmp, e := os.CreateTemp(filepath.Dir(p), ".part-")
 	if e != nil {
-		return 0, e
+		return 0, local(e)
 	}
 	defer os.Remove(tmp.Name())
 	src := r
@@ -168,7 +198,7 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
 	}
 	h := sha256.New()
-	n, e := io.Copy(io.MultiWriter(tmp, h), src)
+	n, e := io.Copy(io.MultiWriter(localWriter{tmp}, h), src)
 	if e != nil {
 		tmp.Close()
 		return n, e
@@ -183,13 +213,13 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 	}
 	if e = tmp.Sync(); e != nil {
 		tmp.Close()
-		return n, e
+		return n, local(e)
 	}
 	if e = tmp.Close(); e != nil {
-		return n, e
+		return n, local(e)
 	}
 	if e = os.Rename(tmp.Name(), p); e != nil {
-		return n, e
+		return n, local(e)
 	}
 	return n, nil
 }

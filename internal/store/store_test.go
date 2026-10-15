@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -300,5 +302,64 @@ func TestUnknownFreeSpaceDoesNotBlock(t *testing.T) {
 func TestFreeBytesOnRealDisk(t *testing.T) {
 	if free, ok := freeBytes(t.TempDir()); ok && free == 0 {
 		t.Fatal("freeBytes reported a full disk for the temp dir")
+	}
+}
+
+func TestLocalWriteFailuresAreTagged(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	blobs := filepath.Join(root, "blobs", "sha256")
+	os.RemoveAll(blobs)
+	os.WriteFile(blobs, []byte("a file where the directory should be"), 0644)
+	body := []byte("x")
+	_, err := s.PutVerified(digestOf(body), strings.NewReader(string(body)))
+	if !errors.Is(err, ErrLocal) || errors.Is(err, ErrNoSpace) {
+		t.Fatalf("err = %v, want ErrLocal", err)
+	}
+}
+
+type failingReader struct{ err error }
+
+func (f failingReader) Read([]byte) (int, error) { return 0, f.err }
+
+// A broken source is not a local failure: only the cache's own writes are.
+func TestSourceFailuresAreNotLocal(t *testing.T) {
+	s, _ := New(t.TempDir())
+	_, err := s.PutVerified(digestOf([]byte("x")), failingReader{errors.New("connection reset by peer")})
+	if err == nil || errors.Is(err, ErrLocal) || errors.Is(err, ErrNoSpace) {
+		t.Fatalf("err = %v, want a plain source error", err)
+	}
+	_, err = s.PutVerified(digestOf([]byte("expected")), strings.NewReader("different"))
+	if !errors.Is(err, ErrDigestMismatch) || errors.Is(err, ErrLocal) {
+		t.Fatalf("err = %v, want ErrDigestMismatch", err)
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (f failingWriter) Write([]byte) (int, error) { return 0, f.err }
+
+func TestOutOfSpaceFromTheOperatingSystemIsErrNoSpace(t *testing.T) {
+	err := local(syscall.ENOSPC)
+	if !errors.Is(err, ErrNoSpace) || errors.Is(err, ErrLocal) {
+		t.Fatalf("ENOSPC => %v", err)
+	}
+	if !errors.Is(local(errors.New("disk on fire")), ErrLocal) {
+		t.Fatal("other write errors are ErrLocal")
+	}
+	if local(nil) != nil {
+		t.Fatal("no error must stay no error")
+	}
+	_, err = io.Copy(localWriter{failingWriter{syscall.ENOSPC}}, strings.NewReader("data"))
+	if !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("a write that hits ENOSPC => %v", err)
+	}
+}
+
+func TestMinFreeIsReadable(t *testing.T) {
+	s, _ := New(t.TempDir())
+	s.SetMinFree(12345)
+	if s.MinFree() != 12345 {
+		t.Fatalf("MinFree = %d", s.MinFree())
 	}
 }

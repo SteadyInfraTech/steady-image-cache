@@ -8,7 +8,7 @@ import (
 )
 
 func TestCoalesces(t *testing.T) {
-	var g Group
+	var g Group[bool]
 	var n atomic.Int32
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -32,7 +32,7 @@ func TestCoalesces(t *testing.T) {
 }
 
 func TestKeyIsReleasedAfterCompletion(t *testing.T) {
-	var g Group
+	var g Group[bool]
 	var n int
 	for i := 0; i < 3; i++ {
 		g.Do("x", func() bool { n++; return true })
@@ -43,7 +43,7 @@ func TestKeyIsReleasedAfterCompletion(t *testing.T) {
 }
 
 func TestPanicReleasesWaiters(t *testing.T) {
-	var g Group
+	var g Group[bool]
 	started := make(chan struct{})
 	release := make(chan struct{})
 	leader := make(chan any, 1)
@@ -72,5 +72,33 @@ func TestPanicReleasesWaiters(t *testing.T) {
 	}
 	if !g.Do("k", func() bool { return true }) {
 		t.Fatal("key was not released after the panic")
+	}
+}
+
+// Waiters get the leader's whole result, not just a success flag.
+func TestWaitersShareTheLeadersResult(t *testing.T) {
+	type result struct {
+		ok     bool
+		status int
+	}
+	var g Group[result]
+	started := make(chan struct{})
+	release := make(chan struct{})
+	got := make(chan result, 2)
+	go func() {
+		got <- g.Do("k", func() result {
+			close(started)
+			<-release
+			return result{false, 507}
+		})
+	}()
+	<-started
+	go func() { got <- g.Do("k", func() result { return result{true, 0} }) }()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	for i := 0; i < 2; i++ {
+		if r := <-got; r != (result{false, 507}) {
+			t.Fatalf("caller %d got %+v, want the leader's result", i, r)
+		}
 	}
 }
