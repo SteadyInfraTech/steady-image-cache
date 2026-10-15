@@ -2,6 +2,7 @@ package containerd
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,8 +12,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	"github.com/containerd/containerd/content"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func TestCorruptedCachedContentIsMarkedForReimport(t *testing.T) {
@@ -207,5 +211,143 @@ func TestCacheContentReturnsCloseError(t *testing.T) {
 	// and may treat this import attempt as unsuccessful.
 	if _, err := s.Stat(d); err != nil {
 		t.Fatalf("stored content should exist after the successful copy: %v", err)
+	}
+}
+
+
+// fakeContentWalker drives the same Walk/ReaderAt path used by Importer.Import.
+type fakeContentWalker struct {
+	infos       []content.Info
+	readers     map[string]content.ReaderAt
+	readerErr   error
+	readerCalls int
+	walkErr     error
+}
+
+func (f *fakeContentWalker) Walk(_ context.Context, fn func(content.Info) error) error {
+	for _, info := range f.infos {
+		if err := fn(info); err != nil {
+			return err
+		}
+	}
+	return f.walkErr
+}
+
+func (f *fakeContentWalker) ReaderAt(_ context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
+	f.readerCalls++
+	if f.readerErr != nil {
+		return nil, f.readerErr
+	}
+	ra, ok := f.readers[desc.Digest.String()]
+	if !ok {
+		return nil, errors.New("reader not configured")
+	}
+	return ra, nil
+}
+
+func TestImporterContentWalkRepairsCorruptBlobAndCountsImport(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("containerd importer orchestration payload")
+	d := testDigest(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.WriteFile(path, []byte("corrupt"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceReader := newTestReaderAt(body)
+	cs := &fakeContentWalker{
+		infos: []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
+		readers: map[string]content.ReaderAt{
+			d: sourceReader,
+		},
+	}
+	m := &metrics.Metrics{}
+	i := &Importer{Store: s, Metrics: m}
+	if err := i.importContent(context.Background(), cs); err != nil {
+		t.Fatalf("importContent: %v", err)
+	}
+	if cs.readerCalls != 1 {
+		t.Fatalf("ReaderAt calls = %d, want 1", cs.readerCalls)
+	}
+	if !sourceReader.closed {
+		t.Fatal("source reader was not closed")
+	}
+	if got := m.ImportedBlobs.Load(); got != 1 {
+		t.Fatalf("imported blob metric = %d, want 1", got)
+	}
+	if got := m.ImportedBytes.Load(); got != uint64(len(body)) {
+		t.Fatalf("imported bytes metric = %d, want %d", got, len(body))
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatalf("open repaired blob: %v", err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("repaired content = %q, want %q", got, body)
+	}
+}
+
+func TestImporterContentWalkSkipsValidCachedBlob(t *testing.T) {
+	body := []byte("already cached")
+	d := testDigest(body)
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	cs := &fakeContentWalker{
+		infos: []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
+		readers: map[string]content.ReaderAt{},
+	}
+	m := &metrics.Metrics{}
+	i := &Importer{Store: s, Metrics: m}
+	if err := i.importContent(context.Background(), cs); err != nil {
+		t.Fatalf("importContent: %v", err)
+	}
+	if cs.readerCalls != 0 {
+		t.Fatalf("ReaderAt calls = %d, want 0 for a valid cache hit", cs.readerCalls)
+	}
+	if m.ImportedBlobs.Load() != 0 || m.ImportedBytes.Load() != 0 {
+		t.Fatalf("cache hit changed import metrics: blobs=%d bytes=%d", m.ImportedBlobs.Load(), m.ImportedBytes.Load())
+	}
+}
+
+func TestImporterContentWalkReturnsReaderAtFailure(t *testing.T) {
+	body := []byte("missing from cache")
+	d := testDigest(body)
+	readerErr := errors.New("containerd ReaderAt unavailable")
+	cs := &fakeContentWalker{
+		infos:     []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
+		readers:   map[string]content.ReaderAt{},
+		readerErr: readerErr,
+	}
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := &Importer{Store: s, Metrics: &metrics.Metrics{}}
+	err = i.importContent(context.Background(), cs)
+	if !errors.Is(err, readerErr) {
+		t.Fatalf("importContent error = %v, want wrapped ReaderAt failure", err)
+	}
+	if cs.readerCalls != 1 {
+		t.Fatalf("ReaderAt calls = %d, want 1", cs.readerCalls)
+	}
+	if _, err := s.Stat(d); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed source read unexpectedly created blob, stat error = %v", err)
 	}
 }
