@@ -1114,6 +1114,84 @@ func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T
 	}
 }
 
+func TestManifestRequestsWithDifferentAuthorizationHeadersDoNotShareFlight(t *testing.T) {
+	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
+	seen := make(chan string, 2)
+	release := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Authorization")
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", digestOf(doc))
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+
+	p, _, host := upstreamProxy(t, srv, &logSink{})
+	proxySrv := httptest.NewServer(p)
+	defer proxySrv.Close()
+	url := proxySrv.URL + "/v2/lib/app/manifests/v1?ns=" + host
+	authHeaders := []string{"Bearer credential-one", "Bearer credential-two"}
+
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(authHeaders))
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, auth := range authHeaders {
+		auth := auth
+		go func() {
+			<-start
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			req.Header.Set("Authorization", auth)
+			resp, err := client.Do(req)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			results <- result{status: resp.StatusCode, body: string(body), err: err}
+		}()
+	}
+	close(start)
+
+	got := map[string]bool{}
+	for range authHeaders {
+		select {
+		case auth := <-seen:
+			got[auth] = true
+		case <-time.After(2 * time.Second):
+			close(release)
+			t.Fatalf("upstream did not receive both Authorization variants; got %v", got)
+		}
+	}
+	for _, auth := range authHeaders {
+		if !got[auth] {
+			close(release)
+			t.Fatalf("upstream did not receive Authorization %q; saw %v", auth, got)
+		}
+	}
+	close(release)
+	for range authHeaders {
+		res := <-results
+		if res.err != nil || res.status != http.StatusOK || res.body != string(doc) {
+			t.Errorf("manifest response = status %d, body %q, err %v", res.status, res.body, res.err)
+		}
+	}
+}
+
 func TestManifestAliasPersistenceFailureReturnsServerError(t *testing.T) {
 	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
