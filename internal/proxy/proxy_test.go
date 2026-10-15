@@ -1056,7 +1056,9 @@ func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T
 	defer close(release)
 
 	p, _, host := upstreamProxy(t, srv, &logSink{})
-	url := pTestURL(host)
+	proxySrv := httptest.NewServer(p)
+	defer proxySrv.Close()
+	url := proxySrv.URL + "/v2/lib/app/manifests/v1?ns=" + host
 	accepts := []string{
 		"application/vnd.oci.image.manifest.v1+json",
 		"application/vnd.docker.distribution.manifest.v2+json",
@@ -1144,10 +1146,4 @@ func TestManifestAliasPersistenceFailureReturnsServerError(t *testing.T) {
 	if _, ok := st.Resolve(host, "lib/app", "v1"); ok {
 		t.Fatal("manifest alias became visible despite persistence failure")
 	}
-}
-
-// pTestURL builds the in-process request URL while preserving the upstream
-// registry namespace used by the proxy's allow-list.
-func pTestURL(host string) string {
-	return "http://proxy.test/v2/lib/app/manifests/v1?ns=" + host
 }
