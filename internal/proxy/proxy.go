@@ -266,6 +266,7 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	if e != nil {
 		return false
 	}
+	p.store.Touch(d)
 	ct := "application/octet-stream"
 	if ctype != nil {
 		ct = ctype(f)

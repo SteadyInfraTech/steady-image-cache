@@ -49,16 +49,32 @@ type Store struct {
 	mu             sync.RWMutex
 	aliases        map[string]string
 
-	minFree atomic.Int64
-	free    func(path string) (uint64, bool) // replaced in tests
+	minFree    atomic.Int64
+	minFreePct atomic.Int64
+	maxBytes   atomic.Int64
+	free       func(path string) (uint64, bool) // replaced in tests
+	total      func(path string) (uint64, bool) // replaced in tests
 
 	capacityMu sync.Mutex // guards reservations across distinct digest writes
-	reserved   int64
+	reserved   int64      // promised to writers and not yet reflected in free space
+	pending    int64      // promised to writers and not yet committed to used
 
-	verifiedMu    sync.Mutex // guards verified, verifiedDirty and lastScrub
-	verified      map[string]stamp
-	verifiedDirty bool
-	lastScrub     time.Time
+	used         atomic.Int64 // bytes in blobs/
+	evictMu      sync.Mutex   // one eviction scan at a time
+	minAge       atomic.Int64 // nanoseconds
+	slack        func(used int64) int64
+	evictedBlobs atomic.Uint64
+	evictedBytes atomic.Uint64
+	evMu         sync.Mutex
+	evicted      map[string]struct{}
+
+	verifiedMu     sync.Mutex // guards verified, lastUse, their dirty flags and lastScrub
+	verified       map[string]stamp
+	verifiedDirty  bool
+	lastUse        map[string]int64 // unix nanoseconds
+	usageDirty     bool
+	lastUsageFlush time.Time
+	lastScrub      time.Time
 
 	corrupt atomic.Uint64
 	logf    func(string, ...any)
@@ -120,6 +136,19 @@ func (s *Store) lockBlob(d string) func() {
 	}
 }
 
+// tryLockBlob takes the lock exclusively but gives up instead of waiting.
+func (s *Store) tryLockBlob(d string) (func(), bool) {
+	l := s.blobLock(d)
+	if !l.mu.TryLock() {
+		s.dropBlobLock(d, l)
+		return nil, false
+	}
+	return func() {
+		l.mu.Unlock()
+		s.dropBlobLock(d, l)
+	}, true
+}
+
 // tryRLockBlob takes the lock for reading, sharing it with other readers, but
 // gives up instead of waiting for a writer. A writer holds the lock for the
 // whole download, so a reader that waited would stall until it finished.
@@ -163,28 +192,12 @@ func (s *Store) MinFree() int64 { return s.minFree.Load() }
 // download. Zero only requires that the download itself fits.
 func (s *Store) SetMinFree(n int64) { s.minFree.Store(n) }
 
-// checkSpace reports ErrNoSpace if need more bytes plus the reserve do not fit.
-// Where free space cannot be determined the check is skipped.
-func (s *Store) checkSpace(need int64) error {
-	free, ok := s.free(s.root)
-	if !ok {
-		return nil
-	}
-	reserve := s.minFree.Load()
-	if reserve < 0 {
-		reserve = 0
-	}
-	if free < uint64(need)+uint64(reserve) {
-		return ErrNoSpace
-	}
-	return nil
-}
-
 // capacityReservation tracks only the portion of a write that has not yet
 // been reflected in the filesystem's free-space measurement.
 type capacityReservation struct {
 	store     *Store
 	remaining int64
+	total     int64
 }
 
 func (r *capacityReservation) consume(n int64) {
@@ -203,7 +216,8 @@ func (r *capacityReservation) consume(n int64) {
 func (r *capacityReservation) release() {
 	r.store.capacityMu.Lock()
 	r.store.reserved -= r.remaining
-	r.remaining = 0
+	r.store.pending -= r.total
+	r.remaining, r.total = 0, 0
 	r.store.capacityMu.Unlock()
 }
 
@@ -222,28 +236,30 @@ func (w reservingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// reserveSpace checks the configured free-space reserve and reserves capacity
-// for an in-flight write. Outstanding reservations cover only bytes not yet
-// written, because written bytes are already reflected in the filesystem's
-// free-space measurement.
-func (s *Store) reserveSpace(need int64) (*capacityReservation, error) {
-	s.capacityMu.Lock()
-	free, ok := s.free(s.root)
-	reserve := s.minFree.Load()
-	if reserve < 0 {
-		reserve = 0
-	}
-	if ok {
-		required := uint64(need) + uint64(reserve) + uint64(s.reserved)
-		if free < required {
+// reserveSpace makes sure need more bytes fit within the size limit and the
+// free-space reserve, and reserves them for an in-flight write. Outstanding
+// reservations cover only bytes not yet written, because written bytes are
+// already reflected in the filesystem's free-space measurement. If they do not
+// fit and evict is set, the least recently used blobs are removed to make room,
+// unless even removing all of them would not be enough: emptying the cache for
+// nothing would only cost the cache.
+func (s *Store) reserveSpace(need int64, evict bool) (*capacityReservation, error) {
+	for attempt := 0; ; attempt++ {
+		s.capacityMu.Lock()
+		short := s.shortfallLocked(need)
+		if short <= 0 {
+			s.reserved += need
+			s.pending += need
+			r := &capacityReservation{store: s, remaining: need, total: need}
 			s.capacityMu.Unlock()
+			return r, nil
+		}
+		s.capacityMu.Unlock()
+		if !evict || attempt >= 2 || short > s.used.Load() {
 			return nil, ErrNoSpace
 		}
+		s.evict(short)
 	}
-	s.reserved += need
-	r := &capacityReservation{store: s, remaining: need}
-	s.capacityMu.Unlock()
-	return r, nil
 }
 
 // ValidDigest reports whether d is a well-formed sha256 digest: "sha256:"
@@ -277,10 +293,16 @@ func New(root string) (*Store, error) {
 		aliases:        map[string]string{},
 		free:           freeBytes,
 		verified:       map[string]stamp{},
+		lastUse:        map[string]int64{},
+		evicted:        map[string]struct{}{},
+		total:          totalBytes,
+		slack:          defaultSlack,
 		createBlobTemp: func(dir, pattern string) (blobTempFile, error) { return os.CreateTemp(dir, pattern) },
 		renameBlob:     os.Rename,
 		removeBlob:     os.Remove,
 	}
+	s.minAge.Store(int64(defaultEvictMinAge))
+	s.used.Store(usage(blobs))
 	s.loadVerified()
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
@@ -369,11 +391,11 @@ func (s *Store) Open(d string) (*os.File, error) {
 	unchanged := stampOf(before) == stampOf(after)
 	if hex.EncodeToString(h.Sum(nil)) != strings.TrimPrefix(d, "sha256:") || !unchanged {
 		_ = f.Close()
-		s.forgetVerified(d)
 		s.noteCorrupt(d)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, local(err)
 		}
+		s.goneCorrupt(d)
 		return nil, ErrDigestMismatch
 	}
 	s.markVerified(d, stampOf(after))
@@ -401,7 +423,19 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 // bound on the size (negative means none). A positive max also has to fit in
 // the free disk space, above the reserve set by SetMinFree, before any data is
 // written.
-func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (written int64, retErr error) {
+func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
+	return s.put(d, r, max, true)
+}
+
+// PutIfRoom is PutVerifiedLimit that never evicts: when the content does not fit
+// it fails with ErrNoSpace. The containerd import uses it, because copying
+// content that containerd already holds must not push out blobs that were
+// fetched for a pull.
+func (s *Store) PutIfRoom(d string, r io.Reader, max int64) (int64, error) {
+	return s.put(d, r, max, false)
+}
+
+func (s *Store) put(d string, r io.Reader, max int64, evict bool) (written int64, retErr error) {
 	unlock := s.lockBlob(d)
 	defer unlock()
 	p, e := s.path(d)
@@ -425,13 +459,15 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (written int6
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return 0, local(err)
 		}
+		s.noteCorrupt(d)
+		s.goneCorrupt(d)
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return 0, local(e)
 	}
 	var reservation *capacityReservation
 	if max > 0 {
 		var err error
-		reservation, err = s.reserveSpace(max)
+		reservation, err = s.reserveSpace(max, evict)
 		if err != nil {
 			return 0, err
 		}
@@ -499,6 +535,9 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (written int6
 	if fi, err := os.Stat(p); err == nil {
 		s.markVerified(d, stampOf(fi))
 	}
+	s.used.Add(n)
+	s.markUsed(d)
+	s.forgetEvicted(d)
 	return n, nil
 }
 

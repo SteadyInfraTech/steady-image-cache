@@ -1314,3 +1314,35 @@ func TestPeerAskingForABlobThatIsStillArrivingIsNotSkipped(t *testing.T) {
 		t.Fatalf("once A has the blob, B must get it: status %d", resp.StatusCode)
 	}
 }
+
+// A cache that has reached its limit makes room by dropping what was used
+// longest ago; it does not turn the pull away with "insufficient storage".
+func TestFullCacheEvictsInsteadOfRefusing(t *testing.T) {
+	a, b := newNode(t, Options{}), newNode(t, Options{})
+	a.setPeers(b)
+	x := put(t, b, []byte(strings.Repeat("x", 100)))
+	y := put(t, b, []byte(strings.Repeat("y", 100)))
+	a.st.SetMaxBytes(150)
+	a.st.SetEvictMinAge(0)
+
+	if resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+x); resp.StatusCode != 200 {
+		t.Fatalf("first blob: status %d", resp.StatusCode)
+	}
+	resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+y)
+	if resp.StatusCode != 200 || string(got) != strings.Repeat("y", 100) {
+		t.Fatalf("second blob: status %d; a full cache must evict, not refuse", resp.StatusCode)
+	}
+	if _, err := a.st.Stat(x); err == nil {
+		t.Fatal("the older blob should have been evicted")
+	}
+	if n, _ := a.st.Evicted(); n != 1 {
+		t.Fatalf("evicted %d blobs, want 1", n)
+	}
+	if a.m.DiskFull.Load() != 0 {
+		t.Fatalf("DiskFull = %d: nothing was refused", a.m.DiskFull.Load())
+	}
+	// The evicted blob is simply fetched again when somebody asks.
+	if resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+x); resp.StatusCode != 200 {
+		t.Fatalf("evicted blob fetched again: status %d", resp.StatusCode)
+	}
+}
