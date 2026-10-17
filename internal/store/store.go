@@ -424,7 +424,43 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 // the free disk space, above the reserve set by SetMinFree, before any data is
 // written.
 func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
-	return s.put(d, r, max, true)
+	return s.put(d, r, max, true, nil)
+}
+
+// Progress observes a store in progress so that its content can be passed on
+// while it is still arriving. Calls come from the goroutine doing the store.
+type Progress interface {
+	// Begin is called once the partial file exists and before anything is
+	// written, only when the size bound is positive. The file can be opened
+	// and read up to the number of bytes reported by Wrote. Its content is
+	// not verified: it may still turn out wrong, which End reports.
+	Begin(path string, max int64)
+	// Wrote reports the total number of bytes now readable from the file.
+	Wrote(total int64)
+	// End is called exactly once, after the content is stored (err is nil) or
+	// has been abandoned. It can come without Begin, for content that was
+	// stored already or is empty.
+	End(err error)
+}
+
+// PutStream is PutVerifiedLimit that reports its progress to prog.
+func (s *Store) PutStream(d string, r io.Reader, max int64, prog Progress) (int64, error) {
+	return s.put(d, r, max, true, prog)
+}
+
+type progressWriter struct {
+	w     io.Writer
+	prog  Progress
+	total int64
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if n > 0 {
+		w.total += int64(n)
+		w.prog.Wrote(w.total)
+	}
+	return n, err
 }
 
 // PutIfRoom is PutVerifiedLimit that never evicts: when the content does not fit
@@ -432,10 +468,21 @@ func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error
 // content that containerd already holds must not push out blobs that were
 // fetched for a pull.
 func (s *Store) PutIfRoom(d string, r io.Reader, max int64) (int64, error) {
-	return s.put(d, r, max, false)
+	return s.put(d, r, max, false, nil)
 }
 
-func (s *Store) put(d string, r io.Reader, max int64, evict bool) (written int64, retErr error) {
+func (s *Store) put(d string, r io.Reader, max int64, evict bool, prog Progress) (int64, error) {
+	if prog == nil {
+		return s.putLocked(d, r, max, evict, nil)
+	}
+	n, err := s.putLocked(d, r, max, evict, prog)
+	// Only now, with the partial file renamed or removed and the blob's lock
+	// released, so that End(nil) means the blob can be opened.
+	prog.End(err)
+	return n, err
+}
+
+func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Progress) (written int64, retErr error) {
 	unlock := s.lockBlob(d)
 	defer unlock()
 	p, e := s.path(d)
@@ -494,6 +541,10 @@ func (s *Store) put(d string, r io.Reader, max int64, evict bool) (written int64
 	var dst io.Writer = localWriter{tmp}
 	if reservation != nil {
 		dst = reservingWriter{w: dst, reservation: reservation}
+	}
+	if prog != nil && max > 0 {
+		prog.Begin(tmp.Name(), max)
+		dst = &progressWriter{w: dst, prog: prog}
 	}
 	n, e := io.Copy(io.MultiWriter(dst, h), src)
 	if e != nil {

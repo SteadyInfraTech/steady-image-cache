@@ -53,6 +53,14 @@ Requests that SIC sends to its peers carry an `X-SIC-Peer` header. A SIC that re
 
 A peer that does not accept a connection and start answering within `SIC_PEER_TIMEOUT` (default `5s`) is skipped for `SIC_PEER_BACKOFF` (default `30s`; `0` disables skipping), so a dead node slows one request instead of every miss. Peers discovered through Kubernetes must be Ready and not terminating.
 
+## Streaming a miss
+
+A layer that is not cached is passed on to containerd while it is still being downloaded, so the pull starts at once instead of waiting for the whole layer to arrive first. Everyone asking for the same blob shares one download, which goes on if a client leaves, and every one of them is fed from the file as it is written.
+
+The digest can only be checked at the end, so the last byte of a response is held back until the check has passed. If it fails, or the source breaks off, the response stops one byte short and the connection is closed: containerd sees an error and retries, and the bad content is never stored. The earlier bytes were sent unverified; containerd checks every layer against its digest itself. A `HEAD` request or a request with a `Range` header needs the whole blob and waits for it. `sic_streamed_responses_total` counts streamed responses and `sic_stream_aborts_total` those that were cut short.
+
+When a source fails after the status line has been sent, the client gets a broken response and not the `404` it would have got before; a peer that fails halfway through is replaced by the next one for later clients.
+
 ## Download limits
 
 A digest can only be checked once a download has finished, so SIC bounds what it will accept before then:
