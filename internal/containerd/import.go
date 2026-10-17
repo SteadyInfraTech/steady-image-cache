@@ -153,6 +153,11 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 			return err
 		}
 		d := info.Digest.String()
+		// Content the cache just evicted would only be copied back and evicted
+		// again; leave it to be fetched when somebody asks for it.
+		if i.Store.WasEvicted(d) {
+			return nil
+		}
 		cached, err := cachedContentValid(i.Store, d)
 		if err != nil {
 			failed.add(fmt.Errorf("verify cached containerd content %s: %w", d, err))
@@ -220,7 +225,7 @@ func cachedContentValid(s *store.Store, d string) (bool, error) {
 // either error makes an incomplete import visible to the caller instead of
 // reporting a successful import with missing or unverified content.
 func cacheContent(dst *store.Store, d string, ra content.ReaderAt) (int64, error) {
-	n, putErr := dst.PutVerifiedLimit(d, io.NewSectionReader(ra, 0, ra.Size()), ra.Size())
+	n, putErr := dst.PutIfRoom(d, io.NewSectionReader(ra, 0, ra.Size()), ra.Size())
 	closeErr := ra.Close()
 	if putErr != nil {
 		return n, fmt.Errorf("store content: %w", putErr)

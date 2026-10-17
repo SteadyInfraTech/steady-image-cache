@@ -73,7 +73,9 @@ type Proxy struct {
 	upstream       bool
 	registries     map[string]bool
 	idle           time.Duration
-	flights        flight.Group[fetchResult]
+	flights        flight.Group[fetchResult] // manifests
+	dlmu           sync.Mutex                // guards downloads
+	downloads      map[string]*download      // blobs being fetched, by digest
 
 	peerTimeout, backoff time.Duration
 	tls                  *tlsutil.Reloader
@@ -119,6 +121,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		tls:            o.TLS,
 		serverName:     o.ServerName,
 		down:           map[string]time.Time{},
+		downloads:      map[string]*download{},
 		now:            time.Now,
 		logf:           o.Logf,
 		lastLog:        map[string]time.Time{},
@@ -243,6 +246,7 @@ type info struct {
 	ns     string
 	accept string
 	auth   string
+	dl     *download // the blob download these requests belong to, if any
 }
 
 func newInfo(r *http.Request) info {
@@ -266,6 +270,7 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	if e != nil {
 		return false
 	}
+	p.store.Touch(d)
 	ct := "application/octet-stream"
 	if ctype != nil {
 		ct = ctype(f)
@@ -338,7 +343,9 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	in := newInfo(r)
 	path := "/v2/" + repo + "/blobs/" + d
-	res := p.flights.Do("blob:"+d, func() fetchResult {
+	dl := p.join(d, func(dl *download) fetchResult {
+		in := in
+		in.dl = dl
 		if _, err := p.store.Stat(d); err == nil {
 			return fetched
 		}
@@ -354,6 +361,15 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		}
 		return r
 	})
+	// A plain GET is answered while the blob is still arriving. Anything else
+	// (HEAD, a byte range) needs the whole blob, so it waits for it.
+	if streamable(r) && p.stream(w, r, d, dl) {
+		return
+	}
+	res, ok := dl.wait(r.Context())
+	if !ok {
+		return // the client gave up
+	}
 	if res.ok && p.serveDigest(w, r, d, nil) {
 		return
 	}
@@ -556,11 +572,16 @@ var (
 // long the body is: that length is the bound on what gets written, and it has
 // to fit on the disk. Without a declared length a peer could stream data until
 // the disk is full, because the digest can only be checked at the end.
-func (p *Proxy) putBlob(d string, resp *http.Response) error {
+func (p *Proxy) putBlob(d string, resp *http.Response, dl *download) error {
 	if resp.ContentLength < 0 {
 		return fmt.Errorf("%w: no Content-Length", errBadContent)
 	}
-	_, err := p.store.PutVerifiedLimit(d, resp.Body, resp.ContentLength)
+	var err error
+	if dl != nil {
+		_, err = p.store.PutStream(d, resp.Body, resp.ContentLength, dl)
+	} else {
+		_, err = p.store.PutVerifiedLimit(d, resp.Body, resp.ContentLength)
+	}
 	if errors.Is(err, store.ErrTooLarge) {
 		return fmt.Errorf("%w: longer than the declared %d bytes", errBadContent, resp.ContentLength)
 	}
@@ -604,7 +625,7 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 			continue
 		}
 		size := resp.ContentLength
-		e = p.putBlob(d, resp)
+		e = p.putBlob(d, resp, in.dl)
 		resp.Body.Close()
 		if e == nil {
 			return fetched
@@ -751,7 +772,7 @@ func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 		return fetchResult{}
 	}
 	size := resp.ContentLength
-	if e = p.putBlob(d, resp); e != nil {
+	if e = p.putBlob(d, resp, in.dl); e != nil {
 		if r, ours := p.localFailure(e, d, size); ours {
 			return r
 		}

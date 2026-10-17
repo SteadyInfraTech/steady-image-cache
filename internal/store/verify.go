@@ -37,19 +37,14 @@ func (s *Store) markVerified(d string, st stamp) {
 	s.verifiedMu.Unlock()
 }
 
-func (s *Store) forgetVerified(d string) {
-	s.verifiedMu.Lock()
-	if _, ok := s.verified[d]; ok {
-		delete(s.verified, d)
-		s.verifiedDirty = true
-	}
-	s.verifiedMu.Unlock()
-}
-
 // verifiedDoc is the on-disk form of the record of verified blobs.
 type verifiedDoc struct {
 	Scrubbed int64            `json:"scrubbed,omitempty"` // when a full pass last finished, unix seconds
 	Blobs    map[string]stamp `json:"blobs"`
+	// LastUse is when each blob was last stored or served (unix nanoseconds), for
+	// eviction. It is kept here, not in the file's modification time, because
+	// that is part of what vouches for a verified blob.
+	LastUse map[string]int64 `json:"lastuse,omitempty"`
 }
 
 // loadVerified reads the record of verified blobs that the previous run saved,
@@ -74,27 +69,54 @@ func (s *Store) loadVerified() {
 			s.verified[d] = st
 		}
 	}
+	for d, u := range doc.LastUse {
+		p, err := s.path(d)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			s.lastUse[d] = u
+		}
+	}
 	if doc.Scrubbed > 0 {
 		s.lastScrub = time.Unix(doc.Scrubbed, 0)
 	}
 }
 
-// FlushVerified saves the record of verified blobs if it changed. A record that
-// is lost in a crash only costs hashing those blobs again.
-func (s *Store) FlushVerified() error {
+// FlushVerified saves the record of verified blobs and last-use times if it
+// changed. A record that is lost in a crash only costs hashing those blobs again
+// and a less accurate idea of what was used last.
+func (s *Store) FlushVerified() error { return s.flush(true) }
+
+// usageFlushEvery is how rarely a change that only concerns last-use times is
+// written: serving a blob changes one, and the record can be megabytes.
+const usageFlushEvery = 5 * time.Minute
+
+func (s *Store) flush(force bool) error {
 	s.verifiedMu.Lock()
-	if !s.verifiedDirty {
+	if !s.verifiedDirty && !s.usageDirty {
 		s.verifiedMu.Unlock()
 		return nil
 	}
-	doc := verifiedDoc{Blobs: make(map[string]stamp, len(s.verified))}
+	if !force && !s.verifiedDirty && time.Since(s.lastUsageFlush) < usageFlushEvery {
+		s.verifiedMu.Unlock()
+		return nil
+	}
+	doc := verifiedDoc{
+		Blobs:   make(map[string]stamp, len(s.verified)),
+		LastUse: make(map[string]int64, len(s.lastUse)),
+	}
 	for d, st := range s.verified {
 		doc.Blobs[d] = st
+	}
+	for d, u := range s.lastUse {
+		doc.LastUse[d] = u
 	}
 	if !s.lastScrub.IsZero() {
 		doc.Scrubbed = s.lastScrub.Unix()
 	}
-	s.verifiedDirty = false
+	s.verifiedDirty, s.usageDirty = false, false
+	s.lastUsageFlush = time.Now()
 	s.verifiedMu.Unlock()
 
 	b, err := json.Marshal(doc)
@@ -253,11 +275,11 @@ func (s *Store) scrubOne(ctx context.Context, d string, rate int64) (checked, re
 	if err != nil || stampOf(now) != stampOf(before) {
 		return false, false, nil
 	}
-	s.forgetVerified(d)
 	s.noteCorrupt(d)
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return true, false, nil
 	}
+	s.goneCorrupt(d)
 	return true, true, nil
 }
 
@@ -314,7 +336,9 @@ func (s *Store) RunBackground(ctx context.Context, b Background) {
 			flushNow()
 			return
 		case <-flush.C:
-			flushNow()
+			if err := s.flush(false); err != nil {
+				logf("cache: saving the verified-blob record: %v", err)
+			}
 		case <-scrubC:
 			checked, removed, err := s.Scrub(ctx, b.ScrubRate)
 			switch {
@@ -326,6 +350,7 @@ func (s *Store) RunBackground(ctx context.Context, b Background) {
 				if removed > 0 {
 					logf("cache: scrub checked %d blobs and removed %d that were corrupt", checked, removed)
 				}
+				s.used.Store(usage(filepath.Join(s.root, "blobs", "sha256"))) // correct any drift
 				s.verifiedMu.Lock()
 				s.lastScrub = time.Now()
 				s.verifiedDirty = true

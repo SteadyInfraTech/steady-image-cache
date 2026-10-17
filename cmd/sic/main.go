@@ -55,10 +55,15 @@ func main() {
 		log.Fatal(err)
 	}
 	st.SetMinFree(cfg.MinFreeBytes)
+	st.SetMinFreePercent(cfg.MinFreePercent)
+	st.SetMaxBytes(cfg.MaxCacheBytes)
 	st.SetLogf(log.Printf)
 	m := &metrics.Metrics{}
 	m.Funcs = []metrics.Func{
 		{Name: "sic_corrupt_blobs_total", Type: "counter", Value: func() int64 { return int64(st.Corrupt()) }},
+		{Name: "sic_cache_bytes", Type: "gauge", Value: st.Used},
+		{Name: "sic_evicted_blobs_total", Type: "counter", Value: func() int64 { n, _ := st.Evicted(); return int64(n) }},
+		{Name: "sic_evicted_bytes_total", Type: "counter", Value: func() int64 { _, n := st.Evicted(); return int64(n) }},
 	}
 	// Verification happens in the background, off the request path: the record
 	// of verified blobs is saved regularly and a slow pass re-checks them all.

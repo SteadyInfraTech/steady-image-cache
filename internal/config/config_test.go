@@ -122,3 +122,34 @@ func TestScrubSettings(t *testing.T) {
 		t.Fatalf("invalid values must keep the defaults: interval %v, rate %d", c.ScrubInterval, c.ScrubRate)
 	}
 }
+
+func TestCacheLimitSettings(t *testing.T) {
+	c := FromEnv()
+	if c.MinFreePercent != 20 || c.MaxCacheBytes != 0 {
+		t.Fatalf("defaults: percent %d, max %d", c.MinFreePercent, c.MaxCacheBytes)
+	}
+	t.Setenv("SIC_MIN_FREE_PERCENT", "35")
+	t.Setenv("SIC_MAX_CACHE_BYTES", "5368709120")
+	c = FromEnv()
+	if c.MinFreePercent != 35 || c.MaxCacheBytes != 5<<30 {
+		t.Fatalf("percent %d, max %d", c.MinFreePercent, c.MaxCacheBytes)
+	}
+	t.Setenv("SIC_MIN_FREE_PERCENT", "0")
+	if c = FromEnv(); c.MinFreePercent != 0 {
+		t.Fatalf("0 must switch the percentage reserve off, got %d", c.MinFreePercent)
+	}
+	t.Setenv("SIC_MAX_CACHE_BYTES", "")
+	for _, bad := range []string{"-1", "91", "lots"} {
+		t.Setenv("SIC_MIN_FREE_PERCENT", bad)
+		if c = FromEnv(); c.MinFreePercent != 20 {
+			t.Fatalf("percent %q must keep the default, got %d", bad, c.MinFreePercent)
+		}
+	}
+	t.Setenv("SIC_MIN_FREE_PERCENT", "")
+	for _, bad := range []string{"-1", "lots"} {
+		t.Setenv("SIC_MAX_CACHE_BYTES", bad)
+		if c = FromEnv(); c.MaxCacheBytes != 0 {
+			t.Fatalf("size %q must keep the default, got %d", bad, c.MaxCacheBytes)
+		}
+	}
+}

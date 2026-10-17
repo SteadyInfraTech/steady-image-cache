@@ -53,13 +53,21 @@ Requests that SIC sends to its peers carry an `X-SIC-Peer` header. A SIC that re
 
 A peer that does not accept a connection and start answering within `SIC_PEER_TIMEOUT` (default `5s`) is skipped for `SIC_PEER_BACKOFF` (default `30s`; `0` disables skipping), so a dead node slows one request instead of every miss. Peers discovered through Kubernetes must be Ready and not terminating.
 
+## Streaming a miss
+
+A layer that is not cached is passed on to containerd while it is still being downloaded, so the pull starts at once instead of waiting for the whole layer to arrive first. Everyone asking for the same blob shares one download, which goes on if a client leaves, and every one of them is fed from the file as it is written.
+
+The digest can only be checked at the end, so the last byte of a response is held back until the check has passed. If it fails, or the source breaks off, the response stops one byte short and the connection is closed: containerd sees an error and retries, and the bad content is never stored. The earlier bytes were sent unverified; containerd checks every layer against its digest itself. A `HEAD` request or a request with a `Range` header needs the whole blob and waits for it. `sic_streamed_responses_total` counts streamed responses and `sic_stream_aborts_total` those that were cut short.
+
+When a source fails after the status line has been sent, the client gets a broken response and not the `404` it would have got before; a peer that fails halfway through is replaced by the next one for later clients.
+
 ## Download limits
 
 A digest can only be checked once a download has finished, so SIC bounds what it will accept before then:
 
 * A blob from a peer or registry must declare its `Content-Length`; that length is the most SIC will write, and it must fit on the disk.
 * A manifest may be at most 4 MiB. Its digest is computed from its content; a `Docker-Content-Digest` header is only cross-checked, never required.
-* `SIC_MIN_FREE_BYTES` (default 1 GiB, `0` for none) is the free disk space that has to remain after a download. When it would not, the download is refused. This also applies to the containerd import.
+* `SIC_MIN_FREE_BYTES` (default 1 GiB, `0` for none) and `SIC_MIN_FREE_PERCENT` (default 20, `0` for none) are the free disk space that has to remain after a download; the larger of the two applies. When a download would break that, SIC first makes room (see below) and only then refuses it.
 * Responses are never decompressed on the way in, so the stored bytes are exactly what the digest covers.
 
 ## Integrity
@@ -72,6 +80,17 @@ Hashing on the request path made the first read of every blob wait for a full pa
 * `SIC_SCRUB_RATE` (default 32 MiB/s, in bytes per second) limits how fast it reads.
 
 Whatever consumes a blob verifies it as well: containerd checks layer digests, and a peer hashes what it receives.
+
+## Cache size and eviction
+
+The cache no longer grows until the disk is full. When a download would leave less free space than the reserve above, or would take the cache over `SIC_MAX_CACHE_BYTES` (default `0`: no limit), SIC removes the least recently used blobs until it fits, a little more than needed so that the next downloads do not each have to scan the cache. Only if even removing everything would not be enough does the download fail with `507`; SIC does not empty the cache in vain.
+
+* The default reserve of 20% of the filesystem keeps SIC clear of the kubelet's own thresholds: with the usual defaults it starts evicting pods and garbage-collecting images when the image filesystem is less than 15% free. SIC's cache directory is normally on the same filesystem as containerd's. Lower `SIC_MIN_FREE_PERCENT` only if you know the node's eviction thresholds.
+* "Used" means stored or served. A blob stored or served in the last minute is never evicted, and neither is a blob that is being read or written at that moment. The time is kept in `verified.json`, not in the file's modification time, so it survives a restart.
+* The containerd import never evicts: it copies content that containerd already holds, so when the cache is full it stops for that run instead of pushing out blobs fetched for a pull. It also does not copy back what was evicted.
+* Exposed as `sic_cache_bytes`, `sic_evicted_blobs_total` and `sic_evicted_bytes_total`.
+
+An evicted tag still resolves; the manifest is fetched again from a peer when somebody asks. Image names and their digests in `aliases.json` are not removed.
 
 ## Upstream fallback
 
@@ -135,6 +154,6 @@ The build requires the containerd Go client dependency declared in `go.mod`.
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.
 
-Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node. There is no cache eviction.
+Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node.
 
 For a large cluster, the next scalability step would be peer indexing (Bloom filters or a digest advertisement protocol) so a miss does not probe peers sequentially. The current implementation intentionally keeps discovery simple and deterministic.

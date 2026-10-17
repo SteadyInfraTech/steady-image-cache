@@ -24,8 +24,13 @@ type Config struct {
 	// answering before it counts as failed. PeerBackoff is how long a failed
 	// peer is then left alone.
 	PeerTimeout, PeerBackoff time.Duration
-	// MinFreeBytes is the free disk space that must remain after a download.
-	MinFreeBytes int64
+	// MinFreeBytes and MinFreePercent are the free disk space that must remain
+	// after a download; the larger applies. MaxCacheBytes limits the cache size
+	// (zero: no limit). When a download would break either, the least recently
+	// used blobs are evicted.
+	MinFreeBytes   int64
+	MinFreePercent int
+	MaxCacheBytes  int64
 
 	// ScrubInterval is the time between complete background passes that check
 	// every cached blob against its digest (zero: never). ScrubRate limits how
@@ -91,6 +96,7 @@ func FromEnv() Config {
 		PeerTimeout:         5 * time.Second,
 		PeerBackoff:         30 * time.Second,
 		MinFreeBytes:        1 << 30,
+		MinFreePercent:      20,
 		ScrubInterval:       24 * time.Hour,
 		ScrubRate:           32 << 20,
 		UpstreamTimeout:     30 * time.Second,
@@ -137,6 +143,16 @@ func FromEnv() Config {
 	if v := os.Getenv("SIC_MIN_FREE_BYTES"); v != "" {
 		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
 			c.MinFreeBytes = n
+		}
+	}
+	if v := os.Getenv("SIC_MIN_FREE_PERCENT"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n >= 0 && n <= 90 {
+			c.MinFreePercent = n
+		}
+	}
+	if v := os.Getenv("SIC_MAX_CACHE_BYTES"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
+			c.MaxCacheBytes = n
 		}
 	}
 	if v := os.Getenv("SIC_SCRUB_INTERVAL"); v != "" {

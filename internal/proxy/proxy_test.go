@@ -90,6 +90,35 @@ func put(t *testing.T, n *node, body []byte) string {
 	return d
 }
 
+// getFailing requests a blob that cannot be fetched or fails verification and
+// checks that the client never gets a complete 200 response. Depending on
+// whether the client attached while the bad content was still arriving, it
+// sees a 404 or a response that starts and is cut short.
+func getFailing(t *testing.T, url string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound || err != nil {
+		return
+	}
+	t.Fatalf("status %d with %d bytes and no error, want 404 or a cut-off response", resp.StatusCode, len(b))
+}
+
+// waitCount waits for a counter that is bumped just after the response ends.
+func waitCount(t *testing.T, c *atomic.Uint64, want uint64) {
+	t.Helper()
+	for i := 0; i < 200 && c.Load() != want; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if c.Load() != want {
+		t.Fatalf("counter = %d, want %d", c.Load(), want)
+	}
+}
+
 func get(t *testing.T, url string, hdr ...string) (*http.Response, []byte) {
 	t.Helper()
 	req, _ := http.NewRequest("GET", url, nil)
@@ -133,9 +162,7 @@ func TestBlobFetchedFromPeerAndCached(t *testing.T) {
 	if _, err := a.st.Stat(d); err != nil {
 		t.Fatal("blob should be cached locally after a peer fetch")
 	}
-	if a.m.PeerHits.Load() != 1 {
-		t.Fatalf("PeerHits = %d", a.m.PeerHits.Load())
-	}
+	waitCount(t, &a.m.PeerHits, 1)
 }
 
 // Two nodes that both miss used to ask each other forever: A's single-flight
@@ -261,13 +288,8 @@ func TestPeerDigestMismatchIsRejected(t *testing.T) {
 	defer lying.Close()
 	a.fin.urls.Store(&[]string{lying.URL})
 	d := digestOf([]byte("the real blob"))
-	resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
-	if resp.StatusCode != 404 {
-		t.Fatalf("status %d, want 404", resp.StatusCode)
-	}
-	if a.m.VerifyErrors.Load() != 1 {
-		t.Fatalf("VerifyErrors = %d", a.m.VerifyErrors.Load())
-	}
+	getFailing(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+	waitCount(t, &a.m.VerifyErrors, 1)
 	if _, err := a.st.Stat(d); err == nil {
 		t.Fatal("a mismatching blob must not be stored")
 	}
@@ -426,10 +448,7 @@ func TestStalledTransferTimesOut(t *testing.T) {
 	a := newNode(t, Options{Timeout: 200 * time.Millisecond})
 	a.fin.urls.Store(&[]string{stall.URL})
 	start := time.Now()
-	resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
-	if resp.StatusCode != 404 {
-		t.Fatalf("status %d", resp.StatusCode)
-	}
+	getFailing(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("stalled peer was not cut off")
 	}
@@ -990,9 +1009,7 @@ func TestUpstreamFetchEndToEnd(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != string(doc) {
 		t.Fatalf("manifest: status %d body %q", rec.Code, rec.Body.String())
 	}
-	if m.UpstreamHits.Load() != 2 {
-		t.Fatalf("UpstreamHits = %d", m.UpstreamHits.Load())
-	}
+	waitCount(t, &m.UpstreamHits, 2)
 	if sink.all() != "" {
 		t.Fatalf("a successful fetch must not log: %q", sink.all())
 	}
@@ -1253,9 +1270,7 @@ func TestCorruptedLocalBlobRecoversFromPeer(t *testing.T) {
 	if err != nil || string(stored) != string(body) {
 		t.Fatalf("repaired cache contains %q, err %v", stored, err)
 	}
-	if a.m.PeerHits.Load() != 1 {
-		t.Fatalf("PeerHits = %d, want 1 after recovering corrupted cache", a.m.PeerHits.Load())
-	}
+	waitCount(t, &a.m.PeerHits, 1)
 }
 
 // slowSource serves a blob whose body does not arrive until release is closed.
@@ -1312,5 +1327,37 @@ func TestPeerAskingForABlobThatIsStillArrivingIsNotSkipped(t *testing.T) {
 	resp, got := get(t, b.srv.URL+"/v2/lib/app/blobs/"+d)
 	if resp.StatusCode != 200 || string(got) != string(body) {
 		t.Fatalf("once A has the blob, B must get it: status %d", resp.StatusCode)
+	}
+}
+
+// A cache that has reached its limit makes room by dropping what was used
+// longest ago; it does not turn the pull away with "insufficient storage".
+func TestFullCacheEvictsInsteadOfRefusing(t *testing.T) {
+	a, b := newNode(t, Options{}), newNode(t, Options{})
+	a.setPeers(b)
+	x := put(t, b, []byte(strings.Repeat("x", 100)))
+	y := put(t, b, []byte(strings.Repeat("y", 100)))
+	a.st.SetMaxBytes(150)
+	a.st.SetEvictMinAge(0)
+
+	if resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+x); resp.StatusCode != 200 {
+		t.Fatalf("first blob: status %d", resp.StatusCode)
+	}
+	resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+y)
+	if resp.StatusCode != 200 || string(got) != strings.Repeat("y", 100) {
+		t.Fatalf("second blob: status %d; a full cache must evict, not refuse", resp.StatusCode)
+	}
+	if _, err := a.st.Stat(x); err == nil {
+		t.Fatal("the older blob should have been evicted")
+	}
+	if n, _ := a.st.Evicted(); n != 1 {
+		t.Fatalf("evicted %d blobs, want 1", n)
+	}
+	if a.m.DiskFull.Load() != 0 {
+		t.Fatalf("DiskFull = %d: nothing was refused", a.m.DiskFull.Load())
+	}
+	// The evicted blob is simply fetched again when somebody asks.
+	if resp, _ := get(t, a.srv.URL+"/v2/lib/app/blobs/"+x); resp.StatusCode != 200 {
+		t.Fatalf("evicted blob fetched again: status %d", resp.StatusCode)
 	}
 }

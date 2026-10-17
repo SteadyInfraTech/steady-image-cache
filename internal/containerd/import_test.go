@@ -536,3 +536,64 @@ func TestImportFailuresAreCountedAndBounded(t *testing.T) {
 		t.Fatalf("merge: count=%d msg=%q", outer.count, outer.Error())
 	}
 }
+
+// The import copies content that containerd already holds. When the cache is
+// full it must stop, not push out blobs that were fetched for a pull.
+func TestImportNeverEvictsFetchedBlobs(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetMaxBytes(150)
+	s.SetEvictMinAge(0)
+	fetchedBody := []byte(strings.Repeat("f", 100))
+	fetched := testDigest(fetchedBody)
+	if _, err := s.PutVerified(fetched, bytes.NewReader(fetchedBody)); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ := threeBlobs()
+	for i := range cs.infos {
+		cs.infos[i].Size = 100 // none of them fits next to the blob that is there
+	}
+	err = (&Importer{Store: s, Metrics: &metrics.Metrics{}}).importContent(context.Background(), cs)
+	if !errors.Is(err, store.ErrNoSpace) {
+		t.Fatalf("err = %v, want ErrNoSpace", err)
+	}
+	if _, err := s.Stat(fetched); err != nil {
+		t.Fatal("the import evicted a fetched blob")
+	}
+	if n, _ := s.Evicted(); n != 0 {
+		t.Fatalf("the import evicted %d blobs", n)
+	}
+}
+
+// Content that was evicted a moment ago is not copied back just to be evicted
+// again.
+func TestImportSkipsBlobsThatWereEvicted(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetMaxBytes(100)
+	s.SetEvictMinAge(0)
+	put := func(tag string) (string, int64) {
+		body := []byte(strings.Repeat(tag, 100))
+		d := testDigest(body)
+		if _, err := s.PutVerifiedLimit(d, bytes.NewReader(body), int64(len(body))); err != nil {
+			t.Fatal(err)
+		}
+		return d, int64(len(body))
+	}
+	x, size := put("x")
+	put("y") // evicts x
+	if !s.WasEvicted(x) {
+		t.Fatal("test setup: x should have been evicted")
+	}
+	cs := &fakeContentWalker{infos: []content.Info{{Digest: digest.Digest(x), Size: size}}}
+	if err := (&Importer{Store: s, Metrics: &metrics.Metrics{}}).importContent(context.Background(), cs); err != nil {
+		t.Fatal(err)
+	}
+	if cs.readerCalls != 0 {
+		t.Fatalf("ReaderAt calls = %d: an evicted blob must not be copied back", cs.readerCalls)
+	}
+}

@@ -18,3 +18,16 @@ func freeBytes(path string) (uint64, bool) {
 	}
 	return uint64(st.Bavail) * unit, true
 }
+
+// totalBytes returns the size of the filesystem holding path.
+func totalBytes(path string) (uint64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	unit := uint64(st.Frsize)
+	if unit == 0 {
+		unit = uint64(st.Bsize)
+	}
+	return uint64(st.Blocks) * unit, true
+}
