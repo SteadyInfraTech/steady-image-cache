@@ -156,6 +156,23 @@ The build requires the containerd Go client dependency declared in `go.mod`.
 * `GET /metrics`
 * `GET /healthz`
 
+## Deployment
+
+`deploy/daemonset.yaml` is a starting point, not a finished product; it needs the TLS secret `steady-image-cache-tls` and an image reference you have chosen. What it does, and why:
+
+* **Image.** `ghcr.io/steadyinfratech/steady-image-cache:main` is the branch build. Pin a release tag or an `@sha256:` digest. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
+* **Root, with nothing else.** The container runs as root only because containerd's socket is normally `root:root 0660`. It drops every capability, cannot gain privileges, has a read-only root file system and the runtime's default seccomp profile. If you turn the containerd import off (`SIC_CONTAINERD_IMPORT=false`) it needs no socket and can run as a non-root user that owns the cache directory.
+* **Resources.** Requests of 50m CPU and 64Mi memory; a memory limit of 512Mi to catch a leak. There is no CPU limit on purpose: hashing a layer is bursty, and throttling only makes pulls slower.
+* **Probes.** Readiness and liveness use `/healthz` on the plain-HTTP admin port, because kubelet cannot present the client certificate the main port wants. The liveness probe waits for a minute of failures before restarting: a restart interrupts transfers under way.
+* **Scheduling.** `system-node-critical`, so node pressure does not evict the cache, and a toleration for every taint, so it also runs on control-plane, GPU and spot nodes. Narrow the toleration to keep it off some nodes. If you lower the priority class, a node that is short of memory may lose its cache pod; pulls still work, but go to the registry.
+* **Cache size.** Unset, the cache may use the disk until 20% and 1 GiB remain, then evicts (see "Cache size and eviction"). A commented `SIC_MAX_CACHE_BYTES` shows how to cap it.
+
+CI validates the manifest against the Kubernetes schemas (strictly, for 1.28 and 1.31) and runs `deploy/check_manifest.py`, which checks that ports, probes and labels agree with each other and with SIC's settings and that the security settings stay in place.
+
+### Bootstrap
+
+With `deploy/containerd/hosts.toml` as the `_default` configuration, SIC is the only host containerd tries. If SIC is not running on a node, nothing can be pulled there, SIC's own image included. So after a node restart or a node-image upgrade the image must already be on the node: keep `imagePullPolicy: IfNotPresent`, pin the tag or digest so a changed tag does not need a pull, and bake the SIC image into the node image or pre-pull it before `hosts.toml` is installed. Restricting `hosts.toml` to the registries you cache, instead of `_default`, leaves the others (the one that holds SIC's image, say) on the normal path.
+
 ## Production notes
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.

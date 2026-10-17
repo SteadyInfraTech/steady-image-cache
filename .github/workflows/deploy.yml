@@ -1,0 +1,45 @@
+name: Deployment manifests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Strict: a misspelled or misplaced field is an error, not silently
+      # ignored. Two Kubernetes versions, an old one still in use and a recent one.
+      - name: Validate against the Kubernetes schemas
+        run: |
+          for v in 1.28.0 1.31.0; do
+            go run github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7 \
+              -strict -summary -kubernetes-version "$v" deploy/daemonset.yaml
+          done
+
+      # What a schema cannot know: ports, probes and labels that have to agree
+      # with each other and with SIC's settings, and the security settings.
+      - name: Check the manifest's own rules
+        run: |
+          pip install --quiet pyyaml
+          python3 deploy/check_manifest.py deploy/daemonset.yaml
