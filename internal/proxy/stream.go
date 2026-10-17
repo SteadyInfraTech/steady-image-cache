@@ -25,6 +25,7 @@ type download struct {
 	cur    *attempt      // the most recent source being copied; nil before the first
 	done   bool
 	res    fetchResult
+	auth   string // the Authorization header of the client that started it
 }
 
 // attempt is one source being copied into the store. A download may go through
@@ -37,7 +38,9 @@ type attempt struct {
 	err     error // why it ended, nil when the blob was stored
 }
 
-func newDownload() *download { return &download{notify: make(chan struct{})} }
+func newDownload(auth string) *download {
+	return &download{notify: make(chan struct{}), auth: auth}
+}
 
 // wake must be called with mu held.
 func (dl *download) wake() {
@@ -98,13 +101,13 @@ func (dl *download) wait(ctx context.Context) (res fetchResult, ok bool) {
 
 // join returns the download of d that is under way, or starts one that runs
 // fn. fn receives the download so that its store can report progress to it.
-func (p *Proxy) join(d string, fn func(*download) fetchResult) *download {
+func (p *Proxy) join(d, auth string, fn func(*download) fetchResult) *download {
 	p.dlmu.Lock()
 	defer p.dlmu.Unlock()
 	if dl, ok := p.downloads[d]; ok {
 		return dl
 	}
-	dl := newDownload()
+	dl := newDownload(auth)
 	p.downloads[d] = dl
 	go func() {
 		var res fetchResult

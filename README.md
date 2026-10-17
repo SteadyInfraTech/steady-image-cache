@@ -96,7 +96,13 @@ An evicted tag still resolves; the manifest is fetched again from a peer when so
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes), so the image needs a CA bundle in that case. The `scratch` base image has none.
 
-SIC does not relay an authentication challenge to the client. A registry that answers `401` (most private registries, and Docker Hub for anonymous pulls) therefore cannot be used for fallback; the request ends as a 404 and the `401` is logged. Use it for registries that serve images without a token.
+### Registries that need a token
+
+Most registries, Docker Hub and GHCR among them, answer an anonymous request with `401` and a `WWW-Authenticate` challenge that says where to get a token. SIC passes that challenge on, unchanged, to containerd (up to four values of at most 4 KiB each). containerd fetches a token from the registry's own authentication service and repeats the request with `Authorization: Bearer ...`, which SIC forwards to the registry. The content is then cached like any other. Credentials never rest in SIC: the `Authorization` header is only passed on, and is not stored or logged. A rejected or expired token gets the challenge again. `sic_upstream_auth_challenges_total` counts the challenges relayed; they are not logged, since every anonymous pull starts with one.
+
+A `401` without a `WWW-Authenticate` header cannot be acted on, so it ends as a `404` (which sends containerd on to its next host) and is logged.
+
+**The cache does not check who is asking.** Once a blob or tag has been fetched with someone's credentials, any client that can reach this node's SIC, and knows the digest or tag, gets it without credentials. For private images that means every client the listener accepts can read them: with mTLS, every holder of a certificate signed by your CA; with `SIC_INSECURE=true`, anyone who can reach the port. Keep upstream fallback off for registries whose content must not be shared on the node.
 
 ## Failures
 

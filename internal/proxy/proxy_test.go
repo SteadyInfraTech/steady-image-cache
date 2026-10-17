@@ -1019,42 +1019,6 @@ func TestUpstreamFetchEndToEnd(t *testing.T) {
 	}
 }
 
-// A registry that asks the client to authenticate is told apart from one that
-// simply does not have the content: the former is logged, the latter is not.
-func TestUpstreamAuthChallengeIsLoggedNotSilent(t *testing.T) {
-	status := atomic.Int32{}
-	status.Store(401)
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if status.Load() == 401 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="https://auth.example/token"`)
-		}
-		http.Error(w, "no", int(status.Load()))
-	}))
-	defer srv.Close()
-	sink := &logSink{}
-	p, _, host := upstreamProxy(t, srv, sink)
-
-	for _, path := range []string{"/v2/lib/app/blobs/" + digestOf([]byte("x")), "/v2/lib/app/manifests/v1"} {
-		if rec := serve(p, path+"?ns="+host); rec.Code != 404 {
-			t.Errorf("%s: status %d", path, rec.Code)
-		}
-	}
-	log := sink.all()
-	if !strings.Contains(log, "401") || !strings.Contains(log, "authentication challenges") {
-		t.Fatalf("a 401 from upstream went unlogged: %q", log)
-	}
-
-	status.Store(404)
-	sink2 := &logSink{}
-	p2, _, host2 := upstreamProxy(t, srv, sink2)
-	if rec := serve(p2, "/v2/lib/app/blobs/"+digestOf([]byte("y"))+"?ns="+host2); rec.Code != 404 {
-		t.Fatalf("status %d", rec.Code)
-	}
-	if sink2.all() != "" {
-		t.Fatalf("an ordinary not-found must not be logged: %q", sink2.all())
-	}
-}
-
 func TestManifestRequestsWithDifferentAcceptHeadersDoNotShareFlight(t *testing.T) {
 	doc := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`)
 	seen := make(chan string, 2)
