@@ -171,7 +171,7 @@ func TestStreamedBlobThatFailsVerificationEndsShort(t *testing.T) {
 func TestRangeAndHeadWaitForTheCompleteBlob(t *testing.T) {
 	body := []byte(strings.Repeat("0123456789", 3000))
 	d := digestOf(body)
-	src, release, _ := halfSource(t, body, 10000, false)
+	src, release, calls := halfSource(t, body, 10000, false)
 	a := newNode(t, Options{})
 	a.fin.urls.Store(&[]string{src})
 	url := a.srv.URL + "/v2/lib/app/blobs/" + d
@@ -195,6 +195,11 @@ func TestRangeAndHeadWaitForTheCompleteBlob(t *testing.T) {
 		b, err := io.ReadAll(resp.Body)
 		out <- result{status: resp.StatusCode, body: string(b), err: err}
 	}()
+	// The HEAD comes once the download is under way: a HEAD that finds no
+	// download asks the source with a HEAD of its own instead of waiting.
+	for i := 0; i < 400 && calls.Load() == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
 	go func() {
 		resp, err := http.Head(url)
 		if err != nil {
@@ -273,7 +278,7 @@ func TestLastByteWaitsForVerification(t *testing.T) {
 			t.Fatal(err)
 		}
 		a := newNode(t, Options{})
-		dl := newDownload()
+		dl := newDownload("")
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			a.p.stream(w, r, digestOf(body), dl)
 		}))
@@ -316,5 +321,54 @@ func TestLastByteWaitsForVerification(t *testing.T) {
 			t.Fatalf("unverified blob completed: %+v", r)
 		}
 		resp.Body.Close()
+	}
+}
+
+// A HEAD for a blob this node does not have asks the other nodes with a HEAD and
+// reports the size; it does not fetch the blob.
+func TestHeadForAMissingBlobDoesNotDownloadIt(t *testing.T) {
+	body := []byte(strings.Repeat("a layer nobody asked for yet ", 500))
+	d := digestOf(body)
+	var gets, heads atomic.Int32
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			heads.Add(1)
+		} else {
+			gets.Add(1)
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		if r.Method == http.MethodGet {
+			w.Write(body)
+		}
+	}))
+	defer src.Close()
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{src.URL})
+
+	resp, err := http.Head(a.srv.URL + "/v2/lib/app/blobs/" + d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || resp.ContentLength != int64(len(body)) || resp.Header.Get("Docker-Content-Digest") != d {
+		t.Fatalf("status %d, length %d, digest %q", resp.StatusCode, resp.ContentLength, resp.Header.Get("Docker-Content-Digest"))
+	}
+	if gets.Load() != 0 || heads.Load() != 1 {
+		t.Fatalf("source saw %d GETs and %d HEADs, want 0 and 1", gets.Load(), heads.Load())
+	}
+	if _, err := a.st.Stat(d); err == nil {
+		t.Fatal("a HEAD must not store the blob")
+	}
+}
+
+func TestHeadForABlobNobodyHasIs404(t *testing.T) {
+	a := newNode(t, Options{})
+	resp, err := http.Head(a.srv.URL + "/v2/lib/app/blobs/" + digestOf([]byte("nowhere")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("status %d", resp.StatusCode)
 	}
 }

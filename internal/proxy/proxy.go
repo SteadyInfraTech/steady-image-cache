@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -319,6 +320,9 @@ func manifestType(f io.ReadSeeker) string {
 type fetchResult struct {
 	ok     bool
 	status int
+	// challenge holds the WWW-Authenticate values of an upstream 401, to be
+	// passed on to the client (status is then 401).
+	challenge []string
 }
 
 var fetched = fetchResult{ok: true}
@@ -326,6 +330,46 @@ var fetched = fetchResult{ok: true}
 // refuse answers a request that failed because of this node's cache.
 func refuse(w http.ResponseWriter, what string, status int) {
 	http.Error(w, "cannot cache "+what+": "+http.StatusText(status), status)
+}
+
+// Limits on the authentication challenge that is relayed from a registry.
+const (
+	maxChallenges    = 4
+	maxChallengeSize = 4096
+)
+
+// challengeOf returns the WWW-Authenticate values of a 401 response, or nil
+// when it has none that can be relayed. A 401 without a challenge tells the
+// client nothing it could act on, so it is treated like any other failure.
+func challengeOf(resp *http.Response) []string {
+	var out []string
+	for _, v := range resp.Header.Values("WWW-Authenticate") {
+		if v == "" || len(v) > maxChallengeSize || strings.ContainsAny(v, "\r\n") {
+			continue
+		}
+		if out = append(out, v); len(out) == maxChallenges {
+			break
+		}
+	}
+	return out
+}
+
+// reply answers a request whose fetch ended with res. An upstream 401 is passed
+// to the client together with its challenge, so that the client can get a token
+// from the registry's own authentication service and ask again.
+func reply(w http.ResponseWriter, what string, res fetchResult) {
+	if res.status == http.StatusUnauthorized && len(res.challenge) > 0 {
+		relayChallenge(w, res.challenge)
+		return
+	}
+	refuse(w, what, res.status)
+}
+
+func relayChallenge(w http.ResponseWriter, challenge []string) {
+	for _, v := range challenge {
+		w.Header().Add("WWW-Authenticate", v)
+	}
+	http.Error(w, "authentication required by the upstream registry", http.StatusUnauthorized)
 }
 
 func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
@@ -343,42 +387,122 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	in := newInfo(r)
 	path := "/v2/" + repo + "/blobs/" + d
-	dl := p.join(d, func(dl *download) fetchResult {
-		in := in
-		in.dl = dl
-		if _, err := p.store.Stat(d); err == nil {
-			return fetched
-		}
-		if r := p.fetchPeers(in, path, d); r.ok {
-			p.metrics.PeerHits.Add(1)
-			return r
-		} else if r.status != 0 {
-			return r
-		}
-		r := p.fetchUpstream(in, path, d)
-		if r.ok {
-			p.metrics.UpstreamHits.Add(1)
-		}
-		return r
-	})
-	// A plain GET is answered while the blob is still arriving. Anything else
-	// (HEAD, a byte range) needs the whole blob, so it waits for it.
-	if streamable(r) && p.stream(w, r, d, dl) {
+	if r.Method == http.MethodHead && !p.downloading(d) {
+		// A HEAD asks whether the blob exists and how big it is. It does not
+		// pull a possibly multi-gigabyte layer onto this node; whoever wants
+		// the content will GET it.
+		p.headBlob(w, in, path, d)
 		return
 	}
-	res, ok := dl.wait(r.Context())
-	if !ok {
-		return // the client gave up
+	var res fetchResult
+	for attempt := 0; ; attempt++ {
+		dl := p.join(d, in.auth, func(dl *download) fetchResult {
+			in := in
+			in.dl = dl
+			if _, err := p.store.Stat(d); err == nil {
+				return fetched
+			}
+			if r := p.fetchPeers(in, path, d); r.ok {
+				p.metrics.PeerHits.Add(1)
+				return r
+			} else if r.status != 0 {
+				return r
+			}
+			r := p.fetchUpstream(in, path, d)
+			if r.ok {
+				p.metrics.UpstreamHits.Add(1)
+			}
+			return r
+		})
+		// A plain GET is answered while the blob is still arriving. Anything
+		// else (a byte range) needs the whole blob, so it waits for it.
+		if streamable(r) && p.stream(w, r, d, dl) {
+			return
+		}
+		var ok bool
+		if res, ok = dl.wait(r.Context()); !ok {
+			return // the client gave up
+		}
+		// The download that was joined asked the registry with someone else's
+		// credentials, or none, and was turned away. That says nothing about
+		// this client's: ask again with them, once.
+		if res.status == http.StatusUnauthorized && dl.auth != in.auth && attempt == 0 {
+			continue
+		}
+		break
 	}
 	if res.ok && p.serveDigest(w, r, d, nil) {
 		return
 	}
 	if res.status != 0 {
-		refuse(w, "blob", res.status)
+		reply(w, "blob", res)
 		return
 	}
 	p.metrics.Misses.Add(1)
 	http.Error(w, "blob unavailable", 404)
+}
+
+// downloading reports whether d is being fetched right now.
+func (p *Proxy) downloading(d string) bool {
+	p.dlmu.Lock()
+	defer p.dlmu.Unlock()
+	_, ok := p.downloads[d]
+	return ok
+}
+
+// headBlob answers a HEAD for a blob that is not cached by asking the peers and
+// then the upstream registry with a HEAD of its own, and relaying the answer.
+// Nothing is downloaded or stored.
+func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
+	size, ok := int64(-1), false
+	var challenge []string
+	for _, base := range p.shuffledPeers() {
+		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
+		if e != nil {
+			p.peerFailed(base, e)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			p.markDown(base, fmt.Errorf("answered %s", resp.Status))
+		}
+		if resp.StatusCode == 200 && resp.ContentLength >= 0 {
+			size, ok = resp.ContentLength, true
+			break
+		}
+	}
+	if !ok {
+		if host, up := p.upstreamHost(in.ns); up {
+			resp, e := p.do(in.ctx, http.MethodHead, p.upstreamClient, "https://"+host+path, map[string]string{"Authorization": in.auth})
+			if e != nil {
+				p.upstreamFailed(host, e)
+			} else {
+				resp.Body.Close()
+				if resp.StatusCode == 200 && resp.ContentLength >= 0 {
+					size, ok = resp.ContentLength, true
+				} else if r, ch := p.upstreamChallenge(resp); ch {
+					challenge = r.challenge
+				} else if resp.StatusCode != 200 {
+					p.upstreamAnswered(host, resp)
+				}
+			}
+		}
+	}
+	if !ok && challenge != nil {
+		relayChallenge(w, challenge)
+		return
+	}
+	if !ok {
+		p.metrics.Misses.Add(1)
+		http.Error(w, "blob unavailable", 404)
+		return
+	}
+	h := w.Header()
+	h.Set("Docker-Content-Digest", d)
+	h.Set("Accept-Ranges", "bytes")
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
 }
 
 func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref string) {
@@ -427,7 +551,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		}
 	}
 	if res.status != 0 {
-		refuse(w, "manifest", res.status)
+		reply(w, "manifest", res)
 		return
 	}
 	p.metrics.Misses.Add(1)
@@ -537,9 +661,13 @@ func (b *idleBody) Close() error {
 
 // get performs a GET whose body must be read within the idle limit.
 func (p *Proxy) get(ctx context.Context, c *http.Client, u string, hdr map[string]string) (*http.Response, error) {
+	return p.do(ctx, http.MethodGet, c, u, hdr)
+}
+
+func (p *Proxy) do(ctx context.Context, method string, c *http.Client, u string, hdr map[string]string) (*http.Response, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	t := time.AfterFunc(p.idle, cancel)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
 		t.Stop()
 		cancel()
@@ -742,18 +870,32 @@ func (p *Proxy) upstreamFailed(host string, e error) {
 }
 
 // upstreamAnswered logs an upstream reply that is neither success nor "not
-// found". Most important is 401: the registry wants the client to authenticate
-// (Docker Hub and GHCR do even for public images), and SIC does not pass that
-// challenge on, so the client only ever sees "not found".
+// found", or a 401 that carries no challenge to relay. (A 401 with a challenge
+// is not logged: it is how every anonymous pull from Docker Hub or GHCR starts,
+// and the client is told to authenticate.)
 func (p *Proxy) upstreamAnswered(host string, resp *http.Response) {
 	if resp.StatusCode == http.StatusNotFound {
 		return
 	}
 	hint := ""
 	if resp.StatusCode == http.StatusUnauthorized {
-		hint = "; SIC does not relay authentication challenges, so registries that require a token cannot be used for upstream fallback"
+		hint = " without a WWW-Authenticate challenge, so the client cannot be told how to authenticate"
 	}
 	p.warn(fmt.Sprintf("upstream:%s:%d", host, resp.StatusCode), "upstream %s answered %s%s", host, resp.Status, hint)
+}
+
+// upstreamChallenge turns an upstream 401 that carries a challenge into a
+// result that passes it on to the client.
+func (p *Proxy) upstreamChallenge(resp *http.Response) (fetchResult, bool) {
+	if resp.StatusCode != http.StatusUnauthorized {
+		return fetchResult{}, false
+	}
+	ch := challengeOf(resp)
+	if ch == nil {
+		return fetchResult{}, false
+	}
+	p.metrics.UpstreamChallenges.Add(1)
+	return fetchResult{status: http.StatusUnauthorized, challenge: ch}, true
 }
 
 func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
@@ -768,6 +910,9 @@ func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if r, ok := p.upstreamChallenge(resp); ok {
+			return r
+		}
 		p.upstreamAnswered(host, resp)
 		return fetchResult{}
 	}
@@ -797,6 +942,9 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if r, ok := p.upstreamChallenge(resp); ok {
+			return "", r
+		}
 		p.upstreamAnswered(host, resp)
 		return "", fetchResult{}
 	}

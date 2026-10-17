@@ -57,7 +57,7 @@ A peer that does not accept a connection and start answering within `SIC_PEER_TI
 
 A layer that is not cached is passed on to containerd while it is still being downloaded, so the pull starts at once instead of waiting for the whole layer to arrive first. Everyone asking for the same blob shares one download, which goes on if a client leaves, and every one of them is fed from the file as it is written.
 
-The digest can only be checked at the end, so the last byte of a response is held back until the check has passed. If it fails, or the source breaks off, the response stops one byte short and the connection is closed: containerd sees an error and retries, and the bad content is never stored. The earlier bytes were sent unverified; containerd checks every layer against its digest itself. A `HEAD` request or a request with a `Range` header needs the whole blob and waits for it. `sic_streamed_responses_total` counts streamed responses and `sic_stream_aborts_total` those that were cut short.
+The digest can only be checked at the end, so the last byte of a response is held back until the check has passed. If it fails, or the source breaks off, the response stops one byte short and the connection is closed: containerd sees an error and retries, and the bad content is never stored. The earlier bytes were sent unverified; containerd checks every layer against its digest itself. A request with a `Range` header needs the whole blob and waits for it. A `HEAD` for a blob that is not cached and not being downloaded is passed to the peers and then the upstream registry as a `HEAD`, and their size is relayed; it never starts a download. A `HEAD` while a download is running waits for it. `sic_streamed_responses_total` counts streamed responses and `sic_stream_aborts_total` those that were cut short.
 
 When a source fails after the status line has been sent, the client gets a broken response and not the `404` it would have got before; a peer that fails halfway through is replaced by the next one for later clients.
 
@@ -96,7 +96,13 @@ An evicted tag still resolves; the manifest is fetched again from a peer when so
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes), so the image needs a CA bundle in that case. The `scratch` base image has none.
 
-SIC does not relay an authentication challenge to the client. A registry that answers `401` (most private registries, and Docker Hub for anonymous pulls) therefore cannot be used for fallback; the request ends as a 404 and the `401` is logged. Use it for registries that serve images without a token.
+### Registries that need a token
+
+Most registries, Docker Hub and GHCR among them, answer an anonymous request with `401` and a `WWW-Authenticate` challenge that says where to get a token. SIC passes that challenge on, unchanged, to containerd (up to four values of at most 4 KiB each). containerd fetches a token from the registry's own authentication service and repeats the request with `Authorization: Bearer ...`, which SIC forwards to the registry. The content is then cached like any other. Credentials never rest in SIC: the `Authorization` header is only passed on, and is not stored or logged. A rejected or expired token gets the challenge again. `sic_upstream_auth_challenges_total` counts the challenges relayed; they are not logged, since every anonymous pull starts with one.
+
+A `401` without a `WWW-Authenticate` header cannot be acted on, so it ends as a `404` (which sends containerd on to its next host) and is logged.
+
+**The cache does not check who is asking.** Once a blob or tag has been fetched with someone's credentials, any client that can reach this node's SIC, and knows the digest or tag, gets it without credentials. For private images that means every client the listener accepts can read them: with mTLS, every holder of a certificate signed by your CA; with `SIC_INSECURE=true`, anyone who can reach the port. Keep upstream fallback off for registries whose content must not be shared on the node.
 
 ## Failures
 
