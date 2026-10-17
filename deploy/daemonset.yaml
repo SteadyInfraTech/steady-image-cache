@@ -41,7 +41,7 @@ spec:
       tolerations:
       - operator: Exists
       securityContext:
-        seccompProfile: {type: RuntimeDefault}
+        seccompProfil: {type: RuntimeDefault}
       containers:
       - name: sic
         # Pin a release tag or an @sha256: digest. There is no moving "latest":
