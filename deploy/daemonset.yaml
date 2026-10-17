@@ -31,11 +31,42 @@ spec:
     spec:
       serviceAccountName: steady-image-cache
       hostNetwork: true
+      # A node that loses its cache pod still pulls (containerd falls back when
+      # the mirror is unreachable, unless hosts.toml says otherwise), but every
+      # pull then goes to the registry. Keep the pod through node pressure.
+      priorityClassName: system-node-critical
+      # The DaemonSet controller already tolerates not-ready, unreachable,
+      # unschedulable and the resource-pressure taints. This also runs SIC on
+      # tainted nodes (control plane, GPU, spot); narrow it to keep it off some.
+      tolerations:
+      - operator: Exists
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
       containers:
       - name: sic
-        image: steady-image-cache:dev
+        # Pin a release tag or an @sha256: digest. There is no moving "latest":
+        # IfNotPresent keeps a restart from needing the network (see "Bootstrap"
+        # in the README), so a moving tag would never be updated on a node.
+        image: ghcr.io/steadyinfratech/steady-image-cache:main
         imagePullPolicy: IfNotPresent
-        securityContext: {runAsUser: 0, readOnlyRootFilesystem: true}
+        # Root is only needed to open containerd's socket, which is usually
+        # root:root 0660. Everything else is dropped; without the socket (set
+        # SIC_CONTAINERD_IMPORT=false) a non-root user works, if it owns the
+        # cache directory.
+        securityContext:
+          runAsUser: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+        terminationMessagePolicy: FallbackToLogsOnError
+        # Requests only decide where the pod fits and how it is treated under
+        # pressure. There is no CPU limit on purpose: hashing a layer is bursty,
+        # and throttling it only makes pulls slower. The memory limit is far
+        # above what SIC itself needs (buffers of tens of KiB per transfer plus its indexes), so it
+        # only catches a leak.
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 512Mi}
         ports:
         - {name: registry, containerPort: 5000, hostPort: 5000}
         env:
@@ -46,6 +77,9 @@ spec:
         - {name: SIC_UPSTREAM_ENABLED, value: "false"}
         # Only used when upstream fallback is enabled; e.g. "docker.io,ghcr.io".
         - {name: SIC_UPSTREAM_REGISTRIES, value: ""}
+        # Cache size: by default it may use the disk until 20% and 1 GiB are
+        # left, then evicts the least recently used blobs. To cap it:
+        # - {name: SIC_MAX_CACHE_BYTES, value: "107374182400"}
         # Plain-HTTP health/metrics on loopback: kubelet cannot present the client
         # certificate the main listener requires.
         - {name: SIC_ADMIN_LISTEN, value: "127.0.0.1:5001"}
@@ -70,11 +104,17 @@ spec:
         - {name: cache, mountPath: /var/lib/steady-image-cache}
         - {name: containerd-socket, mountPath: /run/containerd/containerd.sock, readOnly: true}
         - {name: tls, mountPath: /tls, readOnly: true}
+        # The probes use the plain-HTTP admin port; the main listener wants a
+        # client certificate that kubelet does not have. /healthz answers from
+        # the HTTP server itself, so a hung process fails it. The liveness
+        # threshold is generous: a restart empties nothing, but it interrupts
+        # transfers that are under way.
         readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
+        livenessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 10, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 6}
       volumes:
       - name: cache
         hostPath: {path: /var/lib/steady-image-cache, type: DirectoryOrCreate}
       - name: containerd-socket
         hostPath: {path: /run/containerd/containerd.sock, type: Socket}
       - name: tls
-        secret: {secretName: steady-image-cache-tls}
+        secret: {secretName: steady-image-cache-tls, defaultMode: 0400}
