@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -343,6 +344,13 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	in := newInfo(r)
 	path := "/v2/" + repo + "/blobs/" + d
+	if r.Method == http.MethodHead && !p.downloading(d) {
+		// A HEAD asks whether the blob exists and how big it is. It does not
+		// pull a possibly multi-gigabyte layer onto this node; whoever wants
+		// the content will GET it.
+		p.headBlob(w, in, path, d)
+		return
+	}
 	dl := p.join(d, func(dl *download) fetchResult {
 		in := in
 		in.dl = dl
@@ -379,6 +387,62 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	p.metrics.Misses.Add(1)
 	http.Error(w, "blob unavailable", 404)
+}
+
+// downloading reports whether d is being fetched right now.
+func (p *Proxy) downloading(d string) bool {
+	p.dlmu.Lock()
+	defer p.dlmu.Unlock()
+	_, ok := p.downloads[d]
+	return ok
+}
+
+// headBlob answers a HEAD for a blob that is not cached by asking the peers and
+// then the upstream registry with a HEAD of its own, and relaying the answer.
+// Nothing is downloaded or stored.
+func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
+	size, ok := int64(-1), false
+	for _, base := range p.shuffledPeers() {
+		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
+		if e != nil {
+			p.peerFailed(base, e)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			p.markDown(base, fmt.Errorf("answered %s", resp.Status))
+		}
+		if resp.StatusCode == 200 && resp.ContentLength >= 0 {
+			size, ok = resp.ContentLength, true
+			break
+		}
+	}
+	if !ok {
+		if host, up := p.upstreamHost(in.ns); up {
+			resp, e := p.do(in.ctx, http.MethodHead, p.upstreamClient, "https://"+host+path, map[string]string{"Authorization": in.auth})
+			if e != nil {
+				p.upstreamFailed(host, e)
+			} else {
+				resp.Body.Close()
+				if resp.StatusCode == 200 && resp.ContentLength >= 0 {
+					size, ok = resp.ContentLength, true
+				} else if resp.StatusCode != 200 {
+					p.upstreamAnswered(host, resp)
+				}
+			}
+		}
+	}
+	if !ok {
+		p.metrics.Misses.Add(1)
+		http.Error(w, "blob unavailable", 404)
+		return
+	}
+	h := w.Header()
+	h.Set("Docker-Content-Digest", d)
+	h.Set("Accept-Ranges", "bytes")
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
 }
 
 func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref string) {
@@ -537,9 +601,13 @@ func (b *idleBody) Close() error {
 
 // get performs a GET whose body must be read within the idle limit.
 func (p *Proxy) get(ctx context.Context, c *http.Client, u string, hdr map[string]string) (*http.Response, error) {
+	return p.do(ctx, http.MethodGet, c, u, hdr)
+}
+
+func (p *Proxy) do(ctx context.Context, method string, c *http.Client, u string, hdr map[string]string) (*http.Response, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	t := time.AfterFunc(p.idle, cancel)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
 		t.Stop()
 		cancel()
