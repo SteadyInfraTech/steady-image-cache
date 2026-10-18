@@ -46,6 +46,14 @@ func main() {
 				log.Fatalf("tls client: %v", err)
 			}
 		}
+		// A certificate that peers or containerd will refuse shows up as handshake
+		// errors that do not say why; say it here, now and after every rotation.
+		if clientTLS == serverTLS {
+			serverTLS.Audit(cfg.TLSServerName, tlsutil.Server|tlsutil.Client)
+		} else {
+			serverTLS.Audit(cfg.TLSServerName, tlsutil.Server)
+			clientTLS.Audit(cfg.TLSServerName, tlsutil.Client)
+		}
 	} else {
 		log.Printf("WARNING: SIC_INSECURE=true: serving plain HTTP with no authentication; anyone who can reach %s can read the cache", cfg.Listen)
 	}
