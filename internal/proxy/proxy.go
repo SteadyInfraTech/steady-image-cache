@@ -112,7 +112,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		peers: p,
 		// Upstream registries are public services: verify them against the
 		// system roots, not against the private CA used between SIC nodes.
-		upstreamClient: &http.Client{Transport: newTransport(o.Timeout, o.Timeout, true)},
+		upstreamClient: &http.Client{Transport: newTransport(o.Timeout, o.Timeout, true), CheckRedirect: upstreamRedirect},
 		metrics:        m,
 		upstream:       o.Upstream,
 		registries:     regs,
@@ -155,13 +155,44 @@ func newTransport(dial, header time.Duration, envProxy bool) *http.Transport {
 	return tr
 }
 
+// Peers never redirect: they answer from their own cache or say they cannot.
+// Following a redirect would let a node with a valid certificate send this one
+// to any address, over plain HTTP too, with this node's peer headers.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// maxRedirects bounds the redirects followed for an upstream registry. They
+// are real: registries send blobs to a CDN or object store.
+const maxRedirects = 5
+
+// upstreamRedirect follows a registry's redirects, over https only, so that a
+// registry cannot move the transfer to plain HTTP. (net/http does not send the
+// Authorization header to a different host, which is what a CDN needs.)
+func upstreamRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing a redirect to %s: only https is followed", req.URL.Scheme)
+	}
+	return nil
+}
+
+// peerAnswered notes a peer's reply that is neither success nor "not here". A
+// server error or a redirect means the node is faulty, and it is left alone for
+// a while.
+func (p *Proxy) peerAnswered(base string, resp *http.Response) {
+	if resp.StatusCode >= 500 || resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		p.markDown(base, fmt.Errorf("answered %s", resp.Status))
+	}
+}
+
 func (p *Proxy) newPeerClient(snap *tlsutil.Snapshot) *http.Client {
 	// Peer traffic never goes through an HTTP proxy, whatever the environment says.
 	tr := newTransport(p.peerTimeout, p.peerTimeout, false)
 	if snap != nil {
 		tr.TLSClientConfig = snap.ClientConfig(p.serverName)
 	}
-	return &http.Client{Transport: tr}
+	return &http.Client{Transport: tr, CheckRedirect: noRedirect}
 }
 
 // peerHTTP returns the client for peer requests, rebuilt when the certificates
@@ -463,9 +494,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 			continue
 		}
 		resp.Body.Close()
-		if resp.StatusCode >= 500 {
-			p.markDown(base, fmt.Errorf("answered %s", resp.Status))
-		}
+		p.peerAnswered(base, resp)
 		if resp.StatusCode == 200 && resp.ContentLength >= 0 {
 			size, ok = resp.ContentLength, true
 			break
@@ -747,9 +776,7 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 		}
 		if resp.StatusCode != 200 {
 			resp.Body.Close()
-			if resp.StatusCode >= 500 {
-				p.markDown(base, fmt.Errorf("answered %s", resp.Status))
-			}
+			p.peerAnswered(base, resp)
 			continue
 		}
 		size := resp.ContentLength
@@ -818,9 +845,7 @@ func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResu
 		}
 		if resp.StatusCode != 200 {
 			resp.Body.Close()
-			if resp.StatusCode >= 500 {
-				p.markDown(base, fmt.Errorf("answered %s", resp.Status))
-			}
+			p.peerAnswered(base, resp)
 			continue
 		}
 		d, size, e := p.storeManifest(resp, ref)

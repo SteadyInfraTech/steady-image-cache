@@ -53,6 +53,8 @@ Requests that SIC sends to its peers carry an `X-SIC-Peer` header. A SIC that re
 
 A peer that does not accept a connection and start answering within `SIC_PEER_TIMEOUT` (default `5s`) is skipped for `SIC_PEER_BACKOFF` (default `30s`; `0` disables skipping), so a dead node slows one request instead of every miss. Peers discovered through Kubernetes must be Ready and not terminating.
 
+**Redirects.** A peer never legitimately redirects: it has the blob or it does not. SIC does not follow a peer's redirect, which would let a node with a valid certificate send this one to any address, plain HTTP included. A peer that answers with one is treated as faulty, logged, and skipped for `SIC_PEER_BACKOFF`. A registry's redirects, on the other hand, are normal (blobs often come from a CDN or an object store), so SIC follows up to 5 of them, over `https` only; a redirect to plain HTTP or a longer chain fails the fetch and is logged. As usual with `net/http`, the `Authorization` header is not sent to a different host than the one it was meant for.
+
 ## Streaming a miss
 
 A layer that is not cached is passed on to containerd while it is still being downloaded, so the pull starts at once instead of waiting for the whole layer to arrive first. Everyone asking for the same blob shares one download, which goes on if a client leaves, and every one of them is fed from the file as it is written.
