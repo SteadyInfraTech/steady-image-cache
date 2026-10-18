@@ -2,9 +2,6 @@ name: Store read benchmark
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - fix/read-integrity-capacity-reservations
   pull_request:
     paths:
       - "internal/store/**"
