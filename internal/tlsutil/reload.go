@@ -46,6 +46,7 @@ type Reloader struct {
 	cur     Snapshot
 	stamps  [3]stamp
 	checked time.Time
+	audit   func(Snapshot) // set by Audit; called with each newly loaded set
 }
 
 // New loads the files once and fails if they are unusable. logf may be nil.
@@ -133,6 +134,9 @@ func (r *Reloader) Current() Snapshot {
 	snap.Gen = r.cur.Gen + 1
 	r.cur = snap
 	r.logf("tls: reloaded certificates (generation %d)", snap.Gen)
+	if r.audit != nil {
+		r.audit(snap)
+	}
 	return r.cur
 }
 

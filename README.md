@@ -130,7 +130,42 @@ The sample DaemonSet expects a `steady-image-cache-tls` Secret containing:
 * `tls.key`
 * `ca.crt`
 
-Peer certificates should contain the DNS SAN configured by `SIC_TLS_SERVER_NAME` (default `steady-image-cache`). Peers are discovered by IP, but TLS verifies this stable server name.
+### What the certificate must contain
+
+A node uses one certificate for three things, and each has a requirement that fails with a handshake error that does not say why:
+
+| Used for | Requirement |
+| --- | --- |
+| Peers calling this node | A DNS SAN equal to `SIC_TLS_SERVER_NAME` (default `steady-image-cache`). Peers are found by IP address but verify this name, so **no IP SAN is needed for peers**. The extended key usage must allow **server auth**. |
+| This node calling peers | The same certificate is presented as a client certificate, so the extended key usage must also allow **client auth**. cert-manager's default usages do not include it. A certificate with no extended key usage at all is allowed for everything. |
+| containerd calling this node | `deploy/containerd/hosts.toml` names SIC as `https://127.0.0.1:5000`, and containerd checks that address: the certificate needs the **IP SAN `127.0.0.1`**. (hosts.toml has no setting to check a name instead.) |
+
+All of them must be signed by the CA in `ca.crt` (an intermediate CA is fine if `tls.crt` carries it after the certificate) and be in date.
+
+SIC checks its own certificate when it starts and after every rotation, and logs what it finds as `tls: certificate problem: ...`, with what to change. It still uses the certificate: a warning does not stop a pull that works. The IP SAN message is only a warning because only containerd needs it. A certificate that expires within 14 days is reported too, which shows that renewal has stopped.
+
+A certificate that satisfies all of this, made with OpenSSL (a throwaway CA; use your own PKI in production):
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 -subj "/CN=sic-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" -keyout ca.key -out ca.crt
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=steady-image-cache" -keyout tls.key -out tls.csr
+openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out tls.crt -extfile <(printf '%s\n' \
+  'subjectAltName=DNS:steady-image-cache,IP:127.0.0.1' 'extendedKeyUsage=serverAuth,clientAuth' 'keyUsage=critical,digitalSignature')
+kubectl -n kube-system create secret generic steady-image-cache-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+```
+
+With cert-manager, the part that matters in a `Certificate` is:
+
+```yaml
+spec:
+  secretName: steady-image-cache-tls
+  dnsNames: [steady-image-cache]
+  ipAddresses: [127.0.0.1]
+  usages: [digital signature, key encipherment, server auth, client auth]
+```
+
+containerd presents a client certificate too (`client` in `hosts.toml`), from files on the node (`/etc/steady-image-cache/` in the sample). Getting them there is up to your node provisioning; the Secret is only mounted into the pod. Give containerd a certificate of its own from the same CA, with only the **client auth** usage, rather than a copy of the node's server key: the files are readable by anything on the node that can read `/etc`.
 
 SIC refuses to start unless mutual TLS is fully configured: `SIC_TLS_CERT`, `SIC_TLS_KEY` and `SIC_TLS_CA` are all required (`SIC_TLS_CLIENT_CERT` and `SIC_TLS_CLIENT_KEY` default to the server certificate). Without them it would either serve plain HTTP on every interface or accept any client. For local development only, `SIC_INSECURE=true` turns TLS and authentication off completely and logs a warning.
 
