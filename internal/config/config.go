@@ -38,6 +38,11 @@ type Config struct {
 	ScrubInterval time.Duration
 	ScrubRate     int64
 
+	// TagTTL is how long a tag keeps pointing at the digest it was last
+	// confirmed to have, when its registry can be asked (upstream fallback on
+	// and the registry allowed). Zero: never ask again.
+	TagTTL time.Duration
+
 	UpstreamTimeout time.Duration
 	UpstreamEnabled bool
 	// UpstreamRegistries lists the registries SIC may contact when upstream
@@ -99,6 +104,7 @@ func FromEnv() Config {
 		MinFreePercent:      20,
 		ScrubInterval:       24 * time.Hour,
 		ScrubRate:           32 << 20,
+		TagTTL:              10 * time.Minute,
 		UpstreamTimeout:     30 * time.Second,
 		UpstreamEnabled:     boolenv("SIC_UPSTREAM_ENABLED", false),
 		UpstreamRegistries:  list(os.Getenv("SIC_UPSTREAM_REGISTRIES")),
@@ -128,6 +134,11 @@ func FromEnv() Config {
 	if v := os.Getenv("SIC_UPSTREAM_TIMEOUT"); v != "" {
 		if d, e := time.ParseDuration(v); e == nil && d > 0 {
 			c.UpstreamTimeout = d
+		}
+	}
+	if v := os.Getenv("SIC_TAG_TTL"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil && d >= 0 {
+			c.TagTTL = d
 		}
 	}
 	if v := os.Getenv("SIC_PEER_TIMEOUT"); v != "" {

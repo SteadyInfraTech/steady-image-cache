@@ -106,6 +106,16 @@ A `401` without a `WWW-Authenticate` header cannot be acted on, so it ends as a 
 
 **The cache does not check who is asking.** Once a blob or tag has been fetched with someone's credentials, any client that can reach this node's SIC, and knows the digest or tag, gets it without credentials. For private images that means every client the listener accepts can read them: with mTLS, every holder of a certificate signed by your CA; with `SIC_INSECURE=true`, anyone who can reach the port. Keep upstream fallback off for registries whose content must not be shared on the node.
 
+### Tags: staying current, and who is believed
+
+A digest never changes, but a tag such as `latest` does, and a tag has no digest to check an answer against. SIC handles the two ways a cached tag can be wrong.
+
+**Out of date.** When the tag's registry can be asked (upstream fallback on, registry listed), a cached tag older than `SIC_TAG_TTL` (default `10m`; `0` never asks again) is confirmed first: SIC sends the registry a `HEAD` for the manifest, which returns the digest and, on Docker Hub, does not count against pull rate limits. If the tag still points at the same digest it is served and the clock restarts; if it moved, the new manifest is fetched. `sic_tag_checks_total` counts the checks and `sic_tag_changes_total` the tags found to have moved. An alias that came from containerd was never confirmed, so it is checked at its first use, and the periodic import never replaces an alias the cache already has.
+
+**False.** One faulty or compromised node could otherwise tell every other node that `latest` is some other image. So when the registry can be asked, *it* says what a tag points at; the manifest is then fetched by digest, from a peer if one has it, and checked against that digest. Peers decide what a tag means only when the registry cannot be asked: air-gapped nodes, or a registry that is not listed. There the CA that vouches for the peers is the trust boundary.
+
+When the registry cannot confirm a tag (unreachable, or it wants credentials the client did not send), SIC serves the cached one rather than fail the pull, logs it at most once a minute, and counts it in `sic_stale_tags_served_total`. A tag the registry no longer has stays cached. Requests from other nodes are answered from the cache whatever the tag's age, since they cannot be sent anywhere better. The time of each confirmation is kept with the record of verified blobs; losing it only means tags are checked again.
+
 ## Failures
 
 When SIC cannot cache something it says why, instead of answering 404 as if the image did not exist:

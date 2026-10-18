@@ -53,6 +53,9 @@ type Options struct {
 	// their local cache only, so a healthy one responds immediately.
 	PeerTimeout time.Duration
 	PeerBackoff time.Duration
+	// TagTTL is how long a tag keeps pointing at the digest it was last
+	// confirmed to have, when its registry can be asked. Zero: never ask again.
+	TagTTL time.Duration
 	// Upstream enables fetching from the registry named in ?ns=, but only for
 	// registries listed in UpstreamRegistries.
 	Upstream           bool
@@ -79,6 +82,7 @@ type Proxy struct {
 	downloads      map[string]*download      // blobs being fetched, by digest
 
 	peerTimeout, backoff time.Duration
+	tagTTL               time.Duration
 	tls                  *tlsutil.Reloader
 	serverName           string
 	cmu                  sync.Mutex // guards peerClient and peerGen
@@ -119,6 +123,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		idle:           o.Timeout,
 		peerTimeout:    o.PeerTimeout,
 		backoff:        o.PeerBackoff,
+		tagTTL:         o.TagTTL,
 		tls:            o.TLS,
 		serverName:     o.ServerName,
 		down:           map[string]time.Time{},
@@ -540,7 +545,10 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		return
 	}
 	namespace := ns(r)
-	if d, ok := p.store.Resolve(namespace, repo, ref); ok && p.serveDigest(w, r, d, manifestType) {
+	// A node that asks us for a tag is answered with what we have, however old:
+	// it cannot be sent anywhere better. A client is answered from the cache
+	// only while the tag is known to be current (see tagFresh).
+	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.serveDigest(w, r, d, manifestType) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
@@ -549,30 +557,9 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		return
 	}
 	in := newInfo(r)
-	byDigest := strings.HasPrefix(ref, "sha256:")
 	path := "/v2/" + repo + "/manifests/" + ref
 	res := p.flights.Do("manifest:"+namespace+"/"+repo+"@"+ref+"|accept:"+in.accept+"|auth:"+in.auth, func() fetchResult {
-		if d, found := p.store.Resolve(namespace, repo, ref); found {
-			if _, err := p.store.Stat(d); err == nil {
-				return fetched
-			}
-		}
-		d, r := p.fetchManifestPeers(in, path, ref)
-		if r.ok {
-			p.metrics.PeerHits.Add(1)
-		} else if r.status == 0 {
-			if d, r = p.fetchManifestUpstream(in, path, ref); r.ok {
-				p.metrics.UpstreamHits.Add(1)
-			}
-		}
-		if r.ok && !byDigest {
-			if err := p.store.SetAlias(namespace, repo, ref, d); err != nil {
-				p.metrics.StoreErrors.Add(1)
-				p.warn("alias:"+namespace+"/"+repo+"@"+ref, "cannot persist manifest alias: %v", err)
-				return fetchResult{status: http.StatusInternalServerError}
-			}
-		}
-		return r
+		return p.fetchManifest(in, namespace, repo, ref, path)
 	})
 	if res.ok {
 		if d, found := p.store.Resolve(namespace, repo, ref); found && p.serveDigest(w, r, d, manifestType) {

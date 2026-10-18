@@ -115,7 +115,9 @@ type namedImage interface {
 }
 
 // importAliases records every image name as an alias for its target digest and
-// keeps going when one cannot be saved.
+// keeps going when one cannot be saved. It only adds names the cache does not
+// know: containerd's record of what a tag pointed at when it was pulled must
+// not replace what the cache has learned from the registry since.
 func (i *Importer) importAliases(imgs []namedImage) error {
 	var failed importFailures
 	for _, img := range imgs {
@@ -123,7 +125,7 @@ func (i *Importer) importAliases(imgs []namedImage) error {
 		if !ok {
 			continue
 		}
-		if err := i.Store.SetAlias(registry, repo, ref, img.Target().Digest.String()); err != nil {
+		if _, err := i.Store.SetAliasIfAbsent(registry, repo, ref, img.Target().Digest.String()); err != nil {
 			failed.add(fmt.Errorf("persist alias for image %q: %w", img.Name(), err))
 		}
 	}

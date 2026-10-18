@@ -72,6 +72,7 @@ type Store struct {
 	verified       map[string]stamp
 	verifiedDirty  bool
 	lastUse        map[string]int64 // unix nanoseconds
+	aliasChecked   map[string]int64 // when each alias was last confirmed, unix seconds; guarded by verifiedMu
 	usageDirty     bool
 	lastUsageFlush time.Time
 	lastScrub      time.Time
@@ -294,6 +295,7 @@ func New(root string) (*Store, error) {
 		free:           freeBytes,
 		verified:       map[string]stamp{},
 		lastUse:        map[string]int64{},
+		aliasChecked:   map[string]int64{},
 		evicted:        map[string]struct{}{},
 		total:          totalBytes,
 		slack:          defaultSlack,
@@ -594,20 +596,56 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 
 func key(ns, repo, ref string) string { return ns + "/" + repo + "@" + ref }
 
-// SetAlias points ns/repo:ref at digest d. Writing an alias that already
-// exists with the same digest is a no-op, so the periodic containerd import
-// does not rewrite the alias file on every run.
+// SetAlias points ns/repo:ref at digest d and notes that it was confirmed just
+// now. Writing an alias that already exists with the same digest does not
+// rewrite the alias file, so a tag that is confirmed again and again costs
+// nothing on disk.
 func (s *Store) SetAlias(ns, repo, ref, d string) error {
+	return s.SetAliasAt(ns, repo, ref, d, time.Now())
+}
+
+// SetAliasAt is SetAlias with the time of the confirmation, for callers that
+// keep their own clock.
+func (s *Store) SetAliasAt(ns, repo, ref, d string, at time.Time) error {
 	if !ValidDigest(d) {
 		return errors.New("unsupported digest")
 	}
+	k := key(ns, repo, ref)
+	if err := s.setAlias(k, d, false); err != nil {
+		return err
+	}
+	s.noteAliasChecked(k, at)
+	return nil
+}
+
+// SetAliasIfAbsent records an alias that was learned from somewhere that is
+// not the registry (containerd's own image names) and so says nothing about
+// what the tag points at now: it never replaces an alias that exists, and the
+// alias it creates counts as unconfirmed. It reports whether it created one.
+func (s *Store) SetAliasIfAbsent(ns, repo, ref, d string) (bool, error) {
+	if !ValidDigest(d) {
+		return false, errors.New("unsupported digest")
+	}
+	k := key(ns, repo, ref)
+	s.mu.RLock()
+	_, exists := s.aliases[k]
+	s.mu.RUnlock()
+	if exists {
+		return false, nil
+	}
+	if err := s.setAlias(k, d, true); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) setAlias(k, d string, onlyIfAbsent bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key(ns, repo, ref)
-	if s.aliases[k] == d {
+	previous, existed := s.aliases[k]
+	if existed && (previous == d || onlyIfAbsent) {
 		return nil
 	}
-	previous, existed := s.aliases[k]
 	s.aliases[k] = d
 	if err := s.saveLocked(); err != nil {
 		// Do not expose an alias in memory when its durable update failed.
@@ -619,6 +657,23 @@ func (s *Store) SetAlias(ns, repo, ref, d string) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) noteAliasChecked(k string, at time.Time) {
+	s.verifiedMu.Lock()
+	s.aliasChecked[k] = at.Unix()
+	s.usageDirty = true
+	s.verifiedMu.Unlock()
+}
+
+// AliasChecked reports when ns/repo:ref was last confirmed against its source,
+// or false if it never was (an alias imported from containerd, or one saved
+// before the time was kept).
+func (s *Store) AliasChecked(ns, repo, ref string) (time.Time, bool) {
+	s.verifiedMu.Lock()
+	defer s.verifiedMu.Unlock()
+	t, ok := s.aliasChecked[key(ns, repo, ref)]
+	return time.Unix(t, 0), ok
 }
 
 // saveLocked writes the alias file via a temporary file and a rename, so a

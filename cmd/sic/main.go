@@ -126,6 +126,7 @@ func main() {
 		Timeout:            cfg.UpstreamTimeout,
 		PeerTimeout:        cfg.PeerTimeout,
 		PeerBackoff:        cfg.PeerBackoff,
+		TagTTL:             cfg.TagTTL,
 		Upstream:           cfg.UpstreamEnabled,
 		UpstreamRegistries: cfg.UpstreamRegistries,
 		TLS:                clientTLS,

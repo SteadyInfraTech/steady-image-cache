@@ -153,3 +153,24 @@ func TestCacheLimitSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestTagTTL(t *testing.T) {
+	if got := FromEnv().TagTTL; got != 10*time.Minute {
+		t.Fatalf("default = %v", got)
+	}
+	for _, tc := range []struct {
+		env  string
+		want time.Duration
+	}{
+		{"30s", 30 * time.Second},
+		{"24h", 24 * time.Hour},
+		{"0", 0}, // never confirm again
+		{"-5m", 10 * time.Minute},
+		{"soon", 10 * time.Minute},
+	} {
+		t.Setenv("SIC_TAG_TTL", tc.env)
+		if got := FromEnv().TagTTL; got != tc.want {
+			t.Errorf("SIC_TAG_TTL=%q: %v, want %v", tc.env, got, tc.want)
+		}
+	}
+}

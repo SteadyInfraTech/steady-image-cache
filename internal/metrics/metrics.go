@@ -14,7 +14,7 @@ type Func struct {
 }
 
 type Metrics struct {
-	LocalHits, PeerHits, UpstreamHits, Misses, PeerErrors, VerifyErrors, ImportedBlobs, ImportedBytes, ImportErrors, DiskFull, StoreErrors, Streamed, StreamAborts, UpstreamChallenges atomic.Uint64
+	LocalHits, PeerHits, UpstreamHits, Misses, PeerErrors, VerifyErrors, ImportedBlobs, ImportedBytes, ImportErrors, DiskFull, StoreErrors, Streamed, StreamAborts, UpstreamChallenges, TagChecks, TagChanges, StaleTags atomic.Uint64
 	// Funcs are set before the metrics are served.
 	Funcs []Func
 }
@@ -24,7 +24,7 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	vals := []struct {
 		n string
 		v *atomic.Uint64
-	}{{"sic_local_hits_total", &m.LocalHits}, {"sic_peer_hits_total", &m.PeerHits}, {"sic_upstream_hits_total", &m.UpstreamHits}, {"sic_misses_total", &m.Misses}, {"sic_peer_errors_total", &m.PeerErrors}, {"sic_verify_errors_total", &m.VerifyErrors}, {"sic_containerd_imported_blobs_total", &m.ImportedBlobs}, {"sic_containerd_imported_bytes_total", &m.ImportedBytes}, {"sic_containerd_import_errors_total", &m.ImportErrors}, {"sic_disk_full_total", &m.DiskFull}, {"sic_store_errors_total", &m.StoreErrors}, {"sic_streamed_responses_total", &m.Streamed}, {"sic_stream_aborts_total", &m.StreamAborts}, {"sic_upstream_auth_challenges_total", &m.UpstreamChallenges}}
+	}{{"sic_local_hits_total", &m.LocalHits}, {"sic_peer_hits_total", &m.PeerHits}, {"sic_upstream_hits_total", &m.UpstreamHits}, {"sic_misses_total", &m.Misses}, {"sic_peer_errors_total", &m.PeerErrors}, {"sic_verify_errors_total", &m.VerifyErrors}, {"sic_containerd_imported_blobs_total", &m.ImportedBlobs}, {"sic_containerd_imported_bytes_total", &m.ImportedBytes}, {"sic_containerd_import_errors_total", &m.ImportErrors}, {"sic_disk_full_total", &m.DiskFull}, {"sic_store_errors_total", &m.StoreErrors}, {"sic_streamed_responses_total", &m.Streamed}, {"sic_stream_aborts_total", &m.StreamAborts}, {"sic_upstream_auth_challenges_total", &m.UpstreamChallenges}, {"sic_tag_checks_total", &m.TagChecks}, {"sic_tag_changes_total", &m.TagChanges}, {"sic_stale_tags_served_total", &m.StaleTags}}
 	for _, x := range vals {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", x.n, x.n, x.v.Load())
 	}

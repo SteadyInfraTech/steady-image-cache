@@ -507,6 +507,39 @@ func TestAliasImportContinuesPastAFailure(t *testing.T) {
 	}
 }
 
+// containerd remembers what a tag pointed at when it was pulled. The cache may
+// have learned since, from the registry, that it points somewhere else, and the
+// periodic import must not put the old answer back.
+func TestAliasImportDoesNotReplaceWhatTheCacheKnows(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldD, newD := testDigest([]byte("old")), testDigest([]byte("new"))
+	if err := s.SetAlias("docker.io", "library/a", "latest", newD); err != nil {
+		t.Fatal(err)
+	}
+	imgs := []namedImage{
+		fakeImage{"docker.io/library/a:latest", oldD}, // containerd still has the old one
+		fakeImage{"docker.io/library/b:1", oldD},      // a name the cache has never seen
+	}
+	imp := &Importer{Store: s, Metrics: &metrics.Metrics{}}
+	for i := 0; i < 2; i++ { // the import runs again and again
+		if err := imp.importAliases(imgs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d, _ := s.Resolve("docker.io", "library/a", "latest"); d != newD {
+		t.Fatalf("the import put the old digest back: %s", d)
+	}
+	if d, ok := s.Resolve("docker.io", "library/b", "1"); !ok || d != oldD {
+		t.Fatalf("a new name should be imported: %s %v", d, ok)
+	}
+	if _, ok := s.AliasChecked("docker.io", "library/b", "1"); ok {
+		t.Fatal("an imported alias must not count as confirmed by a registry")
+	}
+}
+
 func TestImportFailuresAreCountedAndBounded(t *testing.T) {
 	var f importFailures
 	first := errors.New("the first failure")
