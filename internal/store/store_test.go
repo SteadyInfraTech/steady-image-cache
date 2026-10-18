@@ -779,3 +779,133 @@ func TestConcurrentOpensOfOneBlobAllSucceed(t *testing.T) {
 		}
 	}
 }
+
+// When a tag was last confirmed against its registry is kept across a restart,
+// so that restarting does not make every tag stale at once.
+func TestAliasConfirmationTimeSurvivesARestart(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	d := digestOf([]byte("m"))
+	at := time.Unix(1_700_000_000, 0)
+	if err := s.SetAliasAt("r", "a", "v1", d, at); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.AliasChecked("r", "a", "v1"); !ok || !got.Equal(at) {
+		t.Fatalf("AliasChecked = %v %v", got, ok)
+	}
+	if _, ok := s.AliasChecked("r", "a", "v2"); ok {
+		t.Fatal("a tag that was never confirmed has no time")
+	}
+	if err := s.FlushVerified(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s2.AliasChecked("r", "a", "v1"); !ok || !got.Equal(at) {
+		t.Fatalf("after a restart: %v %v", got, ok)
+	}
+	if got, ok := s2.Resolve("r", "a", "v1"); !ok || got != d {
+		t.Fatalf("alias lost: %q %v", got, ok)
+	}
+}
+
+// Confirming a tag again changes only its time, and that is not worth a write
+// of the alias file.
+func TestConfirmingAnUnchangedAliasRefreshesTheTimeOnly(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	d := digestOf([]byte("m"))
+	t1, t2 := time.Unix(1_700_000_000, 0), time.Unix(1_700_000_600, 0)
+	if err := s.SetAliasAt("r", "a", "v1", d, t1); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(root, "aliases.json")
+	if err := os.Remove(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAliasAt("r", "a", "v1", d, t2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f); err == nil {
+		t.Fatal("an unchanged alias must not rewrite the alias file")
+	}
+	if got, _ := s.AliasChecked("r", "a", "v1"); !got.Equal(t2) {
+		t.Fatalf("time = %v, want %v", got, t2)
+	}
+	// A failed save must not claim the alias was confirmed.
+	other := digestOf([]byte("n"))
+	s.mu.Lock()
+	s.root = filepath.Join(root, "gone")
+	s.mu.Unlock()
+	if err := s.SetAliasAt("r", "a", "v1", other, time.Unix(1_700_001_200, 0)); err == nil {
+		t.Fatal("expected the save to fail")
+	}
+	if got, _ := s.AliasChecked("r", "a", "v1"); !got.Equal(t2) {
+		t.Fatalf("time moved to %v although the alias was not saved", got)
+	}
+	if d2, _ := s.Resolve("r", "a", "v1"); d2 != d {
+		t.Fatal("an alias that could not be saved must not be visible")
+	}
+}
+
+// An alias learned from containerd never replaces one the cache has, and does
+// not count as confirmed.
+func TestSetAliasIfAbsent(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	d1, d2 := digestOf([]byte("one")), digestOf([]byte("two"))
+	if added, err := s.SetAliasIfAbsent("r", "a", "v1", d1); err != nil || !added {
+		t.Fatalf("added=%v err=%v", added, err)
+	}
+	if _, ok := s.AliasChecked("r", "a", "v1"); ok {
+		t.Fatal("an imported alias was never confirmed")
+	}
+	if added, err := s.SetAliasIfAbsent("r", "a", "v1", d2); err != nil || added {
+		t.Fatalf("added=%v err=%v: an existing alias must be left alone", added, err)
+	}
+	if got, _ := s.Resolve("r", "a", "v1"); got != d1 {
+		t.Fatalf("alias = %s, want the first", got)
+	}
+	// A confirmed alias keeps its time when containerd mentions it again.
+	at := time.Unix(1_700_000_000, 0)
+	if err := s.SetAliasAt("r", "a", "v2", d1, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetAliasIfAbsent("r", "a", "v2", d2); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.AliasChecked("r", "a", "v2"); !ok || !got.Equal(at) {
+		t.Fatalf("time = %v %v", got, ok)
+	}
+	if got, _ := s.Resolve("r", "a", "v2"); got != d1 {
+		t.Fatal("a confirmed alias was replaced")
+	}
+	if _, err := s.SetAliasIfAbsent("r", "a", "v3", "../../x"); err == nil {
+		t.Fatal("a bad digest must be refused")
+	}
+}
+
+// A record written before tag times were kept loads, and its tags are simply
+// unconfirmed.
+func TestRecordWithoutTagTimesLoads(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	if err := s.SetAlias("r", "a", "v1", digestOf([]byte("m"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "verified.json"), []byte(`{"blobs":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.AliasChecked("r", "a", "v1"); ok {
+		t.Fatal("no time was recorded")
+	}
+	if _, ok := s2.Resolve("r", "a", "v1"); !ok {
+		t.Fatal("the alias itself must still be there")
+	}
+}

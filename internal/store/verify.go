@@ -45,6 +45,9 @@ type verifiedDoc struct {
 	// eviction. It is kept here, not in the file's modification time, because
 	// that is part of what vouches for a verified blob.
 	LastUse map[string]int64 `json:"lastuse,omitempty"`
+	// AliasChecked is when each tag was last confirmed against its source (unix
+	// seconds). Losing it only means tags are checked again.
+	AliasChecked map[string]int64 `json:"aliaschecked,omitempty"`
 }
 
 // loadVerified reads the record of verified blobs that the previous run saved,
@@ -77,6 +80,9 @@ func (s *Store) loadVerified() {
 		if _, err := os.Stat(p); err == nil {
 			s.lastUse[d] = u
 		}
+	}
+	for k, at := range doc.AliasChecked {
+		s.aliasChecked[k] = at
 	}
 	if doc.Scrubbed > 0 {
 		s.lastScrub = time.Unix(doc.Scrubbed, 0)
@@ -111,6 +117,12 @@ func (s *Store) flush(force bool) error {
 	}
 	for d, u := range s.lastUse {
 		doc.LastUse[d] = u
+	}
+	if len(s.aliasChecked) > 0 {
+		doc.AliasChecked = make(map[string]int64, len(s.aliasChecked))
+		for k, at := range s.aliasChecked {
+			doc.AliasChecked[k] = at
+		}
 	}
 	if !s.lastScrub.IsZero() {
 		doc.Scrubbed = s.lastScrub.Unix()
