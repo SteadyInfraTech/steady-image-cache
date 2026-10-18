@@ -1,0 +1,91 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate documentation site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Check local links and assets
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import urlsplit, unquote
+          root = Path("docs").resolve()
+          pages = sorted(root.glob("*.html"))
+          errors = []
+          class Links(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.refs = []
+              def handle_starttag(self, tag, attrs):
+                  for key, value in attrs:
+                      if key in ("href", "src") and value:
+                          self.refs.append(value)
+          for page in pages:
+              parser = Links()
+              parser.feed(page.read_text(encoding="utf-8"))
+              for ref in parser.refs:
+                  parts = urlsplit(ref)
+                  if parts.scheme or parts.netloc or ref.startswith("//") or not parts.path:
+                      continue
+                  target = (page.parent / unquote(parts.path)).resolve()
+                  if not target.is_relative_to(root):
+                      errors.append(f"{page.relative_to(root)}: link escapes docs/: {ref}")
+                  elif not target.exists():
+                      errors.append(f"{page.relative_to(root)}: missing local target: {ref}")
+          if errors:
+              print("\n".join(errors))
+              raise SystemExit(1)
+          print(f"Checked {len(pages)} HTML pages; local file links and assets resolve.")
+          PY
+      - name: Check required pages
+        run: |
+          test -f docs/index.html
+          test -f docs/getting-started.html
+          test -f docs/architecture.html
+          test -f docs/operations.html
+          test -f docs/404.html
+          test -f docs/assets/site.css
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
