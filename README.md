@@ -130,6 +130,8 @@ Both conditions, and non-404 answers from peers and upstream registries, are log
 
 With mTLS enabled the main listener requires a client certificate on every path, including `/healthz`, which kubelet cannot present. Set `SIC_ADMIN_LISTEN` (the sample DaemonSet uses `127.0.0.1:5001`) to serve `/healthz` and `/metrics` over plain HTTP on that address as well.
 
+`sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods every 30 seconds and keeps only Ready ones, so a node that starts together with the others sees no peers for up to 30 seconds, and a newly Ready neighbour is not asked until the next listing. Until then a miss goes straight to the registry (or fails, if upstream fallback is off).
+
 ## Registry mirror
 
 See `deploy/containerd/hosts.toml`. Install it as the `_default/hosts.toml` registry configuration on each node, adjusting certificate paths for your environment.

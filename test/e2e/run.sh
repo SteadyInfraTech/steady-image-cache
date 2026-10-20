@@ -147,10 +147,20 @@ DIGEST=$(docker exec "$A" ctr -n k8s.io images ls "name==$APP:v1" | awk 'NR==2 {
 echo "image $APP@$DIGEST"
 if docker exec "$B" ctr -n k8s.io images ls -q | grep -q "$APP"; then fail "node $B should not have the image yet"; fi
 
-log "wait for SIC on $A to import it"
-imported() { [ "$(metric "$A" sic_containerd_imported_blobs_total)" -ge 4 ]; }
-wait_for "the import on $A" 90 imported
-echo "imported blobs on $A: $(metric "$A" sic_containerd_imported_blobs_total)"
+log "wait for SIC on $A to hold the image, and for $B to see a peer"
+# Not the import counter: kind's own images are imported too. Ask A's SIC for
+# this manifest over mutual TLS, the way containerd would.
+serves() {
+  docker exec "$A" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/app/manifests/$DIGEST?ns=registry.example.test"
+}
+wait_for "$A's SIC to serve the manifest" 90 serves
+# Peers are listed every 30s, and a pod that was not Ready at the last listing
+# is missing from it.
+sees_peer() { [ "$(metric "$B" sic_peers)" -ge 1 ]; }
+wait_for "$B's SIC to see a peer" 90 sees_peer
+echo "imported blobs on $A: $(metric "$A" sic_containerd_imported_blobs_total); peers seen by $B: $(metric "$B" sic_peers)"
 
 log "pull on $B by digest, through SIC"
 before_peer=$(metric "$B" sic_peer_hits_total)
