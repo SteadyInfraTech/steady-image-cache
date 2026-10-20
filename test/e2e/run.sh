@@ -15,7 +15,7 @@
 #   test/e2e/run.sh            # creates the cluster "sic-e2e" and deletes it
 #   KEEP=1 test/e2e/run.sh     # leave the cluster for inspection
 #   CLUSTER=foo test/e2e/run.sh
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
@@ -25,28 +25,52 @@ APP=registry.example.test/e2e/app                          # never resolvable
 WORK=$(mktemp -d)
 export KUBECONFIG=$WORK/kubeconfig
 
-log() { printf '\n=== %s\n' "$*"; }
+STAGE=start
+log() { STAGE=$*; printf '\n=== %s\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+# Everything printed is also kept, so that a failure can be reported as a
+# GitHub annotation: those are readable from the API and the checks page even
+# when the job log is not at hand.
+OUT=$WORK/output.log
+exec > >(tee "$OUT") 2>&1
+
+# annotate TITLE: stdin, trimmed to its tail, as a workflow error annotation.
+annotate() {
+  [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  local body
+  body=$(tail -c 3000 | sed -e 's/%/%25/g' -e 's/\r//g' | awk 'BEGIN {ORS="%0A"} {print}')
+  echo "::error title=$1::$body"
+}
 
 dump() {
   log "diagnostics"
-  kubectl -n kube-system get pods -o wide || true
+  { echo "stage: $STAGE"; echo "command: $BASH_COMMAND_FAILED (line $LINE_FAILED)"; tail -n 25 "$OUT"; } | annotate "e2e failed"
+  kubectl -n kube-system get pods -o wide 2>&1 | tee "$WORK/pods.txt" || true
+  annotate "pods" < "$WORK/pods.txt"
   for p in $(kubectl -n kube-system get pods -l app=steady-image-cache -o name 2>/dev/null); do
-    echo "--- $p"; kubectl -n kube-system logs "$p" --tail=80 || true
+    echo "--- $p"
+    { kubectl -n kube-system get "$p" -o wide --no-headers; kubectl -n kube-system logs "$p" --tail=40; } 2>&1 | tee "$WORK/pod.txt" || true
+    annotate "$p" < "$WORK/pod.txt"
   done
   for n in "${NODES[@]:-}"; do
     [ -n "$n" ] || continue
-    echo "--- containerd on $n"; docker exec "$n" journalctl -u containerd --no-pager -n 40 || true
+    echo "--- containerd on $n"
+    docker exec "$n" journalctl -u containerd --no-pager -n 25 2>&1 | tee "$WORK/cd.txt" || true
+    annotate "containerd $n" < "$WORK/cd.txt"
   done
 }
 
 cleanup() {
   rc=$?
-  [ $rc -eq 0 ] || dump
+  trap - ERR
+  if [ $rc -ne 0 ]; then dump; sleep 1; fi
   if [ -z "$KEEP" ]; then kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; fi
   rm -rf "$WORK"
   exit $rc
 }
+BASH_COMMAND_FAILED=; LINE_FAILED=
+trap 'BASH_COMMAND_FAILED=$BASH_COMMAND; LINE_FAILED=$LINENO' ERR
 NODES=()
 trap cleanup EXIT
 
