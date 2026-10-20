@@ -195,6 +195,12 @@ docker build -t steady-image-cache:v3 .
 
 The build requires the containerd Go client dependency declared in `go.mod`.
 
+### End-to-end test
+
+`test/e2e/run.sh` runs SIC on a three-node [kind](https://kind.sigs.k8s.io/) cluster, deployed from `deploy/daemonset.yaml` with a real containerd. One worker already has an image; SIC imports it. The other worker pulls the image by digest through SIC, with no registry reachable at all, so the pull can only succeed if peer discovery, mutual TLS and the import all work. It then checks the peer-hit counters. It needs `docker`, `kind`, `kubectl` and `openssl`, takes a few minutes, and runs in CI (`.github/workflows/e2e.yml`) when code or deployment files change. `KEEP=1 test/e2e/run.sh` leaves the cluster up for inspection.
+
+It does not cover the upstream fallback or tag freshness; those are tested in the unit tests against a fake registry.
+
 ## Endpoints
 
 * `GET /v2/`
