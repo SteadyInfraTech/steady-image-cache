@@ -1,0 +1,14 @@
+# One control-plane node and two workers. SIC runs on all three (the sample
+# DaemonSet tolerates every taint), so a pull on a worker has two peers to ask.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+# containerd reads /etc/containerd/certs.d/<registry>/hosts.toml, including
+# the _default directory the sample hosts.toml is installed in.
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
+nodes:
+- role: control-plane
+- role: worker
+- role: worker

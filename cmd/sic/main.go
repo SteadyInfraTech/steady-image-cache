@@ -97,6 +97,9 @@ func main() {
 			go k.Run(ctx, 30*time.Second, log.Printf)
 		}
 	}
+	// How many peers this node would ask right now. Zero on a node whose
+	// neighbours exist but are not Ready yet, or have not been listed yet.
+	m.Funcs = append(m.Funcs, metrics.Func{Name: "sic_peers", Type: "gauge", Value: func() int64 { return int64(len(finders.Candidates())) }})
 
 	// The import walks the whole containerd content store, which can take a long
 	// time on a busy node. It runs in the background so the registry is already

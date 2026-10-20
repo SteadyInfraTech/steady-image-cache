@@ -130,6 +130,8 @@ Both conditions, and non-404 answers from peers and upstream registries, are log
 
 With mTLS enabled the main listener requires a client certificate on every path, including `/healthz`, which kubelet cannot present. Set `SIC_ADMIN_LISTEN` (the sample DaemonSet uses `127.0.0.1:5001`) to serve `/healthz` and `/metrics` over plain HTTP on that address as well.
 
+`sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods every 30 seconds and keeps only Ready ones, so a node that starts together with the others sees no peers for up to 30 seconds, and a newly Ready neighbour is not asked until the next listing. Until then a miss goes straight to the registry (or fails, if upstream fallback is off).
+
 ## Registry mirror
 
 See `deploy/containerd/hosts.toml`. Install it as the `_default/hosts.toml` registry configuration on each node, adjusting certificate paths for your environment.
@@ -194,6 +196,12 @@ docker build -t steady-image-cache:v3 .
 ```
 
 The build requires the containerd Go client dependency declared in `go.mod`.
+
+### End-to-end test
+
+`test/e2e/run.sh` runs SIC on a three-node [kind](https://kind.sigs.k8s.io/) cluster, deployed from `deploy/daemonset.yaml` with a real containerd. One worker already has an image; SIC imports it. The other worker pulls the image by digest through SIC, with no registry reachable at all, so the pull can only succeed if peer discovery, mutual TLS and the import all work. It then checks the peer-hit counters. It needs `docker`, `kind`, `kubectl` and `openssl`, takes a few minutes, and runs in CI (`.github/workflows/e2e.yml`) when code or deployment files change. `KEEP=1 test/e2e/run.sh` leaves the cluster up for inspection.
+
+It does not cover the upstream fallback or tag freshness; those are tested in the unit tests against a fake registry.
 
 ## Endpoints
 
