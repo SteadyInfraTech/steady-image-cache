@@ -174,3 +174,15 @@ func TestTagTTL(t *testing.T) {
 		}
 	}
 }
+
+func TestPeerMaxTries(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{{"", 4}, {"2", 2}, {"0", 0}, {"-1", 4}, {"x", 4}} {
+		t.Setenv("SIC_PEER_MAX_TRIES", tc.env)
+		if got := FromEnv().PeerMaxTries; got != tc.want {
+			t.Fatalf("SIC_PEER_MAX_TRIES=%q: got %d, want %d", tc.env, got, tc.want)
+		}
+	}
+}

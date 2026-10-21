@@ -129,6 +129,7 @@ func main() {
 		Timeout:            cfg.UpstreamTimeout,
 		PeerTimeout:        cfg.PeerTimeout,
 		PeerBackoff:        cfg.PeerBackoff,
+		PeerMaxTries:       cfg.PeerMaxTries,
 		TagTTL:             cfg.TagTTL,
 		Upstream:           cfg.UpstreamEnabled,
 		UpstreamRegistries: cfg.UpstreamRegistries,

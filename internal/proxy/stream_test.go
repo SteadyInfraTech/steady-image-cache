@@ -280,7 +280,7 @@ func TestLastByteWaitsForVerification(t *testing.T) {
 		a := newNode(t, Options{})
 		dl := newDownload("")
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			a.p.stream(w, r, digestOf(body), dl)
+			a.p.stream(w, r, digestOf(body), dl, false)
 		}))
 		defer srv.Close()
 		dl.Begin(f, int64(len(body)))

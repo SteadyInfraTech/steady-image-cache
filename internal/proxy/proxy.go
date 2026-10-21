@@ -53,6 +53,11 @@ type Options struct {
 	// their local cache only, so a healthy one responds immediately.
 	PeerTimeout time.Duration
 	PeerBackoff time.Duration
+	// PeerMaxTries is how many peers one miss may ask. Asking them one after
+	// another costs a round trip each, so on a large cluster a blob nobody has
+	// would otherwise take that many round trips to reach the registry. Zero:
+	// all of them.
+	PeerMaxTries int
 	// TagTTL is how long a tag keeps pointing at the digest it was last
 	// confirmed to have, when its registry can be asked. Zero: never ask again.
 	TagTTL time.Duration
@@ -82,6 +87,7 @@ type Proxy struct {
 	downloads      map[string]*download      // blobs being fetched, by digest
 
 	peerTimeout, backoff time.Duration
+	maxTries             int
 	tagTTL               time.Duration
 	tls                  *tlsutil.Reloader
 	serverName           string
@@ -123,6 +129,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		idle:           o.Timeout,
 		peerTimeout:    o.PeerTimeout,
 		backoff:        o.PeerBackoff,
+		maxTries:       o.PeerMaxTries,
 		tagTTL:         o.TagTTL,
 		tls:            o.TLS,
 		serverName:     o.ServerName,
@@ -418,6 +425,18 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		return
 	}
 	if isPeer(r) {
+		// A peer never starts a download here, but it may share one that is
+		// under way: with a rollout the first node's pull is then passed down
+		// the line while it runs, instead of every other node waiting for it
+		// to finish and then going to the registry.
+		if dl := p.activeDownload(d); dl != nil && streamable(r) && p.stream(w, r, d, dl, true) {
+			p.metrics.PeerStreams.Add(1)
+			return
+		}
+		if p.serveDigest(w, r, d, nil) { // finished while we looked
+			p.metrics.LocalHits.Add(1)
+			return
+		}
 		http.Error(w, "blob unavailable", 404)
 		return
 	}
@@ -452,7 +471,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		})
 		// A plain GET is answered while the blob is still arriving. Anything
 		// else (a byte range) needs the whole blob, so it waits for it.
-		if streamable(r) && p.stream(w, r, d, dl) {
+		if streamable(r) && p.stream(w, r, d, dl, false) {
 			return
 		}
 		var ok bool
@@ -479,11 +498,13 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 }
 
 // downloading reports whether d is being fetched right now.
-func (p *Proxy) downloading(d string) bool {
+func (p *Proxy) downloading(d string) bool { return p.activeDownload(d) != nil }
+
+// activeDownload returns the download of d that is under way, or nil.
+func (p *Proxy) activeDownload(d string) *download {
 	p.dlmu.Lock()
 	defer p.dlmu.Unlock()
-	_, ok := p.downloads[d]
-	return ok
+	return p.downloads[d]
 }
 
 // headBlob answers a HEAD for a blob that is not cached by asking the peers and
@@ -492,7 +513,7 @@ func (p *Proxy) downloading(d string) bool {
 func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	size, ok := int64(-1), false
 	var challenge []string
-	for _, base := range p.shuffledPeers() {
+	for _, base := range p.askablePeers() {
 		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
 			p.peerFailed(base, e)
@@ -634,6 +655,14 @@ func (p *Proxy) peerFailed(base string, e error) {
 // that failed recently are left out until their back-off has passed.
 func (p *Proxy) shuffledPeers() []string {
 	all := p.peers.Candidates()
+	if len(all) == 0 {
+		// Nobody is known. That is also what a node sees while its neighbours
+		// are starting, so ask the finder to look again; this miss goes on
+		// without them, the next ones may not.
+		if pk, ok := p.peers.(peer.Poker); ok {
+			pk.Poke()
+		}
+	}
 	now := p.now()
 	out := make([]string, 0, len(all))
 	p.dmu.Lock()
@@ -650,6 +679,17 @@ func (p *Proxy) shuffledPeers() []string {
 	p.dmu.Unlock()
 	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	return out
+}
+
+// askablePeers is shuffledPeers cut to the number one miss may ask. The peers
+// are in random order, so the ones left out differ from miss to miss.
+func (p *Proxy) askablePeers() []string {
+	peers := p.shuffledPeers()
+	if p.maxTries > 0 && len(peers) > p.maxTries {
+		p.metrics.PeerCapped.Add(1)
+		peers = peers[:p.maxTries]
+	}
+	return peers
 }
 
 // idleBody cancels the request when no data has arrived for d. It replaces a
@@ -755,7 +795,7 @@ func refused(e error) bool {
 }
 
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
-	for _, base := range p.shuffledPeers() {
+	for _, base := range p.askablePeers() {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
 			p.peerFailed(base, e)
@@ -824,7 +864,7 @@ func (p *Proxy) storeManifest(resp *http.Response, ref string) (string, int64, e
 
 // fetchManifestPeers returns the digest of the manifest it stored.
 func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
-	for _, base := range p.shuffledPeers() {
+	for _, base := range p.askablePeers() {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1", "Accept": in.accept})
 		if e != nil {
 			p.peerFailed(base, e)

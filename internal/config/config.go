@@ -24,6 +24,9 @@ type Config struct {
 	// answering before it counts as failed. PeerBackoff is how long a failed
 	// peer is then left alone.
 	PeerTimeout, PeerBackoff time.Duration
+	// PeerMaxTries limits how many peers one miss asks before it moves on to
+	// the registry (or gives up). Zero means no limit.
+	PeerMaxTries int
 	// MinFreeBytes and MinFreePercent are the free disk space that must remain
 	// after a download; the larger applies. MaxCacheBytes limits the cache size
 	// (zero: no limit). When a download would break either, the least recently
@@ -100,6 +103,7 @@ func FromEnv() Config {
 		PeerPort:            5000,
 		PeerTimeout:         5 * time.Second,
 		PeerBackoff:         30 * time.Second,
+		PeerMaxTries:        4,
 		MinFreeBytes:        1 << 30,
 		MinFreePercent:      20,
 		ScrubInterval:       24 * time.Hour,
@@ -149,6 +153,11 @@ func FromEnv() Config {
 	if v := os.Getenv("SIC_PEER_BACKOFF"); v != "" {
 		if d, e := time.ParseDuration(v); e == nil && d >= 0 {
 			c.PeerBackoff = d
+		}
+	}
+	if v := os.Getenv("SIC_PEER_MAX_TRIES"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n >= 0 {
+			c.PeerMaxTries = n
 		}
 	}
 	if v := os.Getenv("SIC_MIN_FREE_BYTES"); v != "" {
