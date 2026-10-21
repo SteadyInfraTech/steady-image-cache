@@ -139,7 +139,13 @@ func streamable(r *http.Request) bool {
 // was stored already or the download ended without one; the caller then goes
 // by wait. It returns true once it has started the response, whether or not
 // that response completed.
-func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *download) bool {
+//
+// A peer asking (immediate) is only served from a source that has already
+// delivered bytes, and is never made to wait for one. Two nodes that each
+// wait for the other to start would otherwise wait for ever: a source that has
+// bytes got them from somewhere that had them first, so the chain cannot be a
+// loop.
+func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *download, immediate bool) bool {
 	ctx := r.Context()
 	var a *attempt
 	var f *os.File
@@ -147,10 +153,13 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 		dl.mu.Lock()
 		cur, done, ch := dl.cur, dl.done, dl.notify
 		var usable bool
-		if cur != nil && !cur.ended {
+		if cur != nil && !cur.ended && (!immediate || cur.written > 0) {
 			a, usable = cur, true
 		}
 		dl.mu.Unlock()
+		if immediate && !usable {
+			return false
+		}
 		if usable {
 			var err error
 			if f, err = os.Open(a.path); err != nil {
