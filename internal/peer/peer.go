@@ -19,12 +19,27 @@ import (
 )
 
 type Finder interface{ Candidates() []string }
+
+// Poker is a Finder that learns of its peers from somewhere slow, and can be
+// told that its answer is probably out of date. Poke never blocks and may be
+// called as often as is convenient; the finder decides how soon to look again.
+type Poker interface{ Poke() }
+
 type Static struct{ peers []string }
 
 func NewStatic(p []string) *Static     { return &Static{peers: p} }
 func (s *Static) Candidates() []string { return append([]string(nil), s.peers...) }
 
 type Multi []Finder
+
+// Poke passes the hint on to every finder that can use it.
+func (m Multi) Poke() {
+	for _, f := range m {
+		if p, ok := f.(Poker); ok {
+			p.Poke()
+		}
+	}
+}
 
 func (m Multi) Candidates() []string {
 	seen := map[string]bool{}
@@ -55,6 +70,27 @@ type Kubernetes struct {
 	client                      *http.Client
 	mu                          sync.RWMutex
 	peers                       []string
+
+	// poke asks Run to list the pods again before its interval is up. It holds
+	// at most one request, so any number of pokes made while one is waiting
+	// are one listing.
+	poke chan struct{}
+	// minGap is the shortest time between two listings, however often poked.
+	minGap time.Duration
+	// list does one listing; Refresh, except in tests.
+	list func(context.Context) error
+}
+
+// DefaultMinGap is the shortest time between two pod listings by one node.
+// Every node lists the pods, so on a cluster of N nodes a node that is poked
+// all the time still costs the API server only N/DefaultMinGap listings a
+// second in total.
+const DefaultMinGap = 5 * time.Second
+
+func (k *Kubernetes) setup() {
+	k.poke = make(chan struct{}, 1)
+	k.minGap = DefaultMinGap
+	k.list = k.Refresh
 }
 
 type podList struct {
@@ -91,6 +127,7 @@ func NewKubernetes(namespace, selector, selfIP string, port int, scheme string) 
 		namespace: namespace, selector: selector, selfIP: selfIP, port: port, scheme: scheme,
 		client: &http.Client{Timeout: 10 * time.Second, Transport: &authTransport{tokenFile: tokenFile, base: base}},
 	}
+	k.setup()
 	return k, nil
 }
 
@@ -178,15 +215,47 @@ func (k *Kubernetes) Candidates() []string {
 	return append([]string(nil), k.peers...)
 }
 
+// Poke asks for the pods to be listed again soon. A node that sees no peers
+// calls it on a miss: a neighbour that was not Ready at the last listing, as
+// when the whole DaemonSet starts together, would otherwise be unknown for up
+// to the full interval. The listing is not waited for, so the request that
+// poked still goes without that neighbour.
+func (k *Kubernetes) Poke() {
+	select {
+	case k.poke <- struct{}{}:
+	default: // one is waiting already
+	}
+}
+
+// Run lists the pods every interval, and sooner when poked, but never twice
+// within minGap.
 func (k *Kubernetes) Run(ctx context.Context, interval time.Duration, logf func(string, ...any)) {
 	for {
-		if err := k.Refresh(ctx); err != nil {
+		started := time.Now()
+		if err := k.list(ctx); err != nil {
 			logf("peer discovery: %v", err)
 		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(interval):
+		case <-timer.C:
+		case <-k.poke:
+			timer.Stop()
+			if wait := k.minGap - time.Since(started); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+			}
+			// Pokes that came in while waiting are answered by the listing
+			// that is about to happen.
+			select {
+			case <-k.poke:
+			default:
+			}
 		}
 	}
 }

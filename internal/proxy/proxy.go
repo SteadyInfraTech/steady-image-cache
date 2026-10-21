@@ -655,6 +655,14 @@ func (p *Proxy) peerFailed(base string, e error) {
 // that failed recently are left out until their back-off has passed.
 func (p *Proxy) shuffledPeers() []string {
 	all := p.peers.Candidates()
+	if len(all) == 0 {
+		// Nobody is known. That is also what a node sees while its neighbours
+		// are starting, so ask the finder to look again; this miss goes on
+		// without them, the next ones may not.
+		if pk, ok := p.peers.(peer.Poker); ok {
+			pk.Poke()
+		}
+	}
 	now := p.now()
 	out := make([]string, 0, len(all))
 	p.dmu.Lock()
