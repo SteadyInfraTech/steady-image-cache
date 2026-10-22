@@ -224,7 +224,9 @@ The build requires the containerd Go client dependency declared in `go.mod`.
 
 A second phase puts a real registry (`registry:2`, served over HTTPS with a certificate from the test CA) behind SIC as the upstream. It checks that the private CA reaches SIC through `SSL_CERT_FILE`; that a pull by tag goes to the registry once and the next node gets the blobs from its peer, which the registry's own log confirms; that a tag moved in the registry is not served at its old digest; and that when the registry is gone a cached tag is still served and counted in `sic_stale_tags_served_total`.
 
-It does not cover registries that ask for a token; the authentication relay is tested in the unit tests against a fake registry.
+A third phase puts a second registry that wants a password (HTTP Basic) behind SIC. A pull with no credentials or the wrong ones is refused and nothing is fetched; with the right ones it works, the password is found neither in SIC's cache directory nor in its logs, and the next node gets the blobs from its peer. The same phase pins the boundary described under "Upstream fallback": a node that has fetched an image with credentials serves its tag to a client that has none, a node that has fetched nothing cannot, and a digest is handed over by any peer that has it.
+
+It does not cover token services such as Docker Hub's; the relay of their challenges is tested in the unit tests against a fake registry.
 
 ## Endpoints
 
