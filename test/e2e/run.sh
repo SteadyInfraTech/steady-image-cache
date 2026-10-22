@@ -29,6 +29,9 @@ REGISTRY=sic-e2e-registry
 REGISTRY_HOST=registry.e2e.test                            # resolves only on the nodes, see phase 2
 # The registry that plays the upstream. The ECR mirror has no pull rate limit.
 REGISTRY_IMAGES=(public.ecr.aws/docker/library/registry:2 registry:2)
+HTTPD_IMAGES=(public.ecr.aws/docker/library/httpd:2 httpd:2)  # only for its htpasswd
+PRIVATE=sic-e2e-registry-private
+PRIVATE_HOST=private.e2e.test                              # a registry that wants credentials
 WORK=$(mktemp -d)
 export KUBECONFIG=$WORK/kubeconfig
 
@@ -60,6 +63,11 @@ dump() {
     { kubectl -n kube-system get "$p" -o wide --no-headers; kubectl -n kube-system logs "$p" --tail=40; } 2>&1 | tee "$WORK/pod.txt" || true
     annotate "$p" < "$WORK/pod.txt"
   done
+  if docker inspect "$PRIVATE" >/dev/null 2>&1; then
+    echo "--- private registry"
+    docker logs --tail 25 "$PRIVATE" 2>&1 | tee "$WORK/preg.txt" || true
+    annotate "private registry" < "$WORK/preg.txt"
+  fi
   if docker inspect "$REGISTRY" >/dev/null 2>&1; then
     echo "--- registry"
     docker logs --tail 25 "$REGISTRY" 2>&1 | tee "$WORK/reg.txt" || true
@@ -79,6 +87,7 @@ cleanup() {
   if [ $rc -ne 0 ]; then dump; sleep 1; fi
   if [ -z "$KEEP" ]; then kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; fi
   docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
+  docker rm -f "$PRIVATE" >/dev/null 2>&1 || true
   rm -rf "$WORK"
   exit $rc
 }
@@ -249,7 +258,7 @@ kubectl -n kube-system patch daemonset steady-image-cache --type=json -p '[
   {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"upstream-ca","configMap":{"name":"upstream-ca"}}},
   {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"upstream-ca","mountPath":"/etc/sic-roots","readOnly":true}}]'
 kubectl -n kube-system set env daemonset/steady-image-cache \
-  SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="$REGISTRY_HOST" SSL_CERT_FILE=/etc/sic-roots/ca-bundle.crt SIC_TAG_TTL=3s
+  SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="$REGISTRY_HOST,$PRIVATE_HOST" SSL_CERT_FILE=/etc/sic-roots/ca-bundle.crt SIC_TAG_TTL=3s
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
 wait_for "both workers to see a peer" 90 both_see_peers
@@ -289,4 +298,120 @@ docker exec "$B" crictl pull "$UP:v1"
 [ "$(node_digest "$B")" = "$D1" ] || fail "$B has $(node_digest "$B") after the registry went away, want its cached $D1"
 [ "$(metric "$B" sic_stale_tags_served_total)" -gt "$stale_before" ] || fail "$B did not count a stale tag served"
 
-log "pass: peers, upstream over a private CA, a moving tag, and a registry that is gone"
+log "phase 2 passed: peers, upstream over a private CA, a moving tag, and a registry that is gone"
+
+# ---------------------------------------------------------------------------
+# Phase 3: a registry that wants credentials (HTTP Basic, from htpasswd).
+#
+# Covers what SIC does with the Authorization header: nothing is cached for a
+# request that was refused, credentials are passed on and never kept, and the
+# blobs fetched with them are shared with the next node. It also pins what the
+# README says about who may read the cache: it does not check who is asking.
+# ---------------------------------------------------------------------------
+PRIV=$PRIVATE_HOST/e2e/priv
+PRIV_LOCAL=localhost:5444/e2e/priv
+C=$CLUSTER-control-plane
+USER_NAME=e2euser
+PASS=$(openssl rand -hex 12)
+
+log "phase 3: a registry with a password"
+for img in "${HTTPD_IMAGES[@]}"; do
+  if docker pull -q "$img" >/dev/null 2>&1; then HTTPD_IMAGE=$img; break; fi
+done
+[ -n "${HTTPD_IMAGE:-}" ] || fail "could not pull an httpd image for htpasswd (tried: ${HTTPD_IMAGES[*]})"
+mkdir "$WORK/auth"
+# The registry accepts bcrypt only.
+docker run --rm --entrypoint htpasswd "$HTTPD_IMAGE" -Bbn "$USER_NAME" "$PASS" > "$WORK/auth/htpasswd"
+(
+  cd "$WORK"
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$PRIVATE_HOST" -keyout preg.key -out preg.csr 2>/dev/null
+  openssl x509 -req -in preg.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out preg.crt -extfile <(printf '%s\n' \
+    "subjectAltName=DNS:$PRIVATE_HOST" 'extendedKeyUsage=serverAuth' 'keyUsage=critical,digitalSignature') 2>/dev/null
+)
+docker rm -f "$PRIVATE" >/dev/null 2>&1 || true
+docker run -d --name "$PRIVATE" --network kind -p 127.0.0.1:5444:443 -v "$WORK:/certs:ro" -v "$WORK/auth:/auth:ro" \
+  -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/preg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/preg.key \
+  -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+  "$REGISTRY_IMAGE" >/dev/null
+# 401 without credentials is what a working registry of this kind answers.
+private_up() { [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$WORK/ca.crt" --resolve "$PRIVATE_HOST:5444:127.0.0.1" "https://$PRIVATE_HOST:5444/v2/")" = 401 ]; }
+wait_for "the private registry" 60 private_up
+PRIVATE_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$PRIVATE")
+for n in "${NODES[@]}"; do docker exec "$n" sh -c "echo '$PRIVATE_IP $PRIVATE_HOST' >> /etc/hosts"; done
+all_see_peers() { for n in "$A" "$B" "$C"; do [ "$(metric "$n" sic_peers)" -ge 1 ] || return 1; done; }
+wait_for "all three nodes to see a peer" 90 all_see_peers
+
+# A docker config of its own, so that nothing is written to the user's.
+export DOCKER_CONFIG=$WORK/dockercfg
+mkdir -p "$DOCKER_CONFIG"
+printf '%s' "$PASS" | docker login localhost:5444 -u "$USER_NAME" --password-stdin >/dev/null
+head -c 3000000 /dev/urandom > "$WORK/auth/one"
+head -c 2000000 /dev/urandom > "$WORK/auth/two"
+printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$WORK/auth/Dockerfile"
+docker build -q -t "$PRIV_LOCAL:v1" "$WORK/auth" >/dev/null
+DP=$(docker push "$PRIV_LOCAL:v1" | awk '/digest: sha256:/ {print $3}')
+[[ $DP == sha256:* ]] || fail "could not push to the private registry (digest '$DP')"
+echo "pushed $PRIV:v1 = $DP"
+unset DOCKER_CONFIG
+
+blob_gets() { docker logs "$PRIVATE" 2>&1 | grep -c 'GET /v2/e2e/priv/blobs/sha256:' || true; }
+priv_digest() { docker exec "$1" ctr -n k8s.io images ls "name==$PRIV:v1" | awk 'NR==2 {print $3}'; }
+# refused WHAT CMD...: the command must fail, and the registry must not have
+# served a blob since GETS_BASE (none at all, until the first real pull).
+GETS_BASE=0
+refused() {
+  local what=$1; shift
+  if "$@" >/dev/null 2>&1; then fail "$what: the pull succeeded, it should have been refused"; fi
+  [ "$(blob_gets)" = "$GETS_BASE" ] || fail "$what: the registry served blobs ($GETS_BASE -> $(blob_gets))"
+}
+
+log "no credentials, wrong credentials: refused, and nothing is fetched"
+refused "no credentials on $A" docker exec "$A" crictl pull "$PRIV:v1"
+refused "wrong password on $A" docker exec "$A" crictl pull --creds "$USER_NAME:not-$PASS" "$PRIV:v1"
+[ -z "$(priv_digest "$A")" ] || fail "$A has the image after refused pulls"
+
+log "right credentials on $A"
+ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
+docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
+[ "$(priv_digest "$A")" = "$DP" ] || fail "$A has '$(priv_digest "$A")' for the tag, want $DP"
+[ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$A relayed no challenge (did the registry ask for credentials?)"
+[ "$(metric "$A" sic_upstream_hits_total)" -ge 3 ] || fail "$A fetched $(metric "$A" sic_upstream_hits_total) objects from the registry, want at least 3"
+gets=$(blob_gets)
+[ "$gets" -ge 3 ] || fail "the private registry's log shows $gets blob requests, want at least 3 (is the log format as expected?)"
+GETS_BASE=$gets
+
+log "the password is not kept: not in SIC's cache directory, not in its logs"
+b64=$(printf '%s:%s' "$USER_NAME" "$PASS" | base64 -w0)
+for n in "${NODES[@]}"; do
+  rc=0
+  docker exec "$n" grep -rqF -e "$PASS" -e "$b64" /var/lib/steady-image-cache || rc=$?
+  [ "$rc" = 1 ] || fail "the password (or its Basic form) was found in $n's cache directory (grep status $rc; 1 means not found)"
+done
+logs=$(kubectl -n kube-system logs -l app=steady-image-cache --tail=-1 --prefix 2>&1)
+if grep -qF -e "$PASS" -e "$b64" <<<"$logs"; then fail "the password appears in SIC's logs"; fi
+
+log "right credentials on $B: the blobs come from $A, not the registry"
+peer_before=$(metric "$B" sic_peer_hits_total)
+docker exec "$B" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
+[ "$(priv_digest "$B")" = "$DP" ] || fail "$B has '$(priv_digest "$B")' for the tag, want $DP"
+[ "$(blob_gets)" = "$gets" ] || fail "the registry served blobs again for $B ($gets -> $(blob_gets))"
+[ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 3 ] || fail "$B had fewer than 3 peer hits"
+
+log "the documented boundary: the cache does not check who is asking"
+# README, "Upstream fallback": once something has been fetched with credentials,
+# any client the listener accepts can read it from this node. A tag is only
+# confirmed when it is older than SIC_TAG_TTL, and a registry that answers the
+# confirmation with a challenge does not stop the cached tag being served.
+sleep 4
+stale_before=$(metric "$A" sic_stale_tags_served_total)
+docker exec "$A" crictl pull "$PRIV:v1"   # no credentials at all
+[ "$(metric "$A" sic_stale_tags_served_total)" -gt "$stale_before" ] || fail "$A did not serve the cached tag to a client without credentials"
+[ "$(blob_gets)" = "$gets" ] || fail "the registry served blobs for a client without credentials"
+# A node that has fetched nothing has nothing to serve by tag...
+refused "no credentials on $C, by tag" docker exec "$C" crictl pull "$PRIV:v1"
+# ...but a digest is a capability: a peer that has it hands it over.
+docker exec "$C" crictl pull "$PRIV@$DP"
+[ "$(blob_gets)" = "$gets" ] || fail "the registry served blobs for $C, which asked a peer"
+[ "$(metric "$C" sic_peer_hits_total)" -ge 3 ] || fail "$C had fewer than 3 peer hits by digest"
+
+log "pass: credentials passed on and never kept, shared between nodes, and the boundary is as documented"
