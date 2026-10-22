@@ -121,20 +121,33 @@ registries_phase() {
   both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
   wait_for "both workers to see a peer" 90 both_see_peers
 
+  # Public registries throttle anonymous clients by address, and the runner's is
+  # shared. A pull that fails is tried again after a pause; what is checked is
+  # SIC's behaviour on the attempt that works.
+  pull_retry() {
+    local node=$1 img=$2 try
+    for try in 1 2 3 4; do
+      if docker exec "$node" crictl pull "$img"; then return 0; fi
+      echo "pull of $img on $node failed (attempt $try of 4); waiting before trying again"
+      sleep $((try * 20))
+    done
+    fail "$img could not be pulled on $node after 4 attempts"
+  }
+
   local img
   for img in public.ecr.aws/docker/library/busybox:latest ghcr.io/jqlang/jq:latest; do
     log "registries: $img on $A, then on $B"
     local ch_before up_before peer_before
     ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
     up_before=$(metric "$A" sic_upstream_hits_total)
-    docker exec "$A" crictl pull "$img"
+    pull_retry "$A" "$img"
     echo "challenges relayed on $A: $ch_before -> $(metric "$A" sic_upstream_auth_challenges_total)"
     echo "upstream fetches on $A:   $up_before -> $(metric "$A" sic_upstream_hits_total)"
     [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$img: no authentication challenge was relayed on $A"
     [ $(( $(metric "$A" sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: $A fetched fewer than 2 objects from the registry"
 
     peer_before=$(metric "$B" sic_peer_hits_total)
-    docker exec "$B" crictl pull "$img"
+    pull_retry "$B" "$img"
     echo "peer hits on $B: $peer_before -> $(metric "$B" sic_peer_hits_total)"
     [ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 2 ] || fail "$img: $B got fewer than 2 blobs from its peer"
   done
@@ -152,7 +165,7 @@ kind create cluster --name "$CLUSTER" --config "$ROOT/test/e2e/kind-config.yaml"
 mapfile -t NODES < <(kind get nodes --name "$CLUSTER")
 A=$CLUSTER-worker
 B=$CLUSTER-worker2
-for n in "$A" "$B"; do printf '%s\n' "${NODES[@]}" | grep -qx "$n" || fail "expected node $n, have: ${NODES[*]}"; done
+for n in "$A" "$B"; do [[ " ${NODES[*]} " == *" $n "* ]] || fail "expected node $n, have: ${NODES[*]}"; done
 kind load docker-image "$SIC_IMAGE" --name "$CLUSTER"
 
 log "certificates (the recipe from the README, plus a client-only one for containerd)"
@@ -201,7 +214,10 @@ kind load docker-image "$APP:v1" --name "$CLUSTER" --nodes "$A"
 DIGEST=$(docker exec "$A" ctr -n k8s.io images ls "name==$APP:v1" | awk 'NR==2 {print $3}')
 [[ $DIGEST == sha256:* ]] || fail "could not read the image digest on $A (got '$DIGEST')"
 echo "image $APP@$DIGEST"
-if docker exec "$B" ctr -n k8s.io images ls -q | grep -q "$APP"; then fail "node $B should not have the image yet"; fi
+# Not "ctr ... | grep -q": with pipefail, grep exiting at the first match makes
+# ctr die of SIGPIPE and the pipeline report failure, depending on timing.
+images_on_b=$(docker exec "$B" ctr -n k8s.io images ls -q)
+if grep -q "$APP" <<<"$images_on_b"; then fail "node $B should not have the image yet"; fi
 
 log "wait for SIC on $A to hold the image, and for $B to see a peer"
 # Not the import counter: kind's own images are imported too. Ask A's SIC for
@@ -229,7 +245,8 @@ echo "peer hits on $B:  $before_peer -> $after_peer"
 echo "local hits on $A: $before_local -> $after_local"
 echo "upstream hits on $B: $(metric "$B" sic_upstream_hits_total)"
 
-docker exec "$B" ctr -n k8s.io images ls -q | grep -q "$APP@$DIGEST" || fail "$B does not have the image after the pull"
+images_on_b=$(docker exec "$B" ctr -n k8s.io images ls -q)
+grep -q "$APP@$DIGEST" <<<"$images_on_b" || fail "$B does not have the image after the pull"
 # A manifest, a config and two layers.
 [ $((after_peer - before_peer)) -ge 4 ] || fail "expected at least 4 peer hits on $B (manifest, config, 2 layers), got $((after_peer - before_peer))"
 [ "$after_local" -gt "$before_local" ] || fail "$A's SIC did not serve anything"
