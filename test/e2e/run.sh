@@ -249,7 +249,7 @@ kubectl -n kube-system patch daemonset steady-image-cache --type=json -p '[
   {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"upstream-ca","configMap":{"name":"upstream-ca"}}},
   {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"upstream-ca","mountPath":"/etc/sic-roots","readOnly":true}}]'
 kubectl -n kube-system set env daemonset/steady-image-cache \
-  SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="$REGISTRY_HOST" SIC_TAG_TTL=3s
+  SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="$REGISTRY_HOST" SSL_CERT_FILE=/etc/sic-roots/ca-bundle.crt SIC_TAG_TTL=3s
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
 wait_for "both workers to see a peer" 90 both_see_peers
