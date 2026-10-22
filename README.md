@@ -222,7 +222,9 @@ The build requires the containerd Go client dependency declared in `go.mod`.
 
 `test/e2e/run.sh` runs SIC on a three-node [kind](https://kind.sigs.k8s.io/) cluster, deployed from `deploy/daemonset.yaml` with a real containerd. One worker already has an image; SIC imports it. The other worker pulls the image by digest through SIC, with no registry reachable at all, so the pull can only succeed if peer discovery, mutual TLS and the import all work. It then checks the peer-hit counters. It needs `docker`, `kind`, `kubectl` and `openssl`, takes a few minutes, and runs in CI (`.github/workflows/e2e.yml`) when code or deployment files change. `KEEP=1 test/e2e/run.sh` leaves the cluster up for inspection.
 
-It does not cover the upstream fallback or tag freshness; those are tested in the unit tests against a fake registry.
+A second phase puts a real registry (`registry:2`, served over HTTPS with a certificate from the test CA) behind SIC as the upstream. It checks that the private CA reaches SIC through `SSL_CERT_FILE`; that a pull by tag goes to the registry once and the next node gets the blobs from its peer, which the registry's own log confirms; that a tag moved in the registry is not served at its old digest; and that when the registry is gone a cached tag is still served and counted in `sic_stale_tags_served_total`.
+
+It does not cover registries that ask for a token; the authentication relay is tested in the unit tests against a fake registry.
 
 ## Endpoints
 
