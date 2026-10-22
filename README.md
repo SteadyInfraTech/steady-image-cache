@@ -1,8 +1,8 @@
-# Steady Image Cache (SIC) v3
+# Steady Image Cache (SIC)
 
 A node-local, peer-assisted OCI registry cache for Kubernetes/containerd, designed for disconnected and air-gapped clusters.
 
-## v3 highlights
+## Highlights
 
 * OCI manifest and blob proxy/cache with containerd `?ns=` registry namespace handling.
 * Kubernetes-native peer discovery (DaemonSet peers discovered through the Kubernetes API).
@@ -12,6 +12,11 @@ A node-local, peer-assisted OCI registry cache for Kubernetes/containerd, design
 * **Single-flight downloads**: concurrent requests for the same missing blob or manifest are coalesced into one peer/upstream fetch per SIC process.
 * **HTTP byte-range support** for cached blobs/manifests via Go `http.ServeContent`, including `GET`, `HEAD`, `Range`, `Accept-Ranges`, and 416 handling.
 * Upstream fallback remains optional and is disabled by default. When enabled it only contacts registries listed in `SIC_UPSTREAM_REGISTRIES`.
+* **Streaming.** A layer that is not cached is passed to containerd while it downloads, and to other nodes asking for it, so a rollout does not wait for the first node to finish.
+* **Integrity.** Every blob is verified against its digest when written and re-checked in the background; content that fails is never served.
+* **Bounded disk use.** Least-recently-used eviction with a size cap and a free-space reserve.
+* **Tags that stay current**, with the registry deciding what a tag is; peers only share content by digest.
+* Images for `linux/amd64` and `linux/arm64`; `sic --version` prints the build.
 
 ## Pull flow
 
@@ -100,7 +105,16 @@ An evicted tag still resolves; the manifest is fetched again from a peer when so
 
 ## Upstream fallback
 
-Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes), so the image needs a CA bundle in that case. The `scratch` base image has none.
+Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes). The image carries the public roots of its build image, so Docker Hub, GHCR and the like work as they are.
+
+**A registry with a private CA** (the usual case in an air-gapped cluster) needs that CA to be trusted too. SIC is a Go program, so it honours `SSL_CERT_FILE` and `SSL_CERT_DIR`. Put a bundle that holds your CA **and** any public roots you still need in a ConfigMap or Secret, mount it in the pod and point `SSL_CERT_FILE` at it; the variable replaces the built-in roots, it does not add to them. For example, for a bundle mounted at `/etc/sic-roots/ca-bundle.crt`:
+
+```yaml
+env:
+- {name: SSL_CERT_FILE, value: /etc/sic-roots/ca-bundle.crt}
+volumeMounts:
+- {name: upstream-ca, mountPath: /etc/sic-roots, readOnly: true}
+```
 
 ### Registries that need a token
 
@@ -196,8 +210,11 @@ A cache serves any client that presents a valid certificate. It does not check r
 ```bash
 go mod download
 go test ./...
-docker build -t steady-image-cache:v3 .
+docker build -t steady-image-cache:dev .
+docker run --rm steady-image-cache:dev --version
 ```
+
+The release build stamps its version with `--build-arg VERSION=...`; without it the binary reports `dev`.
 
 The build requires the containerd Go client dependency declared in `go.mod`.
 
@@ -219,7 +236,7 @@ It does not cover the upstream fallback or tag freshness; those are tested in th
 
 `deploy/daemonset.yaml` is a starting point, not a finished product; it needs the TLS secret `steady-image-cache-tls` and an image reference you have chosen. What it does, and why:
 
-* **Image.** `ghcr.io/steadyinfratech/steady-image-cache:main` is the branch build. Pin a release tag or an `@sha256:` digest. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
+* **Image.** `ghcr.io/steadyinfratech/steady-image-cache:main` in the repository is the branch build; use a release tag (for example `:v1.0.0`) or an `@sha256:` digest. Images are published for `linux/amd64` and `linux/arm64`. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
 * **Root, with nothing else.** The container runs as root only because containerd's socket is normally `root:root 0660`. It drops every capability, cannot gain privileges, has a read-only root file system and the runtime's default seccomp profile. If you turn the containerd import off (`SIC_CONTAINERD_IMPORT=false`) it needs no socket and can run as a non-root user that owns the cache directory.
 * **Resources.** Requests of 50m CPU and 64Mi memory; a memory limit of 512Mi to catch a leak. There is no CPU limit on purpose: hashing a layer is bursty, and throttling only makes pulls slower.
 * **Probes.** Readiness and liveness use `/healthz` on the plain-HTTP admin port, because kubelet cannot present the client certificate the main port wants. The liveness probe waits for a minute of failures before restarting: a restart interrupts transfers under way.

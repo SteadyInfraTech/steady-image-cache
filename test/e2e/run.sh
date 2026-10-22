@@ -20,7 +20,10 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
 KEEP=${KEEP:-}
-SIC_IMAGE=ghcr.io/steadyinfratech/steady-image-cache:main  # what daemonset.yaml names
+# The image the manifest names, so that bumping the tag there for a release does
+# not need a change here. It is built locally and loaded into the nodes.
+SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
+[ -n "$SIC_IMAGE" ] || { echo "no SIC image in deploy/daemonset.yaml" >&2; exit 1; }
 APP=registry.example.test/e2e/app                          # never resolvable
 WORK=$(mktemp -d)
 export KUBECONFIG=$WORK/kubeconfig
@@ -90,7 +93,7 @@ wait_for() {
 }
 
 log "build the SIC image"
-docker build -t "$SIC_IMAGE" "$ROOT"
+docker build --build-arg VERSION=e2e -t "$SIC_IMAGE" "$ROOT"
 
 log "create the kind cluster $CLUSTER"
 kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
