@@ -214,6 +214,38 @@ log "phase 1 passed: $B pulled the image from $A through SIC"
 UP=$REGISTRY_HOST/e2e/up
 LOCAL=localhost:5443/e2e/up  # how the host reaches the same registry
 
+USER_NAME=e2euser
+PASS=$(openssl rand -hex 12)
+# start_private_registry: the registry that wants a password. It has to be
+# running, and its name known to the nodes, before SIC starts: a pod on the host
+# network gets a copy of the node's /etc/hosts when it is created, so an entry
+# added later is not seen by it.
+start_private_registry() {
+  for img in "${HTTPD_IMAGES[@]}"; do
+    if docker pull -q "$img" >/dev/null 2>&1; then HTTPD_IMAGE=$img; break; fi
+  done
+  [ -n "${HTTPD_IMAGE:-}" ] || fail "could not pull an httpd image for htpasswd (tried: ${HTTPD_IMAGES[*]})"
+  mkdir "$WORK/auth"
+  # The registry accepts bcrypt only.
+  docker run --rm --entrypoint htpasswd "$HTTPD_IMAGE" -Bbn "$USER_NAME" "$PASS" > "$WORK/auth/htpasswd"
+  (
+    cd "$WORK"
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$PRIVATE_HOST" -keyout preg.key -out preg.csr 2>/dev/null
+    openssl x509 -req -in preg.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out preg.crt -extfile <(printf '%s\n' \
+      "subjectAltName=DNS:$PRIVATE_HOST" 'extendedKeyUsage=serverAuth' 'keyUsage=critical,digitalSignature') 2>/dev/null
+  )
+  docker rm -f "$PRIVATE" >/dev/null 2>&1 || true
+  docker run -d --name "$PRIVATE" --network kind -p 127.0.0.1:5444:443 -v "$WORK:/certs:ro" -v "$WORK/auth:/auth:ro" \
+    -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/preg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/preg.key \
+    -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+    "$REGISTRY_IMAGE" >/dev/null
+  # 401 without credentials is what a working registry of this kind answers.
+  private_up() { [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$WORK/ca.crt" --resolve "$PRIVATE_HOST:5444:127.0.0.1" "https://$PRIVATE_HOST:5444/v2/")" = 401 ]; }
+  wait_for "the private registry" 60 private_up
+  PRIVATE_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$PRIVATE")
+  for n in "${NODES[@]}"; do docker exec "$n" sh -c "echo '$PRIVATE_IP $PRIVATE_HOST' >> /etc/hosts"; done
+}
+
 log "phase 2: an HTTPS registry with a certificate from the same CA"
 (
   cd "$WORK"
@@ -236,6 +268,7 @@ REGISTRY_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAd
 # Only the nodes know the name; SIC runs on the host network, so it resolves it
 # from the node's /etc/hosts.
 for n in "${NODES[@]}"; do docker exec "$n" sh -c "echo '$REGISTRY_IP $REGISTRY_HOST' >> /etc/hosts"; done
+start_private_registry
 
 # push NAME: a new image with random layers under $LOCAL:v1; prints its digest.
 # The docker daemon treats localhost registries as insecure, so it does not
@@ -311,33 +344,8 @@ log "phase 2 passed: peers, upstream over a private CA, a moving tag, and a regi
 PRIV=$PRIVATE_HOST/e2e/priv
 PRIV_LOCAL=localhost:5444/e2e/priv
 C=$CLUSTER-control-plane
-USER_NAME=e2euser
-PASS=$(openssl rand -hex 12)
 
 log "phase 3: a registry with a password"
-for img in "${HTTPD_IMAGES[@]}"; do
-  if docker pull -q "$img" >/dev/null 2>&1; then HTTPD_IMAGE=$img; break; fi
-done
-[ -n "${HTTPD_IMAGE:-}" ] || fail "could not pull an httpd image for htpasswd (tried: ${HTTPD_IMAGES[*]})"
-mkdir "$WORK/auth"
-# The registry accepts bcrypt only.
-docker run --rm --entrypoint htpasswd "$HTTPD_IMAGE" -Bbn "$USER_NAME" "$PASS" > "$WORK/auth/htpasswd"
-(
-  cd "$WORK"
-  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$PRIVATE_HOST" -keyout preg.key -out preg.csr 2>/dev/null
-  openssl x509 -req -in preg.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out preg.crt -extfile <(printf '%s\n' \
-    "subjectAltName=DNS:$PRIVATE_HOST" 'extendedKeyUsage=serverAuth' 'keyUsage=critical,digitalSignature') 2>/dev/null
-)
-docker rm -f "$PRIVATE" >/dev/null 2>&1 || true
-docker run -d --name "$PRIVATE" --network kind -p 127.0.0.1:5444:443 -v "$WORK:/certs:ro" -v "$WORK/auth:/auth:ro" \
-  -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/preg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/preg.key \
-  -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
-  "$REGISTRY_IMAGE" >/dev/null
-# 401 without credentials is what a working registry of this kind answers.
-private_up() { [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$WORK/ca.crt" --resolve "$PRIVATE_HOST:5444:127.0.0.1" "https://$PRIVATE_HOST:5444/v2/")" = 401 ]; }
-wait_for "the private registry" 60 private_up
-PRIVATE_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$PRIVATE")
-for n in "${NODES[@]}"; do docker exec "$n" sh -c "echo '$PRIVATE_IP $PRIVATE_HOST' >> /etc/hosts"; done
 all_see_peers() { for n in "$A" "$B" "$C"; do [ "$(metric "$n" sic_peers)" -ge 1 ] || return 1; done; }
 wait_for "all three nodes to see a peer" 90 all_see_peers
 
