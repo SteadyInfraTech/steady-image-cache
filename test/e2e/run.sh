@@ -15,11 +15,17 @@
 #   test/e2e/run.sh            # creates the cluster "sic-e2e" and deletes it
 #   KEEP=1 test/e2e/run.sh     # leave the cluster for inspection
 #   CLUSTER=foo test/e2e/run.sh
+#   MODE=registries test/e2e/run.sh
+#                              instead of the self-contained test, pull from real
+#                              public registries (needs the internet); see
+#                              .github/workflows/e2e-registries.yml
 set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
 KEEP=${KEEP:-}
+MODE=${MODE:-local}
+case $MODE in local|registries) ;; *) echo "MODE must be local or registries" >&2; exit 1 ;; esac
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
 SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
@@ -102,6 +108,41 @@ wait_for() {
   fail "timed out after ${secs}s waiting for $what"
 }
 
+# registries_phase: what only a real registry can show. Public registries
+# answer an anonymous request with 401 and a Bearer challenge; SIC passes it to
+# containerd, which gets a token from the registry's own token service. No
+# credentials are involved. The image's built-in CA roots are what verify
+# these registries, since no private CA is configured here.
+registries_phase() {
+  log "registries: upstream on for public registries, no private CA"
+  kubectl -n kube-system set env daemonset/steady-image-cache \
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
+  kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+  both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
+  wait_for "both workers to see a peer" 90 both_see_peers
+
+  local img
+  for img in public.ecr.aws/docker/library/busybox:latest ghcr.io/jqlang/jq:latest; do
+    log "registries: $img on $A, then on $B"
+    local ch_before up_before peer_before
+    ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
+    up_before=$(metric "$A" sic_upstream_hits_total)
+    docker exec "$A" crictl pull "$img"
+    echo "challenges relayed on $A: $ch_before -> $(metric "$A" sic_upstream_auth_challenges_total)"
+    echo "upstream fetches on $A:   $up_before -> $(metric "$A" sic_upstream_hits_total)"
+    [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$img: no authentication challenge was relayed on $A"
+    [ $(( $(metric "$A" sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: $A fetched fewer than 2 objects from the registry"
+
+    peer_before=$(metric "$B" sic_peer_hits_total)
+    docker exec "$B" crictl pull "$img"
+    echo "peer hits on $B: $peer_before -> $(metric "$B" sic_peer_hits_total)"
+    [ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 2 ] || fail "$img: $B got fewer than 2 blobs from its peer"
+  done
+  [ "$(metric "$B" sic_verify_errors_total)" = 0 ] || fail "$B had verification errors"
+  [ "$(metric "$B" sic_peer_errors_total)" = 0 ] || fail "$B had peer errors"
+  log "pass: public registries over their own token services, then shared between nodes"
+}
+
 log "build the SIC image"
 docker build --build-arg VERSION=e2e -t "$SIC_IMAGE" "$ROOT"
 
@@ -146,6 +187,8 @@ kubectl apply -f "$ROOT/deploy/daemonset.yaml"
 # Only the interval differs from the sample: the default is five minutes.
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_IMPORT_INTERVAL=3s
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+
+if [ "$MODE" = registries ]; then registries_phase; exit 0; fi
 
 log "an image that only node $A has"
 mkdir "$WORK/app"
