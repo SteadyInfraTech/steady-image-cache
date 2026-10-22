@@ -390,9 +390,14 @@ GETS_BASE=$gets
 
 log "the password is not kept: not in SIC's cache directory, not in its logs"
 b64=$(printf '%s:%s' "$USER_NAME" "$PASS" | base64 -w0)
+scan() { docker exec "$1" grep -rqF -e "$PASS" -e "$b64" /var/lib/steady-image-cache; }
 for n in "${NODES[@]}"; do
-  rc=0
-  docker exec "$n" grep -rqF -e "$PASS" -e "$b64" /var/lib/steady-image-cache || rc=$?
+  # First show that the scan can see: with the password planted it must find it.
+  docker exec "$n" sh -c "printf '%s' '$PASS' > /var/lib/steady-image-cache/canary"
+  rc=0; scan "$n" || rc=$?
+  docker exec "$n" rm -f /var/lib/steady-image-cache/canary
+  [ "$rc" = 0 ] || fail "the scan of $n's cache directory did not find a planted password (grep status $rc)"
+  rc=0; scan "$n" || rc=$?
   [ "$rc" = 1 ] || fail "the password (or its Basic form) was found in $n's cache directory (grep status $rc; 1 means not found)"
 done
 logs=$(kubectl -n kube-system logs -l app=steady-image-cache --tail=-1 --prefix 2>&1)
