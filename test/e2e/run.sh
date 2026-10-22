@@ -15,11 +15,17 @@
 #   test/e2e/run.sh            # creates the cluster "sic-e2e" and deletes it
 #   KEEP=1 test/e2e/run.sh     # leave the cluster for inspection
 #   CLUSTER=foo test/e2e/run.sh
+#   MODE=registries test/e2e/run.sh
+#                              instead of the self-contained test, pull from real
+#                              public registries (needs the internet); see
+#                              .github/workflows/e2e-registries.yml
 set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
 KEEP=${KEEP:-}
+MODE=${MODE:-local}
+case $MODE in local|registries) ;; *) echo "MODE must be local or registries" >&2; exit 1 ;; esac
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
 SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
@@ -102,6 +108,54 @@ wait_for() {
   fail "timed out after ${secs}s waiting for $what"
 }
 
+# registries_phase: what only a real registry can show. Public registries
+# answer an anonymous request with 401 and a Bearer challenge; SIC passes it to
+# containerd, which gets a token from the registry's own token service. No
+# credentials are involved. The image's built-in CA roots are what verify
+# these registries, since no private CA is configured here.
+registries_phase() {
+  log "registries: upstream on for public registries, no private CA"
+  kubectl -n kube-system set env daemonset/steady-image-cache \
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
+  kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+  both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
+  wait_for "both workers to see a peer" 90 both_see_peers
+
+  # Public registries throttle anonymous clients by address, and the runner's is
+  # shared. A pull that fails is tried again after a pause; what is checked is
+  # SIC's behaviour on the attempt that works.
+  pull_retry() {
+    local node=$1 img=$2 try
+    for try in 1 2 3 4; do
+      if docker exec "$node" crictl pull "$img"; then return 0; fi
+      echo "pull of $img on $node failed (attempt $try of 4); waiting before trying again"
+      sleep $((try * 20))
+    done
+    fail "$img could not be pulled on $node after 4 attempts"
+  }
+
+  local img
+  for img in public.ecr.aws/docker/library/busybox:latest ghcr.io/jqlang/jq:latest; do
+    log "registries: $img on $A, then on $B"
+    local ch_before up_before peer_before
+    ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
+    up_before=$(metric "$A" sic_upstream_hits_total)
+    pull_retry "$A" "$img"
+    echo "challenges relayed on $A: $ch_before -> $(metric "$A" sic_upstream_auth_challenges_total)"
+    echo "upstream fetches on $A:   $up_before -> $(metric "$A" sic_upstream_hits_total)"
+    [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$img: no authentication challenge was relayed on $A"
+    [ $(( $(metric "$A" sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: $A fetched fewer than 2 objects from the registry"
+
+    peer_before=$(metric "$B" sic_peer_hits_total)
+    pull_retry "$B" "$img"
+    echo "peer hits on $B: $peer_before -> $(metric "$B" sic_peer_hits_total)"
+    [ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 2 ] || fail "$img: $B got fewer than 2 blobs from its peer"
+  done
+  [ "$(metric "$B" sic_verify_errors_total)" = 0 ] || fail "$B had verification errors"
+  [ "$(metric "$B" sic_peer_errors_total)" = 0 ] || fail "$B had peer errors"
+  log "pass: public registries over their own token services, then shared between nodes"
+}
+
 log "build the SIC image"
 docker build --build-arg VERSION=e2e -t "$SIC_IMAGE" "$ROOT"
 
@@ -111,7 +165,7 @@ kind create cluster --name "$CLUSTER" --config "$ROOT/test/e2e/kind-config.yaml"
 mapfile -t NODES < <(kind get nodes --name "$CLUSTER")
 A=$CLUSTER-worker
 B=$CLUSTER-worker2
-for n in "$A" "$B"; do printf '%s\n' "${NODES[@]}" | grep -qx "$n" || fail "expected node $n, have: ${NODES[*]}"; done
+for n in "$A" "$B"; do [[ " ${NODES[*]} " == *" $n "* ]] || fail "expected node $n, have: ${NODES[*]}"; done
 kind load docker-image "$SIC_IMAGE" --name "$CLUSTER"
 
 log "certificates (the recipe from the README, plus a client-only one for containerd)"
@@ -147,6 +201,8 @@ kubectl apply -f "$ROOT/deploy/daemonset.yaml"
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_IMPORT_INTERVAL=3s
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 
+if [ "$MODE" = registries ]; then registries_phase; exit 0; fi
+
 log "an image that only node $A has"
 mkdir "$WORK/app"
 # Random layers: nothing about them can already be in any cache.
@@ -158,7 +214,10 @@ kind load docker-image "$APP:v1" --name "$CLUSTER" --nodes "$A"
 DIGEST=$(docker exec "$A" ctr -n k8s.io images ls "name==$APP:v1" | awk 'NR==2 {print $3}')
 [[ $DIGEST == sha256:* ]] || fail "could not read the image digest on $A (got '$DIGEST')"
 echo "image $APP@$DIGEST"
-if docker exec "$B" ctr -n k8s.io images ls -q | grep -q "$APP"; then fail "node $B should not have the image yet"; fi
+# Not "ctr ... | grep -q": with pipefail, grep exiting at the first match makes
+# ctr die of SIGPIPE and the pipeline report failure, depending on timing.
+images_on_b=$(docker exec "$B" ctr -n k8s.io images ls -q)
+if grep -q "$APP" <<<"$images_on_b"; then fail "node $B should not have the image yet"; fi
 
 log "wait for SIC on $A to hold the image, and for $B to see a peer"
 # Not the import counter: kind's own images are imported too. Ask A's SIC for
@@ -186,7 +245,8 @@ echo "peer hits on $B:  $before_peer -> $after_peer"
 echo "local hits on $A: $before_local -> $after_local"
 echo "upstream hits on $B: $(metric "$B" sic_upstream_hits_total)"
 
-docker exec "$B" ctr -n k8s.io images ls -q | grep -q "$APP@$DIGEST" || fail "$B does not have the image after the pull"
+images_on_b=$(docker exec "$B" ctr -n k8s.io images ls -q)
+grep -q "$APP@$DIGEST" <<<"$images_on_b" || fail "$B does not have the image after the pull"
 # A manifest, a config and two layers.
 [ $((after_peer - before_peer)) -ge 4 ] || fail "expected at least 4 peer hits on $B (manifest, config, 2 layers), got $((after_peer - before_peer))"
 [ "$after_local" -gt "$before_local" ] || fail "$A's SIC did not serve anything"

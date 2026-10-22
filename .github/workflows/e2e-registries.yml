@@ -1,0 +1,40 @@
+name: End-to-end (public registries)
+
+# Pulls through SIC from real public registries, which need the internet and
+# are outside our control. So this does not gate pull requests: it runs on
+# release tags, weekly and by hand, and on pull requests that change this
+# workflow or the test script itself. A failure means either SIC or a registry
+# changed; the annotations on the run say which step.
+on:
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - ".github/workflows/e2e-registries.yml"
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  registries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.27.0
+
+      - name: Pull through SIC from public registries
+        run: MODE=registries test/e2e/run.sh
