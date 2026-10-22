@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/version"
 )
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
@@ -24,6 +26,11 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func main() {
+	if version.Requested(os.Args[1:]) {
+		fmt.Println(version.String())
+		return
+	}
+	log.Print(version.String())
 	cfg := config.FromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
