@@ -2,7 +2,7 @@
 
 Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*` environment variables), the metric names and the HTTP API paths are the public interface; a change to them that breaks an existing deployment is a major version.
 
-## 1.0.0
+## 1.0.0 - 2026-10-24
 
 First release.
 
