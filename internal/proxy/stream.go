@@ -191,10 +191,12 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 	var off int64
 	for off < a.size {
 		dl.mu.Lock()
-		avail, ended, err, cur, ch := a.written, a.ended, a.err, dl.cur, dl.notify
+		avail, ended, err, cur, ch, over := a.written, a.ended, a.err, dl.cur, dl.notify, dl.done
 		dl.mu.Unlock()
-		if err != nil || cur != a && !ended {
-			break // this source failed or was replaced
+		if err != nil || cur != a && !ended || over && !ended {
+			// This source failed or was replaced, or the download is over
+			// without having said how this source ended (it panicked).
+			break
 		}
 		if !ended && avail >= a.size {
 			avail = a.size - 1 // the last byte waits for the digest check

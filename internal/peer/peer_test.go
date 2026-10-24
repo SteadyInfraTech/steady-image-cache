@@ -29,7 +29,8 @@ func TestParsePeersKeepsOnlyReadyPods(t *testing.T) {
 	 {"metadata":{"name":"terminating","deletionTimestamp":"2026-10-14T00:00:00Z"},
 	                                        "status":{"hostIP":"10.0.0.6","phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},
 	 {"metadata":{"name":"no-ip"},          "status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},
-	 {"metadata":{"name":"dup"},            "status":{"hostIP":"10.0.0.2","phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}
+	 {"metadata":{"name":"dup"},            "status":{"hostIP":"10.0.0.2","phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},
+	 {"metadata":{"name":"not-an-ip"},      "status":{"hostIP":"evil.example/x?","phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}
 	]}`)
 	got := parsePeers(pl, "10.0.0.1", "https", 5000)
 	want := []string{"https://10.0.0.2:5000"}

@@ -155,7 +155,9 @@ func parsePeers(pl podList, selfIP, scheme string, port int) []string {
 	seen := map[string]bool{}
 	for _, p := range pl.Items {
 		ip := p.Status.HostIP
-		if ip == "" || ip == selfIP || p.Status.Phase != "Running" || p.Metadata.DeletionTimestamp != nil || seen[ip] {
+		// hostIP comes from the API server; it becomes part of a URL, so it has
+		// to be an address and nothing else.
+		if net.ParseIP(ip) == nil || ip == selfIP || p.Status.Phase != "Running" || p.Metadata.DeletionTimestamp != nil || seen[ip] {
 			continue
 		}
 		ready := false

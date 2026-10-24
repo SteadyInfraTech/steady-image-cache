@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,5 +371,42 @@ func TestHeadForABlobNobodyHasIs404(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+// A download that dies without reporting how its source ended (a panic in the
+// store) must not leave a client that is streaming from it waiting for ever.
+func TestStreamEndsWhenTheDownloadPanics(t *testing.T) {
+	a := newNode(t, Options{})
+	partial := filepath.Join(t.TempDir(), "part")
+	if err := os.WriteFile(partial, []byte("abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := digestOf([]byte("never completed"))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	dl := a.p.join(d, "", func(dl *download) fetchResult {
+		dl.Begin(partial, 10)
+		dl.Wrote(3)
+		close(started)
+		<-release
+		panic("boom")
+	})
+	<-started
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d, nil)
+		a.p.stream(httptest.NewRecorder(), req, d, dl, false)
+	}()
+	time.Sleep(50 * time.Millisecond) // let the client attach and wait for more
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client is still waiting after the download died")
+	}
+	if a.m.StreamAborts.Load() != 1 {
+		t.Fatalf("StreamAborts = %d, want 1", a.m.StreamAborts.Load())
 	}
 }

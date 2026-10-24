@@ -909,3 +909,23 @@ func TestRecordWithoutTagTimesLoads(t *testing.T) {
 		t.Fatal("the alias itself must still be there")
 	}
 }
+
+// "null" is valid JSON and decodes to a nil map; the first alias written
+// afterwards must not panic.
+func TestAliasFileContainingNullIsHarmless(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "aliases.json"), []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := "sha256:" + strings.Repeat("0", 64)
+	if err := s.SetAlias("docker.io", "lib/app", "v1", d); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.Resolve("docker.io", "lib/app", "v1"); !ok || got != d {
+		t.Fatalf("Resolve = %q, %v", got, ok)
+	}
+}
