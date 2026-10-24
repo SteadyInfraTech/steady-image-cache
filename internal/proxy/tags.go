@@ -168,7 +168,7 @@ func (p *Proxy) fetchManifest(in info, namespace, repo, ref, path string) fetchR
 				p.metrics.UpstreamHits.Add(1)
 				return point(d)
 			}
-			if r.status == 0 || r.status == http.StatusUnauthorized {
+			if r.status == 0 || r.status == http.StatusUnauthorized || r.status == http.StatusTooManyRequests {
 				if s, ok := stale("the registry would not confirm it"); ok {
 					return s
 				}

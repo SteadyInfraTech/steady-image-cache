@@ -140,6 +140,7 @@ When SIC cannot cache something it says why, instead of answering 404 as if the 
 
 * `507` when the free disk space would drop below `SIC_MIN_FREE_BYTES` (or the disk is full); counted in `sic_disk_full_total`.
 * `500` when the cache directory cannot be written; counted in `sic_store_errors_total`.
+* `429` when an upstream registry is rate limiting: the status and a safe `Retry-After` are passed on, so containerd knows to back off. A cached tag is served instead, as for any registry that cannot confirm it.
 * `400` for a repository name that is not valid per the OCI distribution spec. This is the caller's mistake and does not take any peer out of rotation.
 
 Both conditions, and non-404 answers from peers and upstream registries, are logged at most once per minute per cause, with a count of the lines held back.
@@ -256,7 +257,7 @@ A second phase puts a real registry (`registry:2`, served over HTTPS with a cert
 
 A third phase puts a second registry that wants a password (HTTP Basic) behind SIC. A pull with no credentials or the wrong ones is refused and nothing is fetched; with the right ones it works, the password is found neither in SIC's cache directory nor in its logs, and the next node gets the blobs from its peer. The same phase pins the boundary described under "Upstream fallback": a node that has fetched an image with credentials serves its tag to a client that has none, a node that has fetched nothing cannot, and a digest is handed over by any peer that has it.
 
-It does not cover token services such as Docker Hub's; the relay of their challenges is tested in the unit tests against a fake registry.
+`MODE=registries test/e2e/run.sh` (the workflow `e2e-registries.yml`, run on release tags, weekly and by hand, not on every pull request) deploys the same way and pulls from public ECR and GHCR through their own anonymous token services, then from a second node through the first. Public registries throttle shared addresses, so a registry that keeps answering `429` is skipped with a warning and the others still decide the result; the run fails if every registry was throttled, since then nothing was checked. It does not cover Docker Hub or private images behind a token service; the relay of their challenges is tested in the unit tests against a fake registry.
 
 ## Endpoints
 
