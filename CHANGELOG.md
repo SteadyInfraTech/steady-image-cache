@@ -4,6 +4,11 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- A download that failed without saying how (a panic in the store) left clients that were streaming from it waiting until they gave up; they now get an error at once.
+- A damaged `aliases.json` that contains `null` no longer makes the first saved tag panic.
+- Pod addresses from the Kubernetes API that are not IP addresses are ignored.
+- Docs: the getting-started page no longer tells people to replace a branch image.
+
 ## 1.0.1 - 2026-10-25
 
 - An upstream registry's `429 Too Many Requests` is now passed on to the client, with its `Retry-After` when that is a number of seconds or a date, instead of being reported as "not found". A cached tag is still served when the registry throttles the check. Applies to blobs, `HEAD` requests and manifests.

@@ -316,6 +316,11 @@ func New(root string) (*Store, error) {
 			_ = os.Rename(aliasFile, aliasFile+".corrupt")
 			s.aliases = map[string]string{}
 		}
+		if s.aliases == nil {
+			// The document "null" is valid JSON and decodes to a nil map, which
+			// would panic on the first alias written.
+			s.aliases = map[string]string{}
+		}
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, err
 	}
