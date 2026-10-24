@@ -107,6 +107,14 @@ metric() {
   docker exec "$1" curl -fsS http://127.0.0.1:5001/metrics | awk -v n="$2" '$1==n {print $2; found=1} END {if (!found) print 0}'
 }
 
+# sees_all_peers NODE: whether NODE's SIC lists every other node's SIC. Waiting
+# for just one is a race: a node that has only seen some of them asks those, and
+# goes to the registry for what only the others hold.
+sees_all_peers() {
+  local want=$(( $(kubectl get nodes --no-headers | wc -l) - 1 ))
+  [ "$(metric "$1" sic_peers)" -ge "$want" ]
+}
+
 # wait_for DESCRIPTION SECONDS COMMAND...
 wait_for() {
   local what=$1 secs=$2; shift 2
@@ -127,8 +135,8 @@ registries_phase() {
   kubectl -n kube-system set env daemonset/steady-image-cache \
     SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
-  both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
-  wait_for "both workers to see a peer" 90 both_see_peers
+  both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
+  wait_for "both workers to see all their peers" 90 both_see_peers
 
   # Public registries throttle anonymous clients by address, and the runner's is
   # shared. A pull that fails is tried again after a pause; what is checked is
@@ -239,8 +247,8 @@ serves() {
 wait_for "$A's SIC to serve the manifest" 90 serves
 # Peers are listed every 30s, and a pod that was not Ready at the last listing
 # is missing from it.
-sees_peer() { [ "$(metric "$B" sic_peers)" -ge 1 ]; }
-wait_for "$B's SIC to see a peer" 90 sees_peer
+sees_peer() { sees_all_peers "$B"; }
+wait_for "$B's SIC to see all its peers" 90 sees_peer
 echo "imported blobs on $A: $(metric "$A" sic_containerd_imported_blobs_total); peers seen by $B: $(metric "$B" sic_peers)"
 
 log "pull on $B by digest, through SIC"
@@ -353,8 +361,8 @@ kubectl -n kube-system patch daemonset steady-image-cache --type=json -p '[
 kubectl -n kube-system set env daemonset/steady-image-cache \
   SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="$REGISTRY_HOST,$PRIVATE_HOST" SSL_CERT_FILE=/etc/sic-roots/ca-bundle.crt SIC_TAG_TTL=3s
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
-both_see_peers() { [ "$(metric "$A" sic_peers)" -ge 1 ] && [ "$(metric "$B" sic_peers)" -ge 1 ]; }
-wait_for "both workers to see a peer" 90 both_see_peers
+both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
+wait_for "both workers to see all their peers" 90 both_see_peers
 
 D1=$(push first)
 [[ $D1 == sha256:* ]] || fail "could not push the first image (digest '$D1')"
@@ -406,8 +414,8 @@ PRIV_LOCAL=localhost:5444/e2e/priv
 C=$CLUSTER-control-plane
 
 log "phase 3: a registry with a password"
-all_see_peers() { for n in "$A" "$B" "$C"; do [ "$(metric "$n" sic_peers)" -ge 1 ] || return 1; done; }
-wait_for "all three nodes to see a peer" 90 all_see_peers
+all_see_peers() { for n in "$A" "$B" "$C"; do sees_all_peers "$n" || return 1; done; }
+wait_for "all three nodes to see all their peers" 90 all_see_peers
 
 # A docker config of its own, so that nothing is written to the user's.
 export DOCKER_CONFIG=$WORK/dockercfg
