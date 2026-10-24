@@ -47,7 +47,7 @@ spec:
         # Pin a release tag or an @sha256: digest. There is no moving "latest":
         # IfNotPresent keeps a restart from needing the network (see "Bootstrap"
         # in the README), so a moving tag would never be updated on a node.
-        image: ghcr.io/steadyinfratech/steady-image-cache:main
+        image: ghcr.io/steadyinfratech/steady-image-cache:v1.0.0
         imagePullPolicy: IfNotPresent
         # Root is only needed to open containerd's socket, which is usually
         # root:root 0660. Everything else is dropped; without the socket (set

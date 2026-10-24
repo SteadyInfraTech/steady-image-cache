@@ -6,4 +6,4 @@
 4. Tag the merge commit `vMAJOR.MINOR.PATCH` and push the tag. The publish job builds `linux/amd64` and `linux/arm64`, stamps the version into the binary, and pushes `:vX.Y.Z` (and `:latest` for a version without a pre-release suffix such as `-rc.1`). A tag with a suffix is a pre-release and does not move `latest`.
 5. Check the published image: `docker run --rm ghcr.io/steadyinfratech/steady-image-cache:vX.Y.Z --version` must print the version, and `docker buildx imagetools inspect` must list both platforms.
 6. Create the GitHub release from the tag, with the changelog entry as its notes.
-7. Put `:main` back in `deploy/daemonset.yaml` only if you want the repository to track the branch build; otherwise leave it on the release.
+7. Leave `deploy/daemonset.yaml` on the release tag: the repository's sample always names the latest release, not the branch build.
