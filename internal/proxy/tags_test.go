@@ -27,6 +27,8 @@ type tagRegistry struct {
 	down                atomic.Bool // answers 503
 	noDigestHeader      atomic.Bool // leaves Docker-Content-Digest out of a HEAD
 	needToken           atomic.Bool // wants "Bearer tok"
+	throttle            atomic.Bool // answers 429 with Retry-After: 7
+	throttleGets        atomic.Bool // the same, but only to requests that are not a HEAD
 }
 
 func newTagRegistry(t *testing.T) *tagRegistry {
@@ -50,6 +52,11 @@ func newTagRegistry(t *testing.T) *tagRegistry {
 		}
 		if r.down.Load() {
 			http.Error(w, "down", 503)
+			return
+		}
+		if r.throttle.Load() || (r.throttleGets.Load() && req.Method != http.MethodHead) {
+			w.Header().Set("Retry-After", "7")
+			http.Error(w, "slow down", 429)
 			return
 		}
 		if r.needToken.Load() && req.Header.Get("Authorization") != "Bearer tok" {

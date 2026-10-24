@@ -139,38 +139,59 @@ registries_phase() {
   wait_for "both workers to see all their peers" 90 both_see_peers
 
   # Public registries throttle anonymous clients by address, and the runner's is
-  # shared. A pull that fails is tried again after a pause; what is checked is
-  # SIC's behaviour on the attempt that works.
+  # shared. A pull that fails is tried again after a pause. If the last attempt
+  # was refused because the registry is rate limiting (SIC passes its 429 on to
+  # containerd, so the message says so), that registry is skipped and the others
+  # still run; anything else is a failure. what is checked is SIC's behaviour on
+  # the attempt that works.
+  is_throttle() { grep -qiE '429|too many requests|toomanyrequests|rate limit' <<<"$1"; }
+  # pull_retry NODE IMAGE: 0 pulled, 2 the registry kept throttling, else fail.
   pull_retry() {
-    local node=$1 img=$2 try
+    local node=$1 img=$2 try out
     for try in 1 2 3 4; do
-      if docker exec "$node" crictl pull "$img"; then return 0; fi
+      if out=$(docker exec "$node" crictl pull "$img" 2>&1); then echo "$out"; return 0; fi
+      echo "$out"
       echo "pull of $img on $node failed (attempt $try of 4); waiting before trying again"
-      sleep $((try * 20))
+      [ "$try" = 4 ] || sleep $((try * 20))
     done
+    if is_throttle "$out"; then return 2; fi
     fail "$img could not be pulled on $node after 4 attempts"
   }
 
-  local img
-  for img in public.ecr.aws/docker/library/busybox:latest ghcr.io/jqlang/jq:latest; do
+  # check_image IMAGE: A pulls it from the registry, then B pulls it from A.
+  # Returns 2 if the registry throttled before both had been checked.
+  check_image() {
+    local img=$1 rc ch_before up_before peer_before
     log "registries: $img on $A, then on $B"
-    local ch_before up_before peer_before
     ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
     up_before=$(metric "$A" sic_upstream_hits_total)
-    pull_retry "$A" "$img"
+    pull_retry "$A" "$img" && rc=0 || rc=$?
+    [ "$rc" = 0 ] || return "$rc"
     echo "challenges relayed on $A: $ch_before -> $(metric "$A" sic_upstream_auth_challenges_total)"
     echo "upstream fetches on $A:   $up_before -> $(metric "$A" sic_upstream_hits_total)"
     [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$img: no authentication challenge was relayed on $A"
     [ $(( $(metric "$A" sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: $A fetched fewer than 2 objects from the registry"
 
     peer_before=$(metric "$B" sic_peer_hits_total)
-    pull_retry "$B" "$img"
+    pull_retry "$B" "$img" && rc=0 || rc=$?
+    [ "$rc" = 0 ] || return "$rc"
     echo "peer hits on $B: $peer_before -> $(metric "$B" sic_peer_hits_total)"
     [ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 2 ] || fail "$img: $B got fewer than 2 blobs from its peer"
+  }
+
+  local img rc checked=() skipped=()
+  for img in public.ecr.aws/docker/library/busybox:latest ghcr.io/jqlang/jq:latest; do
+    check_image "$img" && rc=0 || rc=$?
+    if [ "$rc" = 0 ]; then checked+=("$img"); else skipped+=("$img"); fi
   done
   [ "$(metric "$B" sic_verify_errors_total)" = 0 ] || fail "$B had verification errors"
   [ "$(metric "$B" sic_peer_errors_total)" = 0 ] || fail "$B had peer errors"
-  log "pass: public registries over their own token services, then shared between nodes"
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    echo "::warning::skipped, because the registry was rate limiting: ${skipped[*]}"
+    log "SKIPPED (throttled by the registry, nothing to conclude about SIC): ${skipped[*]}"
+  fi
+  [ "${#checked[@]}" -gt 0 ] || fail "every registry was rate limiting; nothing was checked (${skipped[*]})"
+  log "pass: ${checked[*]} over the registry's own token service, then shared between nodes"
 }
 
 log "build the SIC image"

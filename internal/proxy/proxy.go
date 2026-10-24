@@ -366,6 +366,9 @@ type fetchResult struct {
 	// challenge holds the WWW-Authenticate values of an upstream 401, to be
 	// passed on to the client (status is then 401).
 	challenge []string
+	// retryAfter is the Retry-After value of an upstream 429 (status is then
+	// 429), already checked to be a plain number of seconds or an HTTP date.
+	retryAfter string
 }
 
 var fetched = fetchResult{ok: true}
@@ -405,7 +408,48 @@ func reply(w http.ResponseWriter, what string, res fetchResult) {
 		relayChallenge(w, res.challenge)
 		return
 	}
+	if res.status == http.StatusTooManyRequests {
+		relayThrottle(w, res.retryAfter)
+		return
+	}
 	refuse(w, what, res.status)
+}
+
+// relayThrottle tells the client that the registry is rate limiting, so that
+// it backs off instead of taking a "not found" for the answer.
+func relayThrottle(w http.ResponseWriter, retryAfter string) {
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	http.Error(w, "the upstream registry is rate limiting requests", http.StatusTooManyRequests)
+}
+
+// retryAfterOf returns the Retry-After header of resp if it is something safe
+// to pass on: a number of seconds of at most six digits, or an HTTP date.
+func retryAfterOf(resp *http.Response) string {
+	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if v == "" {
+		return ""
+	}
+	if len(v) <= 6 {
+		if _, err := strconv.ParseUint(v, 10, 32); err == nil {
+			return v
+		}
+		return ""
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return t.UTC().Format(http.TimeFormat)
+	}
+	return ""
+}
+
+// upstreamThrottle turns an upstream 429 into a result that passes it on.
+func (p *Proxy) upstreamThrottle(host string, resp *http.Response) (fetchResult, bool) {
+	if resp.StatusCode != http.StatusTooManyRequests {
+		return fetchResult{}, false
+	}
+	p.upstreamAnswered(host, resp)
+	return fetchResult{status: http.StatusTooManyRequests, retryAfter: retryAfterOf(resp)}, true
 }
 
 func relayChallenge(w http.ResponseWriter, challenge []string) {
@@ -520,6 +564,7 @@ func (p *Proxy) activeDownload(d string) *download {
 func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	size, ok := int64(-1), false
 	var challenge []string
+	var throttle *fetchResult
 	for _, base := range p.askablePeers() {
 		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
@@ -544,6 +589,8 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 					size, ok = resp.ContentLength, true
 				} else if r, ch := p.upstreamChallenge(resp); ch {
 					challenge = r.challenge
+				} else if r, th := p.upstreamThrottle(host, resp); th {
+					throttle = &r
 				} else if resp.StatusCode != 200 {
 					p.upstreamAnswered(host, resp)
 				}
@@ -552,6 +599,10 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	}
 	if !ok && challenge != nil {
 		relayChallenge(w, challenge)
+		return
+	}
+	if !ok && throttle != nil {
+		relayThrottle(w, throttle.retryAfter)
 		return
 	}
 	if !ok {
@@ -989,6 +1040,9 @@ func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 		if r, ok := p.upstreamChallenge(resp); ok {
 			return r
 		}
+		if r, ok := p.upstreamThrottle(host, resp); ok {
+			return r
+		}
 		p.upstreamAnswered(host, resp)
 		return fetchResult{}
 	}
@@ -1019,6 +1073,9 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		if r, ok := p.upstreamChallenge(resp); ok {
+			return "", r
+		}
+		if r, ok := p.upstreamThrottle(host, resp); ok {
 			return "", r
 		}
 		p.upstreamAnswered(host, resp)
