@@ -1325,3 +1325,43 @@ func TestFullCacheEvictsInsteadOfRefusing(t *testing.T) {
 		t.Fatalf("evicted blob fetched again: status %d", resp.StatusCode)
 	}
 }
+
+// A peer says how long its answer is before anything can be checked. One that
+// claims more than the disk could ever hold must not end the miss: the peer
+// that tells the truth is still asked, whichever order they come in.
+func TestPeerClaimingTooLargeABlobDoesNotEndTheMiss(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("free disk space is only measured on Linux")
+	}
+	liar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.FormatInt(1<<60, 10))
+		w.WriteHeader(200)
+		w.Write([]byte("short"))
+	}))
+	defer liar.Close()
+	for i := 0; i < 8; i++ { // the peers are asked in random order
+		honest := newNode(t, Options{})
+		body := []byte(fmt.Sprintf("the real layer %d", i))
+		d := put(t, honest, body)
+		a := newNode(t, Options{})
+		a.fin.urls.Store(&[]string{liar.URL, honest.srv.URL})
+		resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
+		if resp.StatusCode != 200 || string(got) != string(body) {
+			t.Fatalf("round %d: status %d body %q, want the real layer", i, resp.StatusCode, got)
+		}
+	}
+}
+
+// The namespace is part of the key under which tags are remembered, so one that
+// could be mistaken for a repository path is refused.
+func TestNamespaceWithSlashIsRefused(t *testing.T) {
+	a := newNode(t, Options{})
+	resp, _ := get(t, a.srv.URL+"/v2/foo/manifests/latest?ns=docker.io/library")
+	if resp.StatusCode != 400 {
+		t.Fatalf("status %d, want 400", resp.StatusCode)
+	}
+	resp, _ = get(t, a.srv.URL+"/v2/foo/manifests/latest?ns=docker.io")
+	if resp.StatusCode == 400 {
+		t.Fatal("a plain registry name was refused")
+	}
+}

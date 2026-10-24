@@ -18,4 +18,4 @@ A node-local OCI registry mirror and cache for Kubernetes with containerd, with 
 - Prometheus metrics, plain-HTTP health and metrics on a loopback admin port.
 - Images for `linux/amd64` and `linux/arm64`; `sic --version`.
 
-Known limits: the containerd import keeps a second copy of every blob on disk; a node learns of a newly Ready peer only at the next 30-second listing unless it knew no peers at all; on clusters larger than `SIC_PEER_MAX_TRIES` a blob held by few nodes is often fetched from the registry instead; discovery cost grows with the square of the node count.
+Known limits: the containerd import keeps a second copy of every blob on disk; a node learns of a newly Ready peer only at the next 30-second listing unless it knew no peers at all; on clusters larger than `SIC_PEER_MAX_TRIES` a blob held by few nodes is often fetched from the registry instead; discovery cost grows with the square of the node count. A peer or registry that declares a very large length for a blob can make a node evict older blobs before the blob is refused; the node never stores it.

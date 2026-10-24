@@ -144,9 +144,39 @@ When SIC cannot cache something it says why, instead of answering 404 as if the 
 
 Both conditions, and non-404 answers from peers and upstream registries, are logged at most once per minute per cause, with a count of the lines held back.
 
+## Settings
+
+All settings are environment variables. A value that cannot be parsed (a duration without a unit, a negative size) is ignored and the default is used, so check the startup log after changing one. The sections above explain the ones that need explaining; this is the complete list.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIC_LISTEN` | `:5000` | Address of the registry listener. |
+| `SIC_ADMIN_LISTEN` | unset | Plain-HTTP address for `/healthz` and `/metrics`; use a loopback address. |
+| `SIC_CACHE_DIR` | `/var/lib/steady-image-cache` | Where blobs, manifests and the records live. |
+| `SIC_TLS_CERT`, `SIC_TLS_KEY`, `SIC_TLS_CA` | unset | Server certificate, key and the CA that client certificates must come from. Required unless `SIC_INSECURE=true`. |
+| `SIC_TLS_CLIENT_CERT`, `SIC_TLS_CLIENT_KEY` | the server pair | Certificate this node presents to its peers. |
+| `SIC_TLS_SERVER_NAME` | `steady-image-cache` | DNS name a peer's certificate must carry. |
+| `SIC_INSECURE` | `false` | Run without TLS or client authentication. Development only. |
+| `SIC_KUBERNETES_DISCOVERY` | `true` | Find peers through the Kubernetes API. Needs `POD_NAMESPACE`, `POD_NAME` and `NODE_NAME`. |
+| `SIC_POD_LABEL_SELECTOR` | `app=steady-image-cache` | Which pods are peers. |
+| `SIC_PEERS` | unset | Fixed peer URLs, comma separated, instead of or in addition to discovery. |
+| `SIC_PEER_PORT` | `5000` | Port on which discovered peers listen. |
+| `SIC_PEER_TIMEOUT`, `SIC_PEER_BACKOFF`, `SIC_PEER_MAX_TRIES` | `5s`, `30s`, `4` | See "Peer requests". |
+| `SIC_UPSTREAM_ENABLED` | `false` | Fetch misses from registries. |
+| `SIC_UPSTREAM_REGISTRIES` | unset | The registries that may be contacted, comma separated. Anything else is refused. |
+| `SIC_UPSTREAM_TIMEOUT` | `30s` | Bounds connecting to a registry, and how long a transfer may go without receiving data (peers and registries alike). |
+| `SIC_TAG_TTL` | `10m` | See "Tags". |
+| `SIC_MIN_FREE_BYTES`, `SIC_MIN_FREE_PERCENT`, `SIC_MAX_CACHE_BYTES` | `1073741824`, `20`, unset | See "Cache size and eviction". |
+| `SIC_SCRUB_INTERVAL`, `SIC_SCRUB_RATE` | `24h`, `33554432` | See "Integrity" (the rate is bytes per second). |
+| `SIC_CONTAINERD_IMPORT` | `true` | Import containerd's content and image names. |
+| `SIC_CONTAINERD_ADDRESS`, `SIC_CONTAINERD_NAMESPACE` | `/run/containerd/containerd.sock`, `k8s.io` | Where to find containerd. |
+| `SIC_IMPORT_INTERVAL` | `5m` | How often the import runs. |
+
 ## Health and metrics
 
 With mTLS enabled the main listener requires a client certificate on every path, including `/healthz`, which kubelet cannot present. Set `SIC_ADMIN_LISTEN` (the sample DaemonSet uses `127.0.0.1:5001`) to serve `/healthz` and `/metrics` over plain HTTP on that address as well.
+
+Metrics on the admin (or main) listener, all counters unless noted: `sic_local_hits_total`, `sic_peer_hits_total`, `sic_upstream_hits_total` and `sic_misses_total` count how each blob request ended; `sic_peer_errors_total` peers that failed or were slow; `sic_verify_errors_total` content refused because it did not match its digest or its declared length; `sic_containerd_imported_blobs_total` and `sic_containerd_imported_bytes_total` what the import copied. The others are named where their behaviour is described above.
 
 `sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods every 30 seconds and keeps only Ready ones, so a node that starts together with the others sees no peers for up to 30 seconds, and a newly Ready neighbour is not asked until the next listing. Until then a miss goes straight to the registry (or fails, if upstream fallback is off).
 
@@ -257,6 +287,6 @@ With `deploy/containerd/hosts.toml` as the `_default` configuration, SIC is the 
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.
 
-Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node.
+Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node. A blob's declared length (from a peer or registry) is used to make room before the bytes arrive, so a peer that holds a valid certificate and lies about the length of a blob can make a node evict older blobs; the blob itself is refused at the digest check, and the evicted content is fetched again when needed.
 
 For a large cluster, the next scalability step would be peer indexing (Bloom filters or a digest advertisement protocol) so a miss does not probe peers sequentially. The current implementation intentionally keeps discovery simple and deterministic.

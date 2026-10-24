@@ -457,15 +457,22 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 			if _, err := p.store.Stat(d); err == nil {
 				return fetched
 			}
-			if r := p.fetchPeers(in, path, d); r.ok {
+			pr := p.fetchPeers(in, path, d)
+			if pr.ok {
 				p.metrics.PeerHits.Add(1)
-				return r
-			} else if r.status != 0 {
-				return r
+				return pr
 			}
+			if pr.status != 0 && pr.status != http.StatusInsufficientStorage {
+				return pr
+			}
+			// A peer's claim that the blob does not fit is not the last word
+			// (see fetchPeers): the registry gets its turn, and the client
+			// hears "insufficient storage" only if nothing else delivered.
 			r := p.fetchUpstream(in, path, d)
 			if r.ok {
 				p.metrics.UpstreamHits.Add(1)
+			} else if r.status == 0 {
+				return pr
 			}
 			return r
 		})
@@ -563,6 +570,13 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref string) {
 	if !validRepo(repo) || !validRef(ref) {
 		http.Error(w, "invalid manifest reference", 400)
+		return
+	}
+	if v := r.URL.Query().Get("ns"); v != "" && !registryRE.MatchString(v) {
+		// The namespace is part of the key under which tags are remembered
+		// ("ns/repo@tag"); one with a slash in it could collide with another
+		// namespace's repository.
+		http.Error(w, "invalid namespace", 400)
 		return
 	}
 	namespace := ns(r)
@@ -795,6 +809,7 @@ func refused(e error) bool {
 }
 
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
+	var noSpace fetchResult
 	for _, base := range p.askablePeers() {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
@@ -813,6 +828,15 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 			return fetched
 		}
 		if r, ours := p.localFailure(e, d, size); ours {
+			if r.status == http.StatusInsufficientStorage {
+				// The size is whatever this peer declared, and nothing has
+				// been checked yet: a peer that claims more than the disk
+				// holds must not end the miss for the peers (and the registry)
+				// that would tell the truth. If the blob really is too big, the
+				// next one fails the same way, quickly, before any byte is read.
+				noSpace = r
+				continue
+			}
 			return r // no other peer can help, and this one did nothing wrong
 		}
 		if refused(e) {
@@ -823,7 +847,7 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 			p.peerFailed(base, e)
 		}
 	}
-	return fetchResult{}
+	return noSpace
 }
 
 // errBadManifest marks a manifest that was refused.
