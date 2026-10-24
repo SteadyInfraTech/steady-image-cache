@@ -2,7 +2,7 @@
 
 Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*` environment variables), the metric names and the HTTP API paths are the public interface; a change to them that breaks an existing deployment is a major version.
 
-## 1.0.1
+## Unreleased
 
 - An upstream registry's `429 Too Many Requests` is now passed on to the client, with its `Retry-After` when that is a number of seconds or a date, instead of being reported as "not found". A cached tag is still served when the registry throttles the check. Applies to blobs, `HEAD` requests and manifests.
 - The public-registries end-to-end test skips a registry that keeps throttling and still runs the others.
