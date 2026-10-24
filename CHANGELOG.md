@@ -4,6 +4,8 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+## 1.0.2 - 2026-10-25
+
 - A download that failed without saying how (a panic in the store) left clients that were streaming from it waiting until they gave up; they now get an error at once.
 - A damaged `aliases.json` that contains `null` no longer makes the first saved tag panic.
 - Pod addresses from the Kubernetes API that are not IP addresses are ignored.
