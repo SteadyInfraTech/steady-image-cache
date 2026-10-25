@@ -10,53 +10,49 @@ jobs:
   tweet:
     runs-on: ubuntu-latest
     steps:
-      - name: Send Tweet via Native API
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: pip install requests-oauthlib
+
+      - name: Send Tweet via X API v2
         env:
           CONSUMER_KEY: ${{ secrets.TWITTER_CONSUMER_KEY }}
           CONSUMER_SECRET: ${{ secrets.TWITTER_CONSUMER_SECRET }}
           ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
-          ACCESS_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
+          ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
           TWEET_TEXT: "🚀 New Release: steady-image-cache ${{ github.event.release.tag_name }} is live! Read the changelog here: ${{ github.event.release.html_url }} #k8s #DevOps"
+        shell: python
         run: |
-          # Generate nonce and timestamp
-          NONCE=$(date +%s%N | base64 | head -c 32)
-          TIMESTAMP=$(date +%s)
-          
-          # URL-encode function
-          urlencode() {
-            local string="${1}"
-            local strlen=${#string}
-            local encoded=""
-            local pos c o
-            for (( pos=0 ; pos<strlen ; pos++ )); do
-               c=${string:$pos:1}
-               case "$c" in
-                  [-_.~a-zA-Z0-9] ) encoded="${encoded}${c}" ;;
-                  * ) printf -v o '%%%02X' "'$c"
-                      encoded="${encoded}${o}" ;;
-               case
-            done
-            echo "${encoded}"
-          }
+          import os
+          import json
+          from requests_oauthlib import OAuth1Session
 
-          STATUS_ENC=$(urlencode "$TWEET_TEXT")
+          # Collect secrets from environment
+          consumer_key = os.environ["CONSUMER_KEY"]
+          consumer_secret = os.environ["CONSUMER_SECRET"]
+          access_token = os.environ["ACCESS_TOKEN"]
+          access_token_secret = os.environ["ACCESS_TOKEN_SECRET"]
+          text = os.environ["TWEET_TEXT"]
+
+          # Initialize the secure OAuth session
+          oauth = OAuth1Session(
+              client_key=consumer_key,
+              client_secret=consumer_secret,
+              resource_owner_key=access_token,
+              resource_owner_secret=access_token_secret
+          )
+
+          # Send payload to the modern X API v2 endpoint
+          url = "https://x.com"
+          payload = {"text": text}
           
-          # Build Parameter String
-          PARAM_STR="oauth_consumer_key=$(urlencode "$CONSUMER_KEY")&oauth_nonce=$NONCE&oauth_signature_method=HMAC-SHA1&oauth_timestamp=$TIMESTAMP&oauth_token=$(urlencode "$ACCESS_TOKEN")&oauth_version=1.0"
+          response = oauth.post(url, json=payload)
+
+          if not response.ok:
+              raise Exception(f"X API Error ({response.status_code}): {response.text}")
           
-          # Build Signature Base String
-          BASE_STR="POST&$(urlencode "https://twitter.com")&$(urlencode "$PARAM_STR")"
-          
-          # Generate Signature Key
-          SIGN_KEY="$(urlencode "$CONSUMER_SECRET")&$(urlencode "$ACCESS_SECRET")"
-          
-          # Calculate HMAC-SHA1 Signature
-          SIGNATURE=$(echo -n "$BASE_STR" | openssl dgst -sha1 -hmac "$SIGN_KEY" -binary | base64)
-          SIGNATURE_ENC=$(urlencode "$SIGNATURE")
-          
-          # Send Request to X API v2
-          curl --request POST \
-            --url 'https://twitter.com' \
-            --header "Authorization: OAuth oauth_consumer_key=\"$CONSUMER_KEY\", oauth_nonce=\"$NONCE\", oauth_signature=\"$SIGNATURE_ENC\", oauth_signature_method=\"HMAC-SHA1\", oauth_timestamp=\"$TIMESTAMP\", oauth_token=\"$ACCESS_TOKEN\", oauth_version=\"1.0\"" \
-            --header 'Content-Type: application/json' \
-            --data "{\"text\": \"$TWEET_TEXT\"}"
+          print("Tweet posted successfully!")
