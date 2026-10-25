@@ -86,12 +86,15 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck -format json ./... > vuln.json
           failed=0
-          for id in $(jq -r 'select(.finding != null) | select(.finding.trace[0].function != null) | .finding.osv' vuln.json | sort -u); do
+          # One line per called vulnerability: id, module, and the version that fixes it.
+          jq -r 'select(.finding != null) | select(.finding.trace[0].function != null)
+                 | "\(.finding.osv) \(.finding.trace[0].module) \(.finding.fixed_version // "no fix")"' vuln.json | sort -u > called.txt
+          while read -r id module fixed; do
             if [[ " $ACCEPTED " == *" $id "* ]]; then
-              echo "::warning title=govulncheck (accepted)::$id https://pkg.go.dev/vuln/$id"
+              echo "::warning title=govulncheck (accepted)::$id in $module (fixed in $fixed) https://pkg.go.dev/vuln/$id"
             else
-              echo "::error title=govulncheck::$id https://pkg.go.dev/vuln/$id"
+              echo "::error title=govulncheck::$id in $module (fixed in $fixed) https://pkg.go.dev/vuln/$id"
               failed=1
             fi
-          done
+          done < called.txt
           exit $failed
