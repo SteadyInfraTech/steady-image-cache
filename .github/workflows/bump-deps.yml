@@ -1,0 +1,37 @@
+name: bump-deps (temporary)
+
+# One-shot: raises golang.org/x/net and commits go.mod/go.sum back to the branch.
+# Deleted again in the next commit.
+on:
+  push:
+    branches:
+      - fix/review-findings
+    paths:
+      - ".github/workflows/bump-deps.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Bump
+        run: |
+          go get golang.org/x/net@v0.60.0
+          go mod tidy
+          git diff --stat
+          go build ./... && go vet ./...
+      - name: Commit
+        run: |
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add go.mod go.sum
+          git diff --cached --quiet && { echo "nothing to commit"; exit 0; }
+          git commit -m "Update golang.org/x/net to v0.60.0 (GO-2026-6603, 6611, 6612, 6617)"
+          git push
