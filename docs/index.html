@@ -3,98 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Steady Image Cache is a node-local, peer-assisted OCI image cache for Kubernetes and containerd, built for bandwidth-constrained and disconnected clusters.">
-  <meta name="theme-color" content="#101a2b">
-  <title>Steady Image Cache — Reliable image distribution for Kubernetes</title>
+  <meta http-equiv="refresh" content="0; url=https://steadyinfra.com/sic/">
+  <title>Steady Image Cache documentation has moved</title>
+  <meta name="description" content="The Steady Image Cache documentation has moved to steadyinfra.com.">
   <link rel="canonical" href="https://steadyinfra.com/sic/">
-  <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Steady Infrastructure">
-  <meta property="og:title" content="Steady Image Cache | Peer-assisted OCI cache for Kubernetes">
-  <meta property="og:description" content="Steady Image Cache is a node-local, peer-assisted OCI registry cache for Kubernetes and containerd, designed for bandwidth-constrained and disconnected clusters.">
-  <meta property="og:url" content="https://steadyinfra.com/sic/">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Steady Image Cache | Peer-assisted OCI cache for Kubernetes">
-  <meta name="twitter:description" content="Steady Image Cache is a node-local, peer-assisted OCI registry cache for Kubernetes and containerd, designed for bandwidth-constrained and disconnected clusters.">
-  <link rel="stylesheet" href="assets/site.css">
+  <meta name="robots" content="noindex, follow">
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to content</a>
-  <header class="site-header">
-    <div class="container nav-wrap">
-      <a class="brand" href="https://steadyinfra.com/sic/" aria-label="Steady Image Cache home"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a>
-      <nav aria-label="Main navigation">
-        <a class="active" href="https://steadyinfra.com/sic/">Overview</a>
-        <a href="https://steadyinfra.com/sic/getting-started">Get started</a>
-        <a href="https://steadyinfra.com/sic/architecture">Architecture</a>
-        <a href="https://steadyinfra.com/sic/operations">Operations</a>
-      </nav>
-      <a class="nav-github" href="https://github.com/SteadyInfraTech/steady-image-cache">GitHub <span aria-hidden="true">↗</span></a>
-    </div>
-  </header>
-
-  <main id="main">
-    <section class="hero">
-      <div class="container hero-grid">
-        <div class="hero-copy">
-          <p class="eyebrow"><span class="status-dot"></span> Open source · Kubernetes · containerd</p>
-          <h1>Move container images.<br><span class="gradient-text">Not the same bytes twice.</span></h1>
-          <p class="hero-lede">A node-local, peer-assisted OCI registry cache that helps Kubernetes clusters reuse image content across nodes — especially where bandwidth is limited or registry access is unreliable.</p>
-          <div class="hero-actions">
-            <a class="button button-primary" href="https://steadyinfra.com/sic/getting-started">Explore setup <span aria-hidden="true">→</span></a>
-            <a class="button button-secondary" href="https://github.com/SteadyInfraTech/steady-image-cache">View source <span aria-hidden="true">↗</span></a>
-          </div>
-          <p class="hero-note">Designed for containerd-based Kubernetes clusters. The sample deployment requires environment-specific TLS and image configuration.</p>
-        </div>
-        <div class="diagram-card" aria-label="Image pull flow: containerd checks the local SIC cache, then peers, then optional upstream registry fallback">
-          <div class="diagram-top"><span class="window-dots"><i></i><i></i><i></i></span><span>IMAGE PULL FLOW</span><span class="live-label">CONTENT-ADDRESSED</span></div>
-          <div class="flow-node flow-client"><span class="node-icon">⌘</span><span><strong>containerd</strong><small>Image pull request</small></span></div>
-          <div class="flow-connector"><span></span><b>OCI / HTTPS</b></div>
-          <div class="flow-node flow-local"><span class="node-icon">▦</span><span><strong>Local SIC cache</strong><small>Digest-verified content</small></span><em>1</em></div>
-          <div class="flow-branches"><span></span><span></span></div>
-          <div class="flow-row">
-            <div class="flow-node flow-peer"><span class="node-icon">◈</span><span><strong>Peer caches</strong><small>Cluster-local reuse</small></span><em>2</em></div>
-            <div class="flow-node flow-upstream"><span class="node-icon">↗</span><span><strong>Upstream</strong><small>Optional allow-listed fallback</small></span><em>3</em></div>
-          </div>
-          <div class="diagram-footer"><span><i class="legend-local"></i> Local-first</span><span><i class="legend-peer"></i> Peer-assisted</span><span><i class="legend-upstream"></i> Opt-in fallback</span></div>
-        </div>
-      </div>
-      <div class="hero-glow"></div>
-    </section>
-
-    <section class="section section-tight">
-      <div class="container">
-        <div class="section-heading"><p class="eyebrow">BUILT FOR THE HARD PARTS</p><h2>Cache behavior you can reason about.</h2><p>Image caching is only useful when correctness, resource limits, and failure behavior are explicit.</p></div>
-        <div class="feature-grid">
-          <article class="feature-card"><span class="feature-icon icon-cyan">⌁</span><h3>Content integrity</h3><p>Blob digests are verified as content is written. Existing cached files are checked before trusted reads, with corruption recovery and background scrubbing.</p><a href="https://steadyinfra.com/sic/architecture#integrity">How integrity works <span>→</span></a></article>
-          <article class="feature-card"><span class="feature-icon icon-violet">◈</span><h3>Peer-assisted reuse</h3><p>Nodes discover ready peers through the Kubernetes API. Peer requests stay cache-only to avoid recursive miss loops.</p><a href="https://steadyinfra.com/sic/architecture#peer-flow">Explore the request path <span>→</span></a></article>
-          <article class="feature-card"><span class="feature-icon icon-green">▤</span><h3>Bounded storage</h3><p>Free-space reserves and optional cache caps trigger LRU eviction before a download is admitted or rejected.</p><a href="https://steadyinfra.com/sic/operations#capacity">Storage and eviction <span>→</span></a></article>
-          <article class="feature-card"><span class="feature-icon icon-amber">⌑</span><h3>Operational visibility</h3><p>Prometheus metrics, health checks, explicit failure responses, and TLS diagnostics help operators understand cache behavior.</p><a href="https://steadyinfra.com/sic/operations#observability">Metrics and health <span>→</span></a></article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section section-alt">
-      <div class="container split-section">
-        <div><p class="eyebrow">HOW IT FITS</p><h2>A local cache with a cluster-wide memory.</h2><p>Each node runs SIC beside containerd. SIC can import existing content from containerd, serve local cache hits, ask other ready SIC peers, and optionally fall back to explicitly allow-listed registries.</p><p>It uses containerd's gRPC content APIs rather than scraping containerd's on-disk layout or invoking a <code>ctr</code> subprocess.</p><a class="text-link" href="https://steadyinfra.com/sic/architecture">Read the architecture <span>→</span></a></div>
-        <div class="terminal-card"><div class="terminal-bar"><span></span><span></span><span></span><small>pull-path.txt</small></div><pre><span class="terminal-muted">01</span>  containerd requests an OCI blob
-<span class="terminal-muted">02</span>  SIC checks the local content cache
-<span class="terminal-muted">03</span>  cache miss → probe ready peers
-<span class="terminal-muted">04</span>  optional allow-listed upstream
-<span class="terminal-muted">05</span>  verify digest before publishing
-<span class="terminal-muted">06</span>  reserve space / evict if needed</pre><div class="terminal-foot"><span class="terminal-check">✓</span> Content-addressed · TLS protected · Observable</div></div>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="container next-step">
-        <div><p class="eyebrow">READY TO EXPLORE?</p><h2>Start with the deployment prerequisites.</h2><p>Review the TLS requirements, containerd registry mirror, and bootstrap order before installing the sample DaemonSet.</p></div>
-        <a class="button button-primary" href="https://steadyinfra.com/sic/getting-started">Read getting started <span aria-hidden="true">→</span></a>
-      </div>
-    </section>
-
-    <section class="container notice"><span class="notice-icon">i</span><p><strong>Deployment note:</strong> SIC is published as open-source software. Validate the security boundary, TLS setup, bootstrap path, and recovery behavior in your own environment before relying on it for production workloads. See <a href="https://github.com/SteadyInfraTech/steady-image-cache/releases">published releases</a> and pin a release tag or image digest.</p></section>
-  </main>
-
-  <footer class="site-footer"><div class="container footer-inner"><a class="brand" href="https://steadyinfra.com/sic/"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><p>Open source image distribution for Kubernetes.</p><div class="footer-links"><a href="https://github.com/SteadyInfraTech/steady-image-cache">Source</a><a href="https://github.com/SteadyInfraTech/steady-image-cache/actions">CI status</a><a href="https://github.com/SteadyInfraTech/steady-image-cache/issues">Issues</a></div><small>Documentation evolves with the repository.</small></div></footer>
+  <p>This documentation has moved to <a href="https://steadyinfra.com/sic/">https://steadyinfra.com/sic/</a>.</p>
 </body>
 </html>

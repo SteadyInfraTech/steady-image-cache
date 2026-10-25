@@ -1,4 +1,4 @@
-name: GitHub Pages
+name: GitHub Pages compatibility redirects
 
 on:
   push:
@@ -21,53 +21,39 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate documentation site
+    name: Validate legacy documentation redirects
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-      - name: Check local links and assets
+      - name: Validate redirects and legacy 404 page
         run: |
           python3 - <<'PY'
-          from html.parser import HTMLParser
           from pathlib import Path
-          from urllib.parse import urlsplit, unquote
-          root = Path("docs").resolve()
-          pages = sorted(root.glob("*.html"))
-          errors = []
-          class Links(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.refs = []
-              def handle_starttag(self, tag, attrs):
-                  for key, value in attrs:
-                      if key in ("href", "src") and value:
-                          self.refs.append(value)
-          for page in pages:
-              parser = Links()
-              parser.feed(page.read_text(encoding="utf-8"))
-              for ref in parser.refs:
-                  parts = urlsplit(ref)
-                  if parts.scheme or parts.netloc or ref.startswith("//") or not parts.path:
-                      continue
-                  target = (page.parent / unquote(parts.path)).resolve()
-                  if not target.is_relative_to(root):
-                      errors.append(f"{page.relative_to(root)}: link escapes docs/: {ref}")
-                  elif not target.exists():
-                      errors.append(f"{page.relative_to(root)}: missing local target: {ref}")
-          if errors:
-              print("\n".join(errors))
-              raise SystemExit(1)
-          print(f"Checked {len(pages)} HTML pages; local file links and assets resolve.")
+
+          expected = {
+              "index.html": "https://steadyinfra.com/sic/",
+              "architecture.html": "https://steadyinfra.com/sic/architecture",
+              "getting-started.html": "https://steadyinfra.com/sic/getting-started",
+              "operations.html": "https://steadyinfra.com/sic/operations",
+          }
+          root = Path("docs")
+          for filename, target in expected.items():
+              page = root / filename
+              content = page.read_text(encoding="utf-8")
+              required = (
+                  f'http-equiv="refresh" content="0; url={target}"',
+                  f'<link rel="canonical" href="{target}">',
+                  f'href="{target}"',
+              )
+              missing = [marker for marker in required if marker not in content]
+              if missing:
+                  raise SystemExit(f"{page}: missing redirect metadata or destination link: {missing}")
+          not_found = (root / "404.html").read_text(encoding="utf-8")
+          if "https://steadyinfra.com/sic/" not in not_found:
+              raise SystemExit("docs/404.html must link to the current SIC documentation")
+          print(f"Validated {len(expected)} legacy redirects and the moved-documentation 404 page.")
           PY
-      - name: Check required pages
-        run: |
-          test -f docs/index.html
-          test -f docs/getting-started.html
-          test -f docs/architecture.html
-          test -f docs/operations.html
-          test -f docs/404.html
-          test -f docs/assets/site.css
       - name: Upload Pages artifact
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-pages-artifact@v3
@@ -75,7 +61,7 @@ jobs:
           path: docs
 
   deploy:
-    name: Deploy to GitHub Pages
+    name: Deploy compatibility redirects to GitHub Pages
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ubuntu-latest

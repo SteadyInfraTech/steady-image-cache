@@ -1,29 +1,15 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Architecture and request flow for Steady Image Cache."><title>Architecture — Steady Image Cache</title>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="0; url=https://steadyinfra.com/sic/architecture">
+  <title>SIC Architecture documentation has moved</title>
+  <meta name="description" content="The Steady Image Cache documentation has moved to steadyinfra.com.">
   <link rel="canonical" href="https://steadyinfra.com/sic/architecture">
-  <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Steady Infrastructure">
-  <meta property="og:title" content="Architecture | Steady Image Cache">
-  <meta property="og:description" content="Explore Steady Image Cache architecture, peer request flow, content integrity, concurrent downloads, and containerd integration.">
-  <meta property="og:url" content="https://steadyinfra.com/sic/architecture">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Architecture | Steady Image Cache">
-  <meta name="twitter:description" content="Explore Steady Image Cache architecture, peer request flow, content integrity, concurrent downloads, and containerd integration."><link rel="stylesheet" href="assets/site.css"></head>
+  <meta name="robots" content="noindex, follow">
+</head>
 <body>
-<a class="skip-link" href="#main">Skip to content</a>
-<header class="site-header"><div class="container nav-wrap"><a class="brand" href="https://steadyinfra.com/sic/"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><nav aria-label="Main navigation"><a href="https://steadyinfra.com/sic/">Overview</a><a href="https://steadyinfra.com/sic/getting-started">Get started</a><a class="active" href="https://steadyinfra.com/sic/architecture">Architecture</a><a href="https://steadyinfra.com/sic/operations">Operations</a></nav><a class="nav-github" href="https://github.com/SteadyInfraTech/steady-image-cache">GitHub <span aria-hidden="true">↗</span></a></div></header>
-<main id="main">
-<section class="page-hero"><div class="container"><p class="eyebrow">DOCUMENTATION / ARCHITECTURE</p><h1>Local-first by design.<br><span class="gradient-text">Explicit on failure.</span></h1><p>SIC is an OCI registry proxy and node-local content store. It coordinates reuse across nodes without making peer requests recursively fan out.</p></div></section>
-<section class="section"><div class="container"><div class="architecture-flow"><div class="arch-box arch-client"><span>01</span><strong>containerd</strong><small>OCI Distribution request</small></div><div class="arch-arrow">↓ <small>loopback TLS</small></div><div class="arch-box arch-local"><span>02</span><strong>Local SIC</strong><small>Cache · digest check · stream</small></div><div class="arch-split"><div></div><div></div></div><div class="arch-branches"><div class="arch-box arch-peer"><span>03A</span><strong>Ready peer SIC</strong><small>Cache-only peer response</small></div><div class="arch-box arch-upstream"><span>03B</span><strong>Allow-listed registry</strong><small>Optional HTTPS fallback</small></div></div><p class="arch-caption">A peer request is answered from that peer's cache only. A peer miss never forwards to other peers or upstream, preventing request loops.</p></div></div></section>
-<section class="section section-alt"><div class="container prose-width">
-<section id="peer-flow" class="doc-section"><p class="eyebrow">REQUEST LIFECYCLE</p><h2>What happens on a cache miss?</h2><ol class="number-list"><li>containerd sends an OCI manifest or blob request to the local SIC registry mirror.</li><li>SIC checks its content-addressed local cache and validates cached content when required.</li><li>On a miss, SIC tries ready peers discovered through the Kubernetes API. A peer is expected to return content or a miss, not redirect the caller elsewhere.</li><li>If configured and allowed, SIC may contact an upstream registry. Upstream fallback is disabled by default and constrained by an explicit registry allow-list.</li><li>New content is written to a temporary file, hashed against the requested digest, and only published after verification. Download and disk-space limits are enforced.</li></ol></section>
-<section id="integrity" class="doc-section"><p class="eyebrow">CONTENT INTEGRITY</p><h2>Verify before publishing.</h2><p>Blob content is hashed as it arrives. A digest mismatch or interrupted download is not published as a valid cache entry. Existing files are checked when needed; SIC records verified file identity metadata and uses a background scrubber to detect disk corruption that metadata checks alone might miss.</p><p>Streaming responses can begin before a complete blob is available, but the final byte is held until digest verification passes. If the source fails or the digest is wrong, the response is cut short so the containerd client sees a failure rather than a falsely complete layer. containerd also checks layer digests.</p></section>
-<section class="doc-section"><p class="eyebrow">COORDINATION</p><h2>Concurrent requests share work safely.</h2><p>Single-flight coordination coalesces requests for the same missing object within a SIC process. Manifest flights account for representation and authorization differences. Per-digest write coordination and capacity reservations limit duplicate writes and concurrent over-admission. These guarantees are process-local; the cache is not a distributed transactional store.</p></section>
-<section class="doc-section"><p class="eyebrow">CONTAINERD INTEGRATION</p><h2>Use the supported content API.</h2><p>SIC imports existing content and image-name aliases through containerd's gRPC services. It does not scrape containerd's on-disk layout or call a <code>ctr</code> subprocess. The importer can skip content that disappears during containerd garbage collection and reports other import errors. Import copies data into SIC's independent cache, so the same image bytes may occupy disk twice on a node.</p></section>
-<section class="doc-section"><p class="eyebrow">NETWORK SECURITY</p><h2>Redirects are not peer instructions.</h2><p>A peer redirect is treated as a faulty response and is not followed. Registry redirects are supported only over HTTPS, with a bounded chain. Authorization headers are not forwarded by Go's HTTP client to a different host from the one they were intended for.</p></section>
-</div></section>
-<section class="container notice"><span class="notice-icon">i</span><p>For exact configuration and implementation details, use the <a href="https://github.com/SteadyInfraTech/steady-image-cache">source repository and README</a> for the commit or release you deploy.</p></section>
-</main>
-<footer class="site-footer"><div class="container footer-inner"><a class="brand" href="https://steadyinfra.com/sic/"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><p>Architecture follows the current main-branch implementation.</p><div class="footer-links"><a href="https://steadyinfra.com/sic/getting-started">Get started</a><a href="https://steadyinfra.com/sic/operations">Operations</a></div></div></footer>
-</body></html>
+  <p>This documentation has moved to <a href="https://steadyinfra.com/sic/architecture">https://steadyinfra.com/sic/architecture</a>.</p>
+</body>
+</html>
