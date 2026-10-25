@@ -1,9 +1,18 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Architecture and request flow for Steady Image Cache."><title>Architecture — Steady Image Cache</title><link rel="stylesheet" href="assets/site.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Architecture and request flow for Steady Image Cache."><title>Architecture — Steady Image Cache</title>
+  <link rel="canonical" href="https://steadyinfra.com/sic/architecture">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Steady Infrastructure">
+  <meta property="og:title" content="Architecture | Steady Image Cache">
+  <meta property="og:description" content="Explore Steady Image Cache architecture, peer request flow, content integrity, concurrent downloads, and containerd integration.">
+  <meta property="og:url" content="https://steadyinfra.com/sic/architecture">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Architecture | Steady Image Cache">
+  <meta name="twitter:description" content="Explore Steady Image Cache architecture, peer request flow, content integrity, concurrent downloads, and containerd integration."><link rel="stylesheet" href="assets/site.css"></head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
-<header class="site-header"><div class="container nav-wrap"><a class="brand" href="index.html"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><nav aria-label="Main navigation"><a href="index.html">Overview</a><a href="getting-started.html">Get started</a><a class="active" href="architecture.html">Architecture</a><a href="operations.html">Operations</a></nav><a class="nav-github" href="https://github.com/SteadyInfraTech/steady-image-cache">GitHub <span aria-hidden="true">↗</span></a></div></header>
+<header class="site-header"><div class="container nav-wrap"><a class="brand" href="https://steadyinfra.com/sic/"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><nav aria-label="Main navigation"><a href="https://steadyinfra.com/sic/">Overview</a><a href="https://steadyinfra.com/sic/getting-started">Get started</a><a class="active" href="https://steadyinfra.com/sic/architecture">Architecture</a><a href="https://steadyinfra.com/sic/operations">Operations</a></nav><a class="nav-github" href="https://github.com/SteadyInfraTech/steady-image-cache">GitHub <span aria-hidden="true">↗</span></a></div></header>
 <main id="main">
 <section class="page-hero"><div class="container"><p class="eyebrow">DOCUMENTATION / ARCHITECTURE</p><h1>Local-first by design.<br><span class="gradient-text">Explicit on failure.</span></h1><p>SIC is an OCI registry proxy and node-local content store. It coordinates reuse across nodes without making peer requests recursively fan out.</p></div></section>
 <section class="section"><div class="container"><div class="architecture-flow"><div class="arch-box arch-client"><span>01</span><strong>containerd</strong><small>OCI Distribution request</small></div><div class="arch-arrow">↓ <small>loopback TLS</small></div><div class="arch-box arch-local"><span>02</span><strong>Local SIC</strong><small>Cache · digest check · stream</small></div><div class="arch-split"><div></div><div></div></div><div class="arch-branches"><div class="arch-box arch-peer"><span>03A</span><strong>Ready peer SIC</strong><small>Cache-only peer response</small></div><div class="arch-box arch-upstream"><span>03B</span><strong>Allow-listed registry</strong><small>Optional HTTPS fallback</small></div></div><p class="arch-caption">A peer request is answered from that peer's cache only. A peer miss never forwards to other peers or upstream, preventing request loops.</p></div></div></section>
@@ -16,5 +25,5 @@
 </div></section>
 <section class="container notice"><span class="notice-icon">i</span><p>For exact configuration and implementation details, use the <a href="https://github.com/SteadyInfraTech/steady-image-cache">source repository and README</a> for the commit or release you deploy.</p></section>
 </main>
-<footer class="site-footer"><div class="container footer-inner"><a class="brand" href="index.html"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><p>Architecture follows the current main-branch implementation.</p><div class="footer-links"><a href="getting-started.html">Get started</a><a href="operations.html">Operations</a></div></div></footer>
+<footer class="site-footer"><div class="container footer-inner"><a class="brand" href="https://steadyinfra.com/sic/"><span class="brand-mark">S</span><span>Steady<span class="brand-light"> Image Cache</span></span></a><p>Architecture follows the current main-branch implementation.</p><div class="footer-links"><a href="https://steadyinfra.com/sic/getting-started">Get started</a><a href="https://steadyinfra.com/sic/operations">Operations</a></div></div></footer>
 </body></html>
