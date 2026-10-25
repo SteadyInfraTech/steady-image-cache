@@ -2,6 +2,8 @@
 
 A node-local, peer-assisted OCI registry cache for Kubernetes/containerd, designed for disconnected and air-gapped clusters.
 
+**Project website and documentation:** https://steadyinfra.com/sic/
+
 ## Highlights
 
 * OCI manifest and blob proxy/cache with containerd `?ns=` registry namespace handling.
