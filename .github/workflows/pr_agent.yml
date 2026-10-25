@@ -1,0 +1,26 @@
+name: "🔒 PR-Agent Security & Code Review"
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+jobs:
+  pr_agent_job:
+    if: ${{ github.event.sender.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    name: Run pr agent on every pull request, respond to user comments
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: the-pr-agent/pr-agent@main
+        env:
+          pr_reviewer.extra_instructions: "Focus on security vulnerabilities and performance issues. Check for proper error handling."
+          GITHUB_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+          OPENAI__API_BASE: "https://api.cloudflare.com/client/v4/accounts/{{ secrets.CF_ACCOUNT_ID }}/ai/v1/responses"
+          OPENAI__KEY: ${{ secrets.CF_API_TOKEN }}
+          CONFIG__MODEL: "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+          CONFIG__FALLBACK_MODEL: "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+          PR_AGENT__TOOLS: "['review']"
