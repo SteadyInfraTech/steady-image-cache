@@ -4,6 +4,8 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+## 1.0.3 - 2026-10-26
+
 - A cached blob that could not be read (no file descriptors left, an I/O error) was deleted and counted as corrupt when the same blob was stored again. Only a blob that was read in full and does not match its digest is removed now.
 - A cached object that cannot be opened for a reason other than being missing is counted in `sic_store_errors_total` and logged, instead of passing as a plain miss.
 - A client waiting on a manifest fetch started by another client stops waiting when it goes away, and a manifest request as a whole is bounded to two minutes, so a source that sends a few bytes at a time cannot hold it open.
