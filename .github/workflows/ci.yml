@@ -79,9 +79,16 @@ jobs:
       # govulncheck has no way to accept a known one, so the findings are read
       # from its JSON output: each is printed as an annotation, and the ones
       # listed in ACCEPTED (with the reason) do not fail the job.
+      # Accepted on purpose: GO-2026-5064, -5338, -5622 and -6791 are about the CRI
+      # plugin's checkpoint restore and import in containerd v1, which has no fixed
+      # release (only containerd/v2 does). SIC uses containerd's client library to
+      # read the content store and list images; it runs no CRI plugin and restores
+      # no checkpoints, and govulncheck reaches the affected packages only through
+      # their init functions. The containerd daemon on a node is a separate matter.
+      # Remove an id from the list, or migrate to containerd/v2, to enforce it.
       - name: govulncheck
         env:
-          ACCEPTED: ""
+          ACCEPTED: "GO-2026-5064 GO-2026-5338 GO-2026-5622 GO-2026-6791"
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck -format json ./... > vuln.json

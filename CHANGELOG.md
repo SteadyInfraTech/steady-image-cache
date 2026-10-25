@@ -11,6 +11,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 - A panic in a download is logged with its stack.
 - The cache directory is created with mode 0750, and `aliases.json` and `verified.json` are written with mode 0600 (they were 0755 and 0644). Existing directories keep their mode.
 - Built with Go 1.26.10 (was 1.25): the Go 1.25 line has no fix for the standard library advisories GO-2026-6599 to GO-2026-6617, which `govulncheck` reports as reachable.
+- `golang.org/x/net` v0.60.0 (with newer `x/sync`, `x/sys`, `x/text`): fixes GO-2026-6603, -6611, -6612 and -6617.
 - CI: lint (`.golangci.yml`), race-detector tests, fuzz targets for request and pod-list parsing, and `govulncheck`.
 
 ## 1.0.2 - 2026-10-25
