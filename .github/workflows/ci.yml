@@ -70,14 +70,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      # Not go-version-file: go.mod says 1.25.0, and the standard library of that
-      # exact release has fixed vulnerabilities. This is the newest 1.25.x, like
-      # the golang:1.25 image the Dockerfile builds with.
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
-          check-latest: true
+          go-version-file: go.mod
 
       # Reports only vulnerabilities in code this module can actually call.
       # govulncheck has no way to accept a known one, so the findings are read

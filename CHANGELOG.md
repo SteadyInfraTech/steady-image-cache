@@ -10,6 +10,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 - Startup fails when the service account's CA file holds no certificate, instead of every pod listing failing later.
 - A panic in a download is logged with its stack.
 - The cache directory is created with mode 0750, and `aliases.json` and `verified.json` are written with mode 0600 (they were 0755 and 0644). Existing directories keep their mode.
+- Built with Go 1.26.10 (was 1.25): the Go 1.25 line has no fix for the standard library advisories GO-2026-6599 to GO-2026-6617, which `govulncheck` reports as reachable.
 - CI: lint (`.golangci.yml`), race-detector tests, fuzz targets for request and pod-list parsing, and `govulncheck`.
 
 ## 1.0.2 - 2026-10-25

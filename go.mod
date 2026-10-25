@@ -1,6 +1,6 @@
 module github.com/SteadyInfraTech/steady-image-cache
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/containerd/containerd v1.7.36
