@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send Tweet
-        uses: ethomson/send-tweet-action@v2
+        uses: x-actions/tweet-action@v2
         with:
           status: "🚀 New Release: steady-image-cache ${{ github.event.release.tag_name }} is live! Read the changelog here: ${{ github.event.release.html_url }} #k8s #DevOps"
           consumer-key: ${{ secrets.TWITTER_CONSUMER_KEY }}
