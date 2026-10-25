@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,6 +35,13 @@ const (
 
 	defaultManifestType = "application/vnd.oci.image.manifest.v1+json"
 	maxManifestSize     = 4 << 20
+
+	// maxManifestFetch bounds everything one manifest request may do: asking
+	// peers, asking the registry and reading the answers. The idle timeout only
+	// catches a source that goes quiet, so without this one that sends a byte
+	// every few seconds could keep the request, and every client that joined
+	// it, waiting for as long as maxManifestSize takes to arrive.
+	maxManifestFetch = 2 * time.Minute
 )
 
 var (
@@ -75,16 +83,17 @@ type Options struct {
 }
 
 type Proxy struct {
-	store          *store.Store
-	peers          peer.Finder
-	upstreamClient *http.Client
-	metrics        *metrics.Metrics
-	upstream       bool
-	registries     map[string]bool
-	idle           time.Duration
-	flights        flight.Group[fetchResult] // manifests
-	dlmu           sync.Mutex                // guards downloads
-	downloads      map[string]*download      // blobs being fetched, by digest
+	store           *store.Store
+	peers           peer.Finder
+	upstreamClient  *http.Client
+	metrics         *metrics.Metrics
+	upstream        bool
+	registries      map[string]bool
+	idle            time.Duration
+	manifestTimeout time.Duration             // bound on one manifest request, see maxManifestFetch
+	flights         flight.Group[fetchResult] // manifests
+	dlmu            sync.Mutex                // guards downloads
+	downloads       map[string]*download      // blobs being fetched, by digest
 
 	peerTimeout, backoff time.Duration
 	maxTries             int
@@ -122,23 +131,24 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		peers: p,
 		// Upstream registries are public services: verify them against the
 		// system roots, not against the private CA used between SIC nodes.
-		upstreamClient: &http.Client{Transport: newTransport(o.Timeout, o.Timeout, true), CheckRedirect: upstreamRedirect},
-		metrics:        m,
-		upstream:       o.Upstream,
-		registries:     regs,
-		idle:           o.Timeout,
-		peerTimeout:    o.PeerTimeout,
-		backoff:        o.PeerBackoff,
-		maxTries:       o.PeerMaxTries,
-		tagTTL:         o.TagTTL,
-		tls:            o.TLS,
-		serverName:     o.ServerName,
-		down:           map[string]time.Time{},
-		downloads:      map[string]*download{},
-		now:            time.Now,
-		logf:           o.Logf,
-		lastLog:        map[string]time.Time{},
-		skipped:        map[string]int{},
+		upstreamClient:  &http.Client{Transport: newTransport(o.Timeout, o.Timeout, true), CheckRedirect: upstreamRedirect},
+		metrics:         m,
+		upstream:        o.Upstream,
+		registries:      regs,
+		idle:            o.Timeout,
+		manifestTimeout: maxManifestFetch,
+		peerTimeout:     o.PeerTimeout,
+		backoff:         o.PeerBackoff,
+		maxTries:        o.PeerMaxTries,
+		tagTTL:          o.TagTTL,
+		tls:             o.TLS,
+		serverName:      o.ServerName,
+		down:            map[string]time.Time{},
+		downloads:       map[string]*download{},
+		now:             time.Now,
+		logf:            o.Logf,
+		lastLog:         map[string]time.Time{},
+		skipped:         map[string]int{},
 	}
 	if o.TLS != nil {
 		snap := o.TLS.Current()
@@ -307,11 +317,13 @@ func newInfo(r *http.Request) info {
 func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ctype func(io.ReadSeeker) string) bool {
 	f, e := p.store.Open(d)
 	if e != nil {
+		p.cacheReadFailed(d, e)
 		return false
 	}
 	defer f.Close()
 	st, e := f.Stat()
 	if e != nil {
+		p.cacheReadFailed(d, e)
 		return false
 	}
 	p.store.Touch(d)
@@ -328,6 +340,20 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	// ServeContent implements GET/HEAD, RFC 7233 byte ranges, If-Modified-Since and 416 responses.
 	http.ServeContent(w, r, "", st.ModTime(), f)
 	return true
+}
+
+// cacheReadFailed handles a stored object that could not be opened. A missing
+// one, or one that failed verification (the store has already counted and
+// logged that), is an ordinary miss. Anything else is a fault of this node's
+// cache, such as running out of file descriptors or an unreadable directory. It
+// is still answered as a miss, so the client gets its content from elsewhere,
+// but it is counted and logged instead of passing unseen.
+func (p *Proxy) cacheReadFailed(d string, e error) {
+	if errors.Is(e, os.ErrNotExist) || errors.Is(e, store.ErrDigestMismatch) {
+		return
+	}
+	p.metrics.StoreErrors.Add(1)
+	p.warn("read", "cannot read %s from the cache: %v", d, e)
 }
 
 // manifestType reports the media type of a stored manifest. It uses the
@@ -644,9 +670,17 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	}
 	in := newInfo(r)
 	path := "/v2/" + repo + "/manifests/" + ref
-	res := p.flights.Do("manifest:"+namespace+"/"+repo+"@"+ref+"|accept:"+in.accept+"|auth:"+in.auth, func() fetchResult {
+	res, err := p.flights.DoContext(r.Context(), "manifest:"+namespace+"/"+repo+"@"+ref+"|accept:"+in.accept+"|auth:"+in.auth, func() fetchResult {
+		// The fetch serves every client waiting on it, so it does not stop when
+		// the one that started it leaves; it stops when it has run for too long.
+		ctx, cancel := context.WithTimeout(in.ctx, p.manifestTimeout)
+		defer cancel()
+		in.ctx = ctx
 		return p.fetchManifest(in, namespace, repo, ref, path)
 	})
+	if err != nil {
+		return // the client gave up
+	}
 	if res.ok {
 		if d, found := p.store.Resolve(namespace, repo, ref); found && p.serveDigest(w, r, d, manifestType) {
 			return
@@ -792,7 +826,7 @@ func (p *Proxy) do(ctx context.Context, method string, c *http.Client, u string,
 	if err != nil {
 		t.Stop()
 		cancel()
-		return nil, fmt.Errorf("%w: %v", errBuildRequest, err)
+		return nil, fmt.Errorf("%w: %w", errBuildRequest, err)
 	}
 	for k, v := range hdr {
 		if v != "" {

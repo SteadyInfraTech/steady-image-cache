@@ -142,7 +142,7 @@ func NewFiles(t testing.TB) Files {
 func (f Files) Write(t testing.TB, p PKI, at time.Time) {
 	t.Helper()
 	for path, b := range map[string][]byte{f.Cert: p.CertPEM, f.Key: p.KeyPEM, f.CA: p.CAPEM} {
-		if err := os.WriteFile(path, b, 0600); err != nil {
+		if err := os.WriteFile(path, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chtimes(path, at, at); err != nil {

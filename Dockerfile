@@ -1,6 +1,6 @@
 # The build stage always runs on the builder's own architecture and compiles
 # for the target one, so a multi-architecture image needs no emulation.
-FROM --platform=$BUILDPLATFORM golang:1.25 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev

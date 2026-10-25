@@ -121,7 +121,11 @@ func NewKubernetes(namespace, selector, selfIP string, port int, scheme string) 
 		return nil, err
 	}
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(ca)
+	if !pool.AppendCertsFromPEM(ca) {
+		// An empty pool would pass startup and then fail every listing with an
+		// unknown-authority error that does not say why.
+		return nil, fmt.Errorf("no valid certificates in %s", caFile)
+	}
 	base := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 	k := &Kubernetes{
 		namespace: namespace, selector: selector, selfIP: selfIP, port: port, scheme: scheme,

@@ -207,8 +207,11 @@ func (c Config) Validate() error {
 	}
 	var missing []string
 	for _, v := range []struct{ name, val string }{
-		{"SIC_TLS_CERT", c.TLSCert}, {"SIC_TLS_KEY", c.TLSKey}, {"SIC_TLS_CA", c.TLSCA},
-		{"SIC_TLS_CLIENT_CERT", c.ClientCert}, {"SIC_TLS_CLIENT_KEY", c.ClientKey},
+		{"SIC_TLS_CERT", c.TLSCert},
+		{"SIC_TLS_KEY", c.TLSKey},
+		{"SIC_TLS_CA", c.TLSCA},
+		{"SIC_TLS_CLIENT_CERT", c.ClientCert},
+		{"SIC_TLS_CLIENT_KEY", c.ClientKey},
 	} {
 		if v.val == "" {
 			missing = append(missing, v.name)

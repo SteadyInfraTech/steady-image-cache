@@ -282,10 +282,10 @@ func ValidDigest(d string) bool {
 
 func New(root string) (*Store, error) {
 	blobs := filepath.Join(root, "blobs", "sha256")
-	if err := os.MkdirAll(blobs, 0755); err != nil {
+	if err := os.MkdirAll(blobs, 0o750); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(root, "manifests"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "manifests"), 0o750); err != nil {
 		return nil, err
 	}
 	removePartials(blobs)
@@ -501,20 +501,26 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		// may have been truncated or modified after the original write.
 		// Re-hash it before trusting it. Remove corrupt content so the caller
 		// can fetch and store a verified replacement.
-		f, openErr := os.Open(p)
-		if openErr == nil {
-			h := sha256.New()
-			_, hashErr := io.Copy(h, f)
-			closeErr := f.Close()
-			if hashErr == nil && closeErr == nil && hex.EncodeToString(h.Sum(nil)) == strings.TrimPrefix(d, "sha256:") {
-				return st.Size(), nil
+		//
+		// Only a file that was read in full and hashed to something else is
+		// corrupt. A failure to open or read it (no file descriptors left, an
+		// I/O error) says nothing about its content, and deleting on it could
+		// destroy the only copy a node has.
+		match, hashErr := fileHashes(p, d)
+		switch {
+		case errors.Is(hashErr, os.ErrNotExist):
+			// Removed since the stat; store it afresh.
+		case hashErr != nil:
+			return 0, local(hashErr)
+		case match:
+			return st.Size(), nil
+		default:
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return 0, local(err)
 			}
+			s.noteCorrupt(d)
+			s.goneCorrupt(d)
 		}
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return 0, local(err)
-		}
-		s.noteCorrupt(d)
-		s.goneCorrupt(d)
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return 0, local(e)
 	}
@@ -597,6 +603,25 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 	s.markUsed(d)
 	s.forgetEvicted(d)
 	return n, nil
+}
+
+// fileHashes reports whether the file at path hashes to digest d. The error is
+// non-nil when the file could not be read in full, and then the answer says
+// nothing about its content.
+func fileHashes(path, d string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return false, err
+	}
+	return hex.EncodeToString(h.Sum(nil)) == strings.TrimPrefix(d, "sha256:"), nil
 }
 
 func key(ns, repo, ref string) string { return ns + "/" + repo + "@" + ref }
@@ -694,17 +719,17 @@ func (s *Store) saveLocked() error {
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), filepath.Join(s.root, "aliases.json"))

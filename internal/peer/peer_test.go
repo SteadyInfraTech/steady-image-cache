@@ -95,3 +95,19 @@ func TestAuthTransportFailsWithoutToken(t *testing.T) {
 		t.Fatal("expected an error when the token file is gone")
 	}
 }
+
+// A service account whose CA file holds no certificate has to fail at startup,
+// not later at every pod listing.
+func TestNewKubernetesRejectsAnUnusableCA(t *testing.T) {
+	dir := t.TempDir()
+	tok, ca := filepath.Join(dir, "token"), filepath.Join(dir, "ca.crt")
+	os.WriteFile(tok, []byte("t"), 0o600)
+	os.WriteFile(ca, []byte("this is not a certificate"), 0o600)
+	oldTok, oldCA := tokenFile, caFile
+	tokenFile, caFile = tok, ca
+	defer func() { tokenFile, caFile = oldTok, oldCA }()
+
+	if _, err := NewKubernetes("ns", "app=x", "", 5000, "https"); err == nil {
+		t.Fatal("NewKubernetes accepted a CA file with no certificates")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"sync"
 )
@@ -115,7 +116,7 @@ func (p *Proxy) join(d, auth string, fn func(*download) fetchResult) *download {
 			// A panic here would take the process down; a failed download is
 			// reported like any other.
 			if v := recover(); v != nil {
-				p.warn("panic", "download of %s panicked: %v", d, v)
+				p.warn("panic", "download of %s panicked: %v\n%s", d, v, debug.Stack())
 				res = fetchResult{}
 			}
 			p.dlmu.Lock()
