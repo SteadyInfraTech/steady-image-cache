@@ -34,7 +34,7 @@ jobs:
 
           echo "Sending diff payload to Cloudflare Workers AI..."
           
-          URL="https://cloudflare.com{{ secrets.CF_ACCOUNT_ID }}/ai/v1/chat/completions"
+          URL="https://api.cloudflare.com/client/v4/accounts/{{ secrets.CF_ACCOUNT_ID }}/ai/v1/chat/completions"
           
           RESPONSE=$(curl -s -X POST "$URL" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
