@@ -1,0 +1,89 @@
+name: "🔒 Security Monitor"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, develop]
+
+jobs:
+  scan-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Fetches current commit and parent commit to accurately read diffs
+
+      - name: Extract Code Changes (Diff)
+        id: get_diff
+        run: |
+          # Grabs only line additions (+), removes the '+' character prefix, and creates a clean text snippet
+          git diff HEAD^ HEAD | grep -E "^\+" | grep -v "+++" | sed 's/^+//' > changes.txt
+          echo "Changes extracted."
+
+      - name: Run Cloudflare AI Security Analysis
+        id: security_check
+        run: |
+          # Read changes file safely into a bash variable
+          CHANGES_CONTENT=$(cat changes.txt)
+          
+          # Check if there are actual code lines changed to prevent empty API calls
+          if [ -z "$CHANGES_CONTENT" ]; then
+            echo "No code changes detected."
+            exit 0
+          fi
+
+          echo "Sending diff payload to Cloudflare Workers AI..."
+          
+          # Call Cloudflare AI Gateway passing Llama 3.3 70B instructions
+          RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/{{ secrets.CF_ACCOUNT_ID }}/ai/run" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "cf-aig-gateway-id: github-ci-security" \
+            -H "Content-Type: application/json" \
+            -d @- <<EOF
+          {
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are an uncompromising Automated DevSecOps security scanner. Analyze the provided code diff for critical anti-patterns, hardcoded API keys/secrets, disabled SSL checks, wide open CORS rules (allow_all), exposed test configurations, or open debug endpoints. Your output MUST be strictly formatted as valid JSON containing two root properties: 'vulnerabilities_found' (boolean) and 'critical_issues' (an array of strings explaining each flag). If no issues exist, return false and an empty array. Do not include markdown wraps or conversational text around your JSON output."
+              },
+              {
+                "role": "user",
+                "content": $(echo "$CHANGES_CONTENT" | jq -R -s .)
+              }
+            ],
+            "temperature": 0.1
+          }
+          EOF
+          )
+
+          # Extract data elements from JSON response using jq
+          VULN_STATUS=$(echo "$RESPONSE" | jq -r '.choices[0].message.content | fromjson | .vulnerabilities_found')
+          ISSUES_LIST=$(echo "$RESPONSE" | jq -r '.choices[0].message.content | fromjson | .critical_issues | join("\n- ")')
+
+          echo "vulnerable=$VULN_STATUS" >> $GITHUB_OUTPUT
+          
+          # Save issues list to a file to pass between steps
+          echo -e "$ISSUES_LIST" > issues_report.txt
+
+      - name: Bot Intervention (Post Flags and Block Merge)
+        if: steps.security_check.outputs.vulnerable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          REPORT=$(cat issues_report.txt)
+          COMMENT_BODY="### ⚠️ Security Hall Monitor Warning
+          The Cloudflare AI security engine flagged critical anti-patterns in your recent push. Please resolve these issues before merging:
+          
+          - $REPORT"
+          
+          # Use GitHub CLI acting as the Bot user to leave a comment on the active PR
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment ${{ github.event.number }} --body "$COMMENT_BODY"
+          fi
+          
+          # Explicitly fail the workflow step to block the pipeline build
+          echo "Vulnerabilities detected. Stopping pipeline execution."
+          exit 1
