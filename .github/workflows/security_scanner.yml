@@ -1,34 +1,8 @@
-name: "🔒 Security Monitor"
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  push:
-    branches: [main, develop]
-
-jobs:
-  scan-security:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2 # Fetches current commit and parent commit to accurately read diffs
-
-      - name: Extract Code Changes (Diff)
-        id: get_diff
-        run: |
-          # Grabs only line additions (+), removes the '+' character prefix, and creates a clean text snippet
-          git diff HEAD^ HEAD | grep -E "^\+" | grep -v "+++" | sed 's/^+//' > changes.txt
-          echo "Changes extracted."
-
       - name: Run Cloudflare AI Security Analysis
         id: security_check
         run: |
-          # Read changes file safely into a bash variable
           CHANGES_CONTENT=$(cat changes.txt)
           
-          # Check if there are actual code lines changed to prevent empty API calls
           if [ -z "$CHANGES_CONTENT" ]; then
             echo "No code changes detected."
             exit 0
@@ -36,8 +10,7 @@ jobs:
 
           echo "Sending diff payload to Cloudflare Workers AI..."
           
-          # FIXED: Swapped to the native OpenAI-Compatible completion endpoint route
-          URL="https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/ai/v1/chat/completions"
+          URL="https://cloudflare.com{{ secrets.CF_ACCOUNT_ID }}/ai/v1/chat/completions"
           
           RESPONSE=$(curl -s -X POST "$URL" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
@@ -49,7 +22,7 @@ jobs:
             "messages": [
               {
                 "role": "system",
-                "content": "You are an uncompromising Automated DevSecOps security scanner. Analyze the provided code diff for critical anti-patterns, hardcoded API keys/secrets, disabled SSL checks, wide open CORS rules (allow_all), exposed test configurations, or open debug endpoints. Your output MUST be strictly formatted as valid JSON containing two root properties: 'vulnerabilities_found' (boolean) and 'critical_issues' (an array of strings explaining each flag). If no issues exist, return false and an empty array. Do not include markdown wraps or conversational text around your JSON output."
+                "content": "You are an uncompromising Automated DevSecOps security scanner. Analyze the provided code diff for critical anti-patterns, hardcoded API keys/secrets, disabled SSL checks, wide open CORS rules (allow_all), exposed test configurations, or open debug endpoints. Your output MUST be strictly formatted as a valid raw JSON object string containing two root properties: 'vulnerabilities_found' (boolean) and 'critical_issues' (an array of strings explaining each flag). If no issues exist, return false and an empty array. Do not include markdown code block wraps like \`\`\`json or any conversational introductory text around your JSON output."
               },
               {
                 "role": "user",
@@ -61,31 +34,25 @@ jobs:
           EOF
           )
 
-          # Extract data elements from JSON response using jq
-          VULN_STATUS=$(echo "$RESPONSE" | jq -r '.choices[0].message.content | fromjson | .vulnerabilities_found')
-          ISSUES_LIST=$(echo "$RESPONSE" | jq -r '.choices[0].message.content | fromjson | .critical_issues | join("\n- ")')
+          # Debug helper to see exactly what Cloudflare replied with
+          echo "Raw API Response: $RESPONSE"
+
+          # 1. Extract content safely from the OpenAI array wrapper
+          RAW_CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+          
+          if [ -z "$RAW_CONTENT" ] || [ "$RAW_CONTENT" = "null" ]; then
+            echo "Error: Received empty or invalid response envelope from Cloudflare."
+            echo "vulnerable=false" >> $GITHUB_OUTPUT
+            echo "API structural failure" > issues_report.txt
+            exit 1
+          fi
+
+          # 2. Strip away markdown wrappers if the model generated them anyway
+          CLEAN_JSON=$(echo "$RAW_CONTENT" | sed -e 's/```json//g' -e 's/```//g' | tr -d '\n\r')
+
+          # 3. Parse the valid clean JSON object parameters
+          VULN_STATUS=$(echo "$CLEAN_JSON" | jq -r '.vulnerabilities_found // false')
+          ISSUES_LIST=$(echo "$CLEAN_JSON" | jq -r '.critical_issues | join("\n- ") // "No details provided."')
 
           echo "vulnerable=$VULN_STATUS" >> $GITHUB_OUTPUT
-          
-          # Save issues list to a file to pass between steps
           echo -e "$ISSUES_LIST" > issues_report.txt
-
-      - name: Bot Intervention (Post Flags and Block Merge)
-        if: steps.security_check.outputs.vulnerable == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
-        run: |
-          REPORT=$(cat issues_report.txt)
-          COMMENT_BODY="### ⚠️ Security Hall Monitor Warning
-          The Cloudflare AI security engine flagged critical anti-patterns in your recent push. Please resolve these issues before merging:
-          
-          - $REPORT"
-          
-          # Use GitHub CLI acting as the Bot user to leave a comment on the active PR
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            gh pr comment ${{ github.event.number }} --body "$COMMENT_BODY"
-          fi
-          
-          # Explicitly fail the workflow step to block the pipeline build
-          echo "Vulnerabilities detected. Stopping pipeline execution."
-          exit 1
