@@ -36,8 +36,10 @@ jobs:
 
           echo "Sending diff payload to Cloudflare Workers AI..."
           
-          # Call Cloudflare AI Gateway passing Llama 3.3 70B instructions
-          RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/{{ secrets.CF_ACCOUNT_ID }}/ai/run" \
+          # FIXED: Swapped to the native OpenAI-Compatible completion endpoint route
+          URL="https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/ai/v1/chat/completions"
+          
+          RESPONSE=$(curl -s -X POST "$URL" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             -H "cf-aig-gateway-id: github-ci-security" \
             -H "Content-Type: application/json" \
