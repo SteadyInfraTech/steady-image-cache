@@ -1,0 +1,20 @@
+name: Tweet New Release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  tweet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Tweet
+        uses: ethomson/send-tweet-action@v1
+        with:
+          status: "🚀 New Release: steady-image-cache ${{ github.event.release.tag_name }} is live! Read the changelog here: ${{ github.event.release.html_url }} #k8s #DevOps"
+          consumer-key: ${{ secrets.TWITTER_CONSUMER_KEY }}
+          consumer-secret: ${{ secrets.TWITTER_CONSUMER_SECRET }}
+          access-token: ${{ secrets.TWITTER_ACCESS_TOKEN }}
+          access-token-secret: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
