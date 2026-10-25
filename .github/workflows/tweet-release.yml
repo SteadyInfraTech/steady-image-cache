@@ -47,7 +47,7 @@ jobs:
           )
 
           # Send payload to the modern X API v2 endpoint
-          url = "https://x.com"
+          url = "https://api.x.com/2/tweets"
           payload = {"text": text}
           
           response = oauth.post(url, json=payload)
