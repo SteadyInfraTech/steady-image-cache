@@ -929,3 +929,31 @@ func TestAliasFileContainingNullIsHarmless(t *testing.T) {
 		t.Fatalf("Resolve = %q, %v", got, ok)
 	}
 }
+
+// A blob that cannot be read is not a corrupt blob: reading it failed, so
+// nothing is known about its content, and deleting it could destroy the only
+// copy a node has. Here a directory stands in for a file that fails to read.
+func TestPutVerifiedDoesNotDeleteWhatItCannotRead(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("a layer that is there but cannot be read right now")
+	d := digestOf(body)
+	p := filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))
+	if err := os.Mkdir(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = s.PutVerified(d, strings.NewReader(string(body)))
+	if !errors.Is(err, ErrLocal) {
+		t.Fatalf("PutVerified error = %v, want ErrLocal", err)
+	}
+	if fi, statErr := os.Stat(p); statErr != nil || !fi.IsDir() {
+		t.Fatalf("the unreadable entry was removed: %v", statErr)
+	}
+	if got := s.Corrupt(); got != 0 {
+		t.Fatalf("Corrupt() = %d, an unreadable blob was counted as corrupt", got)
+	}
+}

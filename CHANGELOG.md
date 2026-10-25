@@ -4,6 +4,14 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- A cached blob that could not be read (no file descriptors left, an I/O error) was deleted and counted as corrupt when the same blob was stored again. Only a blob that was read in full and does not match its digest is removed now.
+- A cached object that cannot be opened for a reason other than being missing is counted in `sic_store_errors_total` and logged, instead of passing as a plain miss.
+- A client waiting on a manifest fetch started by another client stops waiting when it goes away, and a manifest request as a whole is bounded to two minutes, so a source that sends a few bytes at a time cannot hold it open.
+- Startup fails when the service account's CA file holds no certificate, instead of every pod listing failing later.
+- A panic in a download is logged with its stack.
+- The cache directory is created with mode 0750, and `aliases.json` and `verified.json` are written with mode 0600 (they were 0755 and 0644). Existing directories keep their mode.
+- CI: lint (`.golangci.yml`), race-detector tests, fuzz targets for request and pod-list parsing, and `govulncheck`.
+
 ## 1.0.2 - 2026-10-25
 
 - A download that failed without saying how (a panic in the store) left clients that were streaming from it waiting until they gave up; they now get an error at once.

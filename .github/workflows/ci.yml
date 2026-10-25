@@ -1,0 +1,80 @@
+name: CI
+
+# Static checks, race-detector tests, a short fuzz run and a vulnerability scan on
+# every change. Tools are built from source at a pinned version, as in e2e.yml,
+# so they do not change under us.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # gofumpt, bodyclose, noctx, gosec, errorlint, errcheck, govet and
+      # staticcheck; see .golangci.yml.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+
+      - name: Lint
+        run: golangci-lint run ./...
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test -race ./...
+
+      # A short run of each fuzz target: it replays the seed corpus and tries new
+      # inputs for a few seconds. Longer runs are for a developer's machine.
+      - name: Fuzz
+        run: |
+          set -e
+          for t in FuzzSplitPath FuzzValidRepoAndRef FuzzRetryAfterOf FuzzManifestType; do
+            go test ./internal/proxy -run '^$' -fuzz "^${t}\$" -fuzztime 20s
+          done
+          go test ./internal/peer -run '^$' -fuzz '^FuzzParsePeers$' -fuzztime 20s
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # Reports only vulnerabilities in code this module can actually call.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
