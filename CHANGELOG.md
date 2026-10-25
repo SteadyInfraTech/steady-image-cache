@@ -12,6 +12,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 - The cache directory is created with mode 0750, and `aliases.json` and `verified.json` are written with mode 0600 (they were 0755 and 0644). Existing directories keep their mode.
 - Built with Go 1.26.10 (was 1.25): the Go 1.25 line has no fix for the standard library advisories GO-2026-6599 to GO-2026-6617, which `govulncheck` reports as reachable.
 - `golang.org/x/net` v0.60.0 (with newer `x/sync`, `x/sys`, `x/text`): fixes GO-2026-6603, -6611, -6612 and -6617.
+- Known and accepted: `govulncheck` reports GO-2026-5064, -5338, -5622 and -6791 in `github.com/containerd/containerd` v1, which has no fixed release (only containerd/v2 does). All four are about the CRI plugin's checkpoint restore and import, which runs in the containerd daemon. SIC uses only containerd's client library to read the content store and list images, and does not run that plugin. They are listed as accepted in `.github/workflows/ci.yml`, with the reason; moving to containerd/v2 would clear them.
 - CI: lint (`.golangci.yml`), race-detector tests, fuzz targets for request and pod-list parsing, and `govulncheck`.
 
 ## 1.0.2 - 2026-10-25
