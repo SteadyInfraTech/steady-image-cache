@@ -23,4 +23,3 @@ jobs:
           OPENAI__KEY: ${{ secrets.CF_API_TOKEN }}
           CONFIG__MODEL: "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
           CONFIG__FALLBACK_MODEL: "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-          PR_AGENT__TOOLS: "['review']"
