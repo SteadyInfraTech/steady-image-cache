@@ -19,7 +19,7 @@ jobs:
         env:
           pr_reviewer.extra_instructions: "Focus on security vulnerabilities and performance issues. Check for proper error handling."
           GITHUB_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
-          OPENAI__API_BASE: "https://api.cloudflare.com/client/v4/accounts/{{ secrets.CF_ACCOUNT_ID }}/ai/v1/responses"
+          OPENAI__API_BASE: "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/ai/v1/responses"
           OPENAI__KEY: ${{ secrets.CF_API_TOKEN }}
           CONFIG__MODEL: "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
           CONFIG__FALLBACK_MODEL: "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
