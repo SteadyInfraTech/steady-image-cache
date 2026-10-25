@@ -1,3 +1,27 @@
+name: "🔒 Security Monitor"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, develop]
+
+jobs:
+  scan-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Fetches current commit and parent commit to accurately read diffs
+
+      - name: Extract Code Changes (Diff)
+        id: get_diff
+        run: |
+          # Grabs only line additions (+), removes the '+' character prefix, and creates a clean text snippet
+          git diff HEAD^ HEAD | grep -E "^\+" | grep -v "+++" | sed 's/^+//' > changes.txt
+          echo "Changes extracted."
+
       - name: Run Cloudflare AI Security Analysis
         id: security_check
         run: |
