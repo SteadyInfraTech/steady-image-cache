@@ -168,7 +168,7 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SIC_LISTEN` | `:5000` | Address of the registry listener. |
-| `SIC_ADMIN_LISTEN` | unset | Plain-HTTP address for `/healthz` and `/metrics`; use a loopback address. |
+| `SIC_ADMIN_LISTEN` | unset | Plain-HTTP address for `/healthz`, `/readyz` and `/metrics`; use a loopback address. |
 | `SIC_CACHE_DIR` | `/var/lib/steady-image-cache` | Where blobs, manifests and the records live. |
 | `SIC_TLS_CERT`, `SIC_TLS_KEY`, `SIC_TLS_CA` | unset | Server certificate, key and the CA that client certificates must come from. Required unless `SIC_INSECURE=true`. |
 | `SIC_TLS_CLIENT_CERT`, `SIC_TLS_CLIENT_KEY` | the server pair | Certificate this node presents to its peers. |
@@ -191,7 +191,9 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 
 ## Health and metrics
 
-With mTLS enabled the main listener requires a client certificate on every path, including `/healthz`, which kubelet cannot present. Set `SIC_ADMIN_LISTEN` (the sample DaemonSet uses `127.0.0.1:5001`) to serve `/healthz` and `/metrics` over plain HTTP on that address as well.
+With mTLS enabled the main listener requires a client certificate on every path, including `/healthz`, which kubelet cannot present. Set `SIC_ADMIN_LISTEN` (the sample DaemonSet uses `127.0.0.1:5001`) to serve `/healthz`, `/readyz` and `/metrics` over plain HTTP on that address as well.
+
+`/healthz` answers 200 while the HTTP server can answer at all; it is the liveness probe, and only a hung process should fail it. `/readyz` answers 503, with the reason, when the cache directory cannot be written (read-only, unmounted, permissions) and 200 otherwise; it is the readiness probe from the first release that has it; the sample manifest switches to it with that release, because a probe for a path the pinned image lacks would mark every pod NotReady. Other nodes list peers by pod readiness, so a node whose cache is broken leaves their lists at their next listing instead of failing their requests. The node keeps serving containerd while unready. A full disk is not a failure here: a node that cannot store more can still serve what it holds, and the disk-full counters and `507` answers report it.
 
 Metrics on the admin (or main) listener, all counters unless noted: `sic_local_hits_total`, `sic_peer_hits_total`, `sic_upstream_hits_total` and `sic_misses_total` count how each blob request ended; `sic_peer_errors_total` peers that failed or were slow; `sic_verify_errors_total` content refused because it did not match its digest or its declared length; `sic_containerd_imported_blobs_total` and `sic_containerd_imported_bytes_total` what the import copied. The others are named where their behaviour is described above.
 
@@ -285,6 +287,7 @@ A third phase puts a second registry that wants a password (HTTP Basic) behind S
 * `GET|HEAD /v2/<repo>/manifests/<reference>`
 * `GET /metrics`
 * `GET /healthz`
+* `GET /readyz`
 
 ## Deployment
 
@@ -293,7 +296,7 @@ A third phase puts a second registry that wants a password (HTTP Basic) behind S
 * **Image.** The manifest names the release image `ghcr.io/steadyinfratech/steady-image-cache:v1.0.3`; pin the tag you have tested, or an `@sha256:` digest. (`:main` is the branch build and is not meant for production; `:latest` follows the newest release.) Images are published for `linux/amd64` and `linux/arm64`. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
 * **Root, with nothing else.** The container runs as root only because containerd's socket is normally `root:root 0660`. It drops every capability, cannot gain privileges, has a read-only root file system and the runtime's default seccomp profile. If you turn the containerd import off (`SIC_CONTAINERD_IMPORT=false`) it needs no socket and can run as a non-root user that owns the cache directory.
 * **Resources.** Requests of 50m CPU and 64Mi memory; a memory limit of 512Mi to catch a leak. There is no CPU limit on purpose: hashing a layer is bursty, and throttling only makes pulls slower.
-* **Probes.** Readiness and liveness use `/healthz` on the plain-HTTP admin port, because kubelet cannot present the client certificate the main port wants. The liveness probe waits for a minute of failures before restarting: a restart interrupts transfers under way.
+* **Probes.** Readiness uses `/readyz` (`/healthz` until the manifest's image has it) and liveness `/healthz`, both on the plain-HTTP admin port, because kubelet cannot present the client certificate the main port wants. The liveness probe waits for a minute of failures before restarting: a restart interrupts transfers under way.
 * **Scheduling.** `system-node-critical`, so node pressure does not evict the cache, and a toleration for every taint, so it also runs on control-plane, GPU and spot nodes. Narrow the toleration to keep it off some nodes. If you lower the priority class, a node that is short of memory may lose its cache pod; pulls still work, but go to the registry.
 * **Cache size.** Unset, the cache may use the disk until 20% and 1 GiB remain, then evicts (see "Cache size and eviction"). A commented `SIC_MAX_CACHE_BYTES` shows how to cap it.
 

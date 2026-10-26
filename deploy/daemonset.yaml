@@ -108,7 +108,12 @@ spec:
         # client certificate that kubelet does not have. /healthz answers from
         # the HTTP server itself, so a hung process fails it. The liveness
         # threshold is generous: a restart empties nothing, but it interrupts
-        # transfers that are under way.
+        # transfers that are under way. From the first release that has it, the
+        # readiness probe should use /readyz instead (RELEASING.md): it also
+        # checks that the cache directory can be written, so a node whose cache
+        # has become read-only drops out of the other nodes' peer lists. This
+        # image predates it, and a probe for a path it lacks would mark every pod
+        # NotReady.
         readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
         livenessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 10, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 6}
       volumes:
