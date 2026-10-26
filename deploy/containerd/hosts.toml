@@ -1,5 +1,15 @@
-# Install as /etc/containerd/certs.d/_default/hosts.toml on each node.
-# With server set to SIC, containerd will not fall through directly to the Internet.
+# SIC as the ONLY host for every registry. Install as
+# /etc/containerd/certs.d/_default/hosts.toml on each node.
+#
+# Use this when nothing but the peers can supply images (an air-gapped cluster
+# with no internal registry). With server set to SIC, containerd will not fall
+# through to anything else: if SIC is not running on a node, nothing can be pulled
+# there, SIC's own image included, so the SIC image has to be on the node before
+# SIC is upgraded or restarted (see "Upgrading" in the README).
+#
+# If the registries can be reached from the nodes, prefer
+# deploy/containerd/mirror-hosts.toml: it keeps SIC in front but lets containerd
+# fall back to the registry, and removes that dependency.
 server = "https://127.0.0.1:5000"
 capabilities = ["pull", "resolve"]
 ca = "/etc/steady-image-cache/ca.crt"

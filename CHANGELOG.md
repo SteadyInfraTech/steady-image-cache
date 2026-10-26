@@ -5,6 +5,8 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 ## Unreleased
 
 - Saving a new tag no longer blocks tag lookups. The alias file was rewritten and fsynced while holding the lock that every manifest request takes to resolve a tag, so a lookup waited as long as the write took (measured: about 20 ms at 10,000 tags and 240 ms at 100,000). Lookups now wait for nothing; an alias still becomes visible only after it has been saved. `aliases.json` is written compactly instead of indented. Saving one new tag still costs time proportional to the number of tags (about 150 ms at 100,000 in the same measurement); bounding or restructuring the alias store is a separate change.
+- New sample `deploy/containerd/mirror-hosts.toml`: SIC as a mirror for one registry, with the registry itself as the fallback, so a node whose SIC pod is down or being upgraded still pulls (and SIC's own image never depends on SIC). `deploy/containerd/hosts.toml` (SIC as the only host, `_default`) stays, now documented as the choice for clusters where only the peers can supply images.
+- README: a new "Upgrading" section (the DaemonSet cannot surge on a fixed host port; how to pre-pull the new image when SIC is the only host) and a rewritten "Registry mirror" section.
 
 ## 1.0.3 - 2026-10-26
 

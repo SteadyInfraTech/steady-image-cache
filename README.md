@@ -199,7 +199,10 @@ Metrics on the admin (or main) listener, all counters unless noted: `sic_local_h
 
 ## Registry mirror
 
-See `deploy/containerd/hosts.toml`. Install it as the `_default/hosts.toml` registry configuration on each node, adjusting certificate paths for your environment.
+Two sample configurations, to be installed on each node with the certificate paths adjusted for your environment:
+
+* `deploy/containerd/mirror-hosts.toml` is the one to start from when the nodes can reach the registries (or an internal registry). Install it as `/etc/containerd/certs.d/<registry>/hosts.toml`, once per registry you want cached. SIC is a mirror: containerd asks it first and goes on to the registry when SIC does not answer or does not have the content. A node whose SIC pod is down, restarting or being upgraded still pulls, and SIC's own image is never held hostage by SIC. To have SIC fetch and cache what no node has yet, enable upstream fallback for that registry; without it a miss is a `404` and containerd takes the content from the registry directly, uncached.
+* `deploy/containerd/hosts.toml` makes SIC the only host for every registry (`_default`). Use it only when nothing but the peers can supply images, as in an air-gapped cluster without an internal registry. containerd cannot fall through to anything else then, so read "Upgrading" below first.
 
 ## TLS
 
@@ -217,7 +220,7 @@ A node uses one certificate for three things, and each has a requirement that fa
 | --- | --- |
 | Peers calling this node | A DNS SAN equal to `SIC_TLS_SERVER_NAME` (default `steady-image-cache`). Peers are found by IP address but verify this name, so **no IP SAN is needed for peers**. The extended key usage must allow **server auth**. |
 | This node calling peers | The same certificate is presented as a client certificate, so the extended key usage must also allow **client auth**. cert-manager's default usages do not include it. A certificate with no extended key usage at all is allowed for everything. |
-| containerd calling this node | `deploy/containerd/hosts.toml` names SIC as `https://127.0.0.1:5000`, and containerd checks that address: the certificate needs the **IP SAN `127.0.0.1`**. (hosts.toml has no setting to check a name instead.) |
+| containerd calling this node | Both sample `hosts.toml` files name SIC as `https://127.0.0.1:5000`, and containerd checks that address: the certificate needs the **IP SAN `127.0.0.1`**. (hosts.toml has no setting to check a name instead.) |
 
 All of them must be signed by the CA in `ca.crt` (an intermediate CA is fine if `tls.crt` carries it after the certificate) and be in date.
 
@@ -298,7 +301,22 @@ CI validates the manifest against the Kubernetes schemas (strictly, for 1.28 and
 
 ### Bootstrap
 
-With `deploy/containerd/hosts.toml` as the `_default` configuration, SIC is the only host containerd tries. If SIC is not running on a node, nothing can be pulled there, SIC's own image included. So after a node restart or a node-image upgrade the image must already be on the node: keep `imagePullPolicy: IfNotPresent`, pin the tag or digest so a changed tag does not need a pull, and bake the SIC image into the node image or pre-pull it before `hosts.toml` is installed. Restricting `hosts.toml` to the registries you cache, instead of `_default`, leaves the others (the one that holds SIC's image, say) on the normal path.
+With `deploy/containerd/hosts.toml` as the `_default` configuration, SIC is the only host containerd tries. If SIC is not running on a node, nothing can be pulled there, SIC's own image included. So after a node restart or a node-image upgrade the image must already be on the node: keep `imagePullPolicy: IfNotPresent`, pin the tag or digest so a changed tag does not need a pull, and bake the SIC image into the node image or pre-pull it before `hosts.toml` is installed. Using `deploy/containerd/mirror-hosts.toml` for the registries you cache instead of `_default` removes the problem: containerd falls back to the registry, and the registry that holds SIC's image can simply be left without a `hosts.toml`.
+
+### Upgrading
+
+The DaemonSet uses the host network and a fixed port, so a new pod cannot start next to the old one (no surge): the old SIC stops, then the new one starts and needs its image. What that costs depends on the configuration:
+
+* **Mirror configuration (`mirror-hosts.toml`).** Nothing special. While SIC restarts, containerd pulls from the registry; the new image comes from the registry too. Raise `maxUnavailable` (for example `10%`) to roll out faster, since a restarting node only loses its cache for a moment.
+* **SIC as the only host (`_default`).** The new image has to be on the node before the old pod stops, or the new pod sits in `ImagePullBackOff` with nothing able to pull it. Pull it through the running SIC first, on every node:
+
+  ```bash
+  crictl pull ghcr.io/steadyinfratech/steady-image-cache:vX.Y.Z
+  ```
+
+  or, without node access, apply a throwaway DaemonSet that uses the new image in an init container (`command: ["/sic", "--version"]`) next to a container that does nothing (the `pause` image), wait until it is Ready everywhere, delete it, and then change the tag in `deploy/daemonset.yaml`. Then roll out one node at a time (`maxUnavailable: 1`, the default) and watch `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from an archive made with `docker save` or `ctr images export`.
+
+Either way, change the image tag (or digest) in the DaemonSet and nothing else in the same rollout, so that a problem is attributable.
 
 ## Production notes
 

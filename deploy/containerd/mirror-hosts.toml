@@ -1,0 +1,25 @@
+# Install as /etc/containerd/certs.d/<registry>/hosts.toml on each node, one
+# directory per registry you want cached (docker.io, ghcr.io, registry.example.com).
+# For docker.io the server below is registry-1.docker.io; for any other registry
+# it is that registry's own address.
+#
+# SIC is a mirror here, not the only host: containerd tries it first and goes on
+# to the registry itself when SIC does not answer (it is down, restarting or being
+# upgraded) or does not have the content. A node whose SIC pod is gone therefore
+# still pulls, SIC's own image included, and an upgrade of SIC cannot lock the
+# node out of the registry that holds the new image.
+#
+# Use deploy/containerd/hosts.toml (SIC as the only host) instead when no registry
+# can be reached from the nodes except through the peers, such as an air-gapped
+# cluster with no internal registry.
+#
+# For SIC to also fetch and cache what is not on any node yet, set
+# SIC_UPSTREAM_ENABLED=true and list this registry in SIC_UPSTREAM_REGISTRIES.
+# Without that, SIC answers a miss with 404 and containerd takes the content from
+# the registry directly, which is not cached.
+server = "https://registry-1.docker.io"
+
+[host."https://127.0.0.1:5000"]
+  capabilities = ["pull", "resolve"]
+  ca = "/etc/steady-image-cache/ca.crt"
+  client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]
