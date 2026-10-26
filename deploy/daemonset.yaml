@@ -108,8 +108,11 @@ spec:
         # client certificate that kubelet does not have. /healthz answers from
         # the HTTP server itself, so a hung process fails it. The liveness
         # threshold is generous: a restart empties nothing, but it interrupts
-        # transfers that are under way.
-        readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
+        # transfers that are under way. /readyz also checks that the cache
+        # directory can be written, so a node whose cache has become read-only
+        # drops out of the other nodes' peer lists instead of failing their
+        # requests; it keeps serving containerd on its own node meanwhile.
+        readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /readyz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
         livenessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 10, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 6}
       volumes:
       - name: cache
