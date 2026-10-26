@@ -1,0 +1,25 @@
+# Keeps the pinned GitHub Actions (by commit SHA), the Go modules and the base
+# images of the Dockerfile up to date, one grouped pull request a week each, so
+# updates arrive as reviewable changes instead of as a surprise at release time.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
