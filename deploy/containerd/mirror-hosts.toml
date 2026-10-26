@@ -13,13 +13,26 @@
 # can be reached from the nodes except through the peers, such as an air-gapped
 # cluster with no internal registry.
 #
-# For SIC to also fetch and cache what is not on any node yet, set
-# SIC_UPSTREAM_ENABLED=true and list this registry in SIC_UPSTREAM_REGISTRIES.
-# Without that, SIC answers a miss with 404 and containerd takes the content from
-# the registry directly, which is not cached.
+# Tags: the capabilities below are "pull" only, on purpose. containerd then asks
+# the registry itself which digest a tag names, and fetches the manifest and the
+# layers by digest from SIC, so a tag that has moved is never answered from an
+# old cached or imported alias. Add "resolve" only if SIC has upstream fallback
+# enabled for this registry (SIC_UPSTREAM_ENABLED=true and the registry in
+# SIC_UPSTREAM_REGISTRIES): SIC then confirms tags against the registry after
+# SIC_TAG_TTL. Without upstream, SIC cannot check a tag and would serve what it
+# has indefinitely.
+#
+# To have SIC fetch and cache what no node has yet, enable upstream fallback for
+# the registry as above. Without it, a miss is a 404 and containerd takes the
+# content from the registry directly, which is not cached.
 server = "https://registry-1.docker.io"
 
+# Trust for the fallback registry itself. The "ca" under the SIC host below
+# applies to SIC only, so a registry with a private CA that is not in the node's
+# system roots needs its own entry here, or the fallback fails TLS verification.
+# ca = "/etc/containerd/certs.d/registry.example.com/ca.crt"
+
 [host."https://127.0.0.1:5000"]
-  capabilities = ["pull", "resolve"]
+  capabilities = ["pull"]
   ca = "/etc/steady-image-cache/ca.crt"
   client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]
