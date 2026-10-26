@@ -11,8 +11,8 @@ SIC is a young project: the first release was on 2026-10-24. What is covered so 
 Things to know before deploying, each described in the section named:
 
 * Every node can read the whole cache, private images included, and the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
-* Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and pulls that start at the same moment do not coordinate ("Peer requests").
-* Peer discovery lists the pods through the Kubernetes API from every node, which does not scale to very large clusters ("Health and metrics").
+* Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and a node can share a download only once it has received its first bytes, so nodes that all miss in the same instant mostly go to the registry ("Peer requests", "Streaming a miss").
+* Peer discovery lists the pods through the Kubernetes API from every node, so its cost grows with the square of the node count and it is not suited to very large clusters (see the known limits in `CHANGELOG.md`, 1.0.0; "Health and metrics" describes the listing).
 * The containerd import keeps a second copy of every blob on the node ("Production notes").
 * With SIC as the only registry host, an upgrade needs the new image on the node first ("Upgrading").
 
