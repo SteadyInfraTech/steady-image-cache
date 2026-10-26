@@ -11,6 +11,12 @@
 # the containerd import against a real containerd, hosts.toml with mutual TLS,
 # and the sample DaemonSet itself.
 #
+# Later phases (see below) put registries behind SIC, and the last one installs
+# the sample mirror configuration, deploy/containerd/mirror-hosts.toml, for a
+# registry SIC may not contact: containerd must fall back to the registry when
+# SIC does not have the content or is not reachable, and must not take a moved
+# tag from an old cached alias.
+#
 # Needs docker, kind, kubectl, openssl. Run from anywhere:
 #   test/e2e/run.sh            # creates the cluster "sic-e2e" and deletes it
 #   KEEP=1 test/e2e/run.sh     # leave the cluster for inspection
@@ -38,6 +44,8 @@ REGISTRY_IMAGES=(public.ecr.aws/docker/library/registry:2 registry:2)
 HTTPD_IMAGES=(public.ecr.aws/docker/library/httpd:2 httpd:2)  # only for its htpasswd
 PRIVATE=sic-e2e-registry-private
 PRIVATE_HOST=private.e2e.test                              # a registry that wants credentials
+MIRROR=sic-e2e-registry-mirror
+MIRROR_HOST=mirror.e2e.test                                # a registry SIC may NOT contact (phase 4)
 WORK=$(mktemp -d)
 export KUBECONFIG=$WORK/kubeconfig
 
@@ -74,10 +82,20 @@ dump() {
     docker logs --tail 25 "$PRIVATE" 2>&1 | tee "$WORK/preg.txt" || true
     annotate "private registry" < "$WORK/preg.txt"
   fi
+  if docker inspect "$MIRROR" >/dev/null 2>&1; then
+    echo "--- mirror-test registry"
+    docker logs --tail 25 "$MIRROR" 2>&1 | tee "$WORK/mreg.txt" || true
+    annotate "mirror-test registry" < "$WORK/mreg.txt"
+  fi
   if docker inspect "$REGISTRY" >/dev/null 2>&1; then
     echo "--- registry"
     docker logs --tail 25 "$REGISTRY" 2>&1 | tee "$WORK/reg.txt" || true
     annotate "registry" < "$WORK/reg.txt"
+  fi
+  if declare -F extra_diag >/dev/null; then
+    echo "--- extra diagnostics"
+    extra_diag 2>&1 | tee "$WORK/extra.txt" || true
+    annotate "extra diagnostics" < "$WORK/extra.txt"
   fi
   for n in "${NODES[@]:-}"; do
     [ -n "$n" ] || continue
@@ -94,6 +112,7 @@ cleanup() {
   if [ -z "$KEEP" ]; then kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; fi
   docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
   docker rm -f "$PRIVATE" >/dev/null 2>&1 || true
+  docker rm -f "$MIRROR" >/dev/null 2>&1 || true
   rm -rf "$WORK"
   exit $rc
 }
@@ -516,4 +535,178 @@ docker exec "$C" crictl pull "$PRIV@$DP"
 [ "$(blob_gets)" = "$gets" ] || fail "the registry served blobs for $C, which asked a peer"
 [ "$(metric "$C" sic_peer_hits_total)" -ge 3 ] || fail "$C had fewer than 3 peer hits by digest"
 
-log "pass: credentials passed on and never kept, shared between nodes, and the boundary is as documented"
+log "phase 3 passed: credentials passed on and never kept, shared between nodes, and the boundary is as documented"
+
+# ---------------------------------------------------------------------------
+# Phase 4: SIC as a mirror (deploy/containerd/mirror-hosts.toml).
+#
+# The registry here is one SIC is NOT allowed to contact (it is not in
+# SIC_UPSTREAM_REGISTRIES), as with the sample DaemonSet's upstream fallback off.
+# containerd gets the shipped sample, with only the registry's name and its CA
+# filled in, so that a change to that file that breaks it fails here:
+#
+#   - SIC does not have the content: containerd goes on to the registry. What it
+#     fetched there reaches SIC through the containerd import, and the next node
+#     gets it from its peer, not from the registry.
+#   - SIC is not reachable (connection refused, as with its pod gone): the pull
+#     still works, straight from the registry.
+#   - A tag that moved: with "pull" only, containerd asks the registry what the
+#     tag names. With "resolve" added and no way for SIC to check a tag, a node
+#     is handed the old digest by a peer's cached alias; this pins that, because
+#     the sample's comment and the README say so.
+# ---------------------------------------------------------------------------
+M=$MIRROR_HOST/e2e/mirror
+LOCAL_M=localhost:5445/e2e/mirror
+
+log "phase 4: a registry SIC may not contact, behind the sample mirror configuration"
+(
+  cd "$WORK"
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$MIRROR_HOST" -keyout mreg.key -out mreg.csr 2>/dev/null
+  openssl x509 -req -in mreg.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -out mreg.crt -extfile <(printf '%s\n' \
+    "subjectAltName=DNS:$MIRROR_HOST" 'extendedKeyUsage=serverAuth' 'keyUsage=critical,digitalSignature') 2>/dev/null
+)
+docker rm -f "$MIRROR" >/dev/null 2>&1 || true
+docker run -d --name "$MIRROR" --network kind -p 127.0.0.1:5445:443 -v "$WORK:/certs:ro" \
+  -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/mreg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/mreg.key \
+  "$REGISTRY_IMAGE" >/dev/null
+mirror_up() { curl -fsS -o /dev/null --cacert "$WORK/ca.crt" --resolve "$MIRROR_HOST:5445:127.0.0.1" "https://$MIRROR_HOST:5445/v2/"; }
+wait_for "the mirror-test registry" 60 mirror_up
+MIRROR_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$MIRROR")
+[ -n "$MIRROR_IP" ] || fail "no address for the mirror-test registry container"
+# Only containerd on the nodes needs the name: SIC never contacts this registry.
+for n in "${NODES[@]}"; do docker exec "$n" sh -c "echo '$MIRROR_IP $MIRROR_HOST' >> /etc/hosts"; done
+
+# The shipped sample, for this registry: its server, and the root-level "ca" the
+# sample shows commented out (the registry's certificate is from the test CA,
+# which the node does not trust unless told to).
+sed -e "s|^server = .*|server = \"https://$MIRROR_HOST\"|" \
+    -e 's|^# ca = .*|ca = "/etc/steady-image-cache/ca.crt"|' \
+    "$ROOT/deploy/containerd/mirror-hosts.toml" > "$WORK/mirror-hosts.toml"
+grep -q '^server = "https://'"$MIRROR_HOST"'"$' "$WORK/mirror-hosts.toml" || fail "mirror-hosts.toml has no server line to point at the test registry"
+grep -q '^ca = "/etc/steady-image-cache/ca.crt"$' "$WORK/mirror-hosts.toml" || fail "mirror-hosts.toml has no commented-out root-level ca line (the fallback registry's trust)"
+grep -q '^ *capabilities = \["pull"\]$' "$WORK/mirror-hosts.toml" || fail "mirror-hosts.toml must advertise exactly [\"pull\"]: see its comment on tags"
+# With "resolve" added, for the control further down.
+sed 's|capabilities = \["pull"\]|capabilities = ["pull", "resolve"]|' "$WORK/mirror-hosts.toml" > "$WORK/mirror-hosts-resolve.toml"
+install_mirror_toml() { # NODE FILE
+  docker exec "$1" mkdir -p "/etc/containerd/certs.d/$MIRROR_HOST"
+  docker cp "$2" "$1:/etc/containerd/certs.d/$MIRROR_HOST/hosts.toml"
+}
+for n in "${NODES[@]}"; do install_mirror_toml "$n" "$WORK/mirror-hosts.toml"; done
+
+# push_m TAG: a new image with random layers under $LOCAL_M:TAG; prints its digest.
+push_m() {
+  local dir
+  dir=$(mktemp -d "$WORK/m-XXXXXX")
+  head -c 3000000 /dev/urandom > "$dir/one"
+  head -c 2000000 /dev/urandom > "$dir/two"
+  printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$dir/Dockerfile"
+  docker build -q -t "$LOCAL_M:$1" "$dir" >/dev/null
+  docker push "$LOCAL_M:$1" | awk '/digest: sha256:/ {print $3}'
+}
+mirror_blob_gets() { docker logs "$MIRROR" 2>&1 | grep -c 'GET /v2/e2e/mirror/blobs/sha256:' || true; }
+m_digest() { docker exec "$1" ctr -n k8s.io images ls "name==$M:$2" | awk 'NR==2 {print $3}'; }
+# sic_serves NODE REF: NODE's SIC answers for the manifest, over mutual TLS as containerd would.
+sic_serves() {
+  docker exec "$1" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/mirror/manifests/$2?ns=$MIRROR_HOST"
+}
+
+# sic_holds_all NODE MANIFEST_DIGEST: NODE's SIC serves the manifest and every
+# blob it names (config and layers). The import copies them one by one, so having
+# the manifest says nothing about the layers: a node that asks in between is
+# answered "not here" for those, and containerd then takes them from the registry.
+sic_holds_all() {
+  local manifest ids d
+  manifest=$(docker exec "$1" curl -fsS --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/mirror/manifests/$2?ns=$MIRROR_HOST") || return 1
+  ids=$(grep -o 'sha256:[0-9a-f]\{64\}' <<<"$manifest" | sort -u)
+  [ -n "$ids" ] || return 1
+  for d in $ids; do
+    docker exec "$1" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
+      --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/mirror/blobs/$d?ns=$MIRROR_HOST" || return 1
+  done
+}
+
+# What a failed wait for the import should show: where each blob of the image is,
+# on node $A, in SIC (by an HTTP HEAD, as containerd would ask), in SIC's cache
+# directory and in containerd's content store, and what the import counted.
+extra_diag() {
+  local mf ids d h
+  echo "import on $A: blobs=$(metric "$A" sic_containerd_imported_blobs_total) errors=$(metric "$A" sic_containerd_import_errors_total) store_errors=$(metric "$A" sic_store_errors_total) disk_full=$(metric "$A" sic_disk_full_total)"
+  mf=$(docker exec "$A" curl -sS --cacert /etc/steady-image-cache/ca.crt --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/mirror/manifests/${DM1:-none}?ns=$MIRROR_HOST" 2>&1) || true
+  ids=$(grep -o 'sha256:[0-9a-f]\{64\}' <<<"$mf" | sort -u)
+  [ -n "$ids" ] || echo "SIC on $A did not return a manifest with digests: ${mf:0:200}"
+  for d in $ids; do
+    h=$(docker exec "$A" curl -s -o /dev/null -w '%{http_code}' -I --cacert /etc/steady-image-cache/ca.crt --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/mirror/blobs/$d?ns=$MIRROR_HOST" 2>&1)
+    echo "$d: SIC HEAD $h; in SIC's cache: $(docker exec "$A" sh -c "ls -l /var/lib/steady-image-cache/blobs/sha256/${d#sha256:} 2>&1 | awk '{print \$5, \$NF}'"); containerd: $(docker exec "$A" ctr -n k8s.io content ls 2>&1 | grep -c "${d#sha256:}" || true) listing(s)"
+  done
+  echo "free space on $A: $(docker exec "$A" df -h /var/lib/steady-image-cache 2>&1 | tail -1)"
+}
+
+wait_for "all three nodes to see all their peers" 90 all_see_peers
+DM1=$(push_m v1)
+[[ $DM1 == sha256:* ]] || fail "could not push to the mirror-test registry (digest '$DM1')"
+echo "pushed $M:v1 = $DM1"
+
+log "SIC does not have it: containerd goes on to the registry, over the registry's own CA"
+miss_before=$(metric "$A" sic_misses_total)
+docker exec "$A" crictl pull "$M:v1"
+[ "$(m_digest "$A" v1)" = "$DM1" ] || fail "$A has '$(m_digest "$A" v1)' for the tag, want $DM1"
+[ "$(metric "$A" sic_misses_total)" -gt "$miss_before" ] || fail "$A's SIC saw no miss: did containerd ask it before the registry?"
+gets_a=$(mirror_blob_gets)
+[ "$gets_a" -ge 3 ] || fail "the registry's log shows $gets_a blob requests after $A's pull, want at least 3 (config and two layers)"
+
+log "what $A fetched there reaches SIC through the import; $B gets it from $A, not from the registry"
+wait_for "$A's SIC to hold the manifest and all its blobs" 90 sic_holds_all "$A" "$DM1"
+wait_for "$A's SIC to serve the tag (an alias imported from containerd)" 90 sic_serves "$A" v1
+peer_before=$(metric "$B" sic_peer_hits_total)
+docker exec "$B" crictl pull "$M:v1"
+[ "$(m_digest "$B" v1)" = "$DM1" ] || fail "$B has '$(m_digest "$B" v1)' for the tag, want $DM1"
+[ "$(mirror_blob_gets)" = "$gets_a" ] || fail "the registry served blobs again for $B ($gets_a -> $(mirror_blob_gets))"
+peer_gain=$(( $(metric "$B" sic_peer_hits_total) - peer_before ))
+[ "$peer_gain" -ge 3 ] || fail "$B had $peer_gain peer hits, want at least 3"
+
+log "the tag moves, and SIC cannot check tags for this registry"
+DM2=$(push_m v1)
+[ "$DM2" != "$DM1" ] || fail "the second image has the first one's digest"
+# $C has never had this tag. A peer's alias says it is $DM1, imported from containerd.
+install_mirror_toml "$C" "$WORK/mirror-hosts-resolve.toml"
+docker exec "$C" crictl pull "$M:v1"
+[ "$(m_digest "$C" v1)" = "$DM1" ] || fail "with resolve, $C has '$(m_digest "$C" v1)' for the moved tag; the documented hazard is that it gets the old $DM1"
+echo "control: with resolve advertised, $C was handed the old digest, as the sample's comment says"
+install_mirror_toml "$C" "$WORK/mirror-hosts.toml"
+gets_before=$(mirror_blob_gets)
+docker exec "$C" crictl pull "$M:v1"
+[ "$(m_digest "$C" v1)" = "$DM2" ] || fail "with pull only, $C has '$(m_digest "$C" v1)' for the moved tag, want $DM2"
+gets_after=$(mirror_blob_gets)
+[ $((gets_after - gets_before)) -ge 3 ] || fail "the new image's blobs did not come from the registry ($gets_before -> $gets_after)"
+
+log "SIC is not reachable: the pull still works, straight from the registry"
+docker exec "$B" iptables --version >/dev/null 2>&1 || fail "no iptables on $B to make SIC unreachable"
+DM3=$(push_m down)
+[[ $DM3 == sha256:* ]] || fail "could not push the third image (digest '$DM3')"
+sic_reachable() { docker exec "$1" bash -c 'exec 3<>/dev/tcp/127.0.0.1/5000' 2>/dev/null; }
+sic_reachable "$B" || fail "SIC on $B is not reachable before the test"
+# What containerd sees when SIC's pod is gone: the connection is refused. Only
+# the node's own loopback traffic to SIC's port is affected, not its peers'.
+docker exec "$B" iptables -I INPUT -p tcp -d 127.0.0.1 --dport 5000 -j REJECT --reject-with tcp-reset
+if sic_reachable "$B"; then fail "SIC on $B is still reachable after blocking its port"; fi
+seen_before=$(( $(metric "$B" sic_misses_total) + $(metric "$B" sic_local_hits_total) + $(metric "$B" sic_peer_hits_total) ))
+gets_before=$(mirror_blob_gets)
+rc=0
+docker exec "$B" crictl pull "$M:down" || rc=$?
+docker exec "$B" iptables -D INPUT -p tcp -d 127.0.0.1 --dport 5000 -j REJECT --reject-with tcp-reset
+[ "$rc" = 0 ] || fail "the pull on $B failed while SIC was unreachable"
+[ "$(m_digest "$B" down)" = "$DM3" ] || fail "$B has '$(m_digest "$B" down)' for the tag, want $DM3"
+gets_after=$(mirror_blob_gets)
+[ $((gets_after - gets_before)) -ge 3 ] || fail "the blobs did not come from the registry ($gets_before -> $gets_after)"
+seen_after=$(( $(metric "$B" sic_misses_total) + $(metric "$B" sic_local_hits_total) + $(metric "$B" sic_peer_hits_total) ))
+[ "$seen_after" = "$seen_before" ] || fail "SIC on $B handled requests while its port was blocked ($seen_before -> $seen_after)"
+wait_for "SIC on $B to be reachable again" 10 sic_reachable "$B"
+
+log "phase 4 passed: the sample mirror falls back when SIC has nothing or is gone, shares what it fetched, and follows a moved tag"

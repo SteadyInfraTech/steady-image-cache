@@ -201,7 +201,10 @@ Metrics on the admin (or main) listener, all counters unless noted: `sic_local_h
 
 ## Registry mirror
 
-See `deploy/containerd/hosts.toml`. Install it as the `_default/hosts.toml` registry configuration on each node, adjusting certificate paths for your environment.
+Two sample configurations, to be installed on each node with the certificate paths adjusted for your environment. In both, `client` names containerd's own client certificate and key, a client-only pair from the same CA (see "TLS"), not the files of the SIC pod: do not copy the DaemonSet's `tls.key` to the node for this.
+
+* `deploy/containerd/mirror-hosts.toml` is the one to start from when the nodes can reach the registries (or an internal registry). Install it as `/etc/containerd/certs.d/<registry>/hosts.toml`, once per registry you want cached. SIC is a mirror: containerd asks it first and goes on to the registry when SIC does not answer or does not have the content. A node whose SIC pod is down, restarting or being upgraded still pulls, and SIC's own image is never held hostage by SIC. The sample advertises only the `pull` capability, not `resolve`: containerd asks the registry which digest a tag names, then fetches the manifest and layers by digest from SIC. A tag that has moved is therefore never answered from an old cached or imported alias, which SIC cannot rule out when it has no way to ask the registry itself. Add `resolve` only when upstream fallback is enabled for that registry (`SIC_UPSTREAM_ENABLED=true` and the registry in `SIC_UPSTREAM_REGISTRIES`); SIC then confirms tags against it after `SIC_TAG_TTL`. A registry with a private CA also needs a root-level `ca` entry in its `hosts.toml` (commented in the sample): the `ca` under the SIC host trusts SIC only, so without one the fallback to the registry fails TLS verification. To have SIC fetch and cache what no node has yet, enable upstream fallback for that registry; without it a miss is a `404` and containerd takes the content from the registry directly, uncached.
+* `deploy/containerd/hosts.toml` makes SIC the only host for every registry (`_default`). Use it only when nothing but the peers can supply images, as in an air-gapped cluster without an internal registry. containerd cannot fall through to anything else then, so read "Upgrading" below first.
 
 ## TLS
 
@@ -219,7 +222,7 @@ A node uses one certificate for three things, and each has a requirement that fa
 | --- | --- |
 | Peers calling this node | A DNS SAN equal to `SIC_TLS_SERVER_NAME` (default `steady-image-cache`). Peers are found by IP address but verify this name, so **no IP SAN is needed for peers**. The extended key usage must allow **server auth**. |
 | This node calling peers | The same certificate is presented as a client certificate, so the extended key usage must also allow **client auth**. cert-manager's default usages do not include it. A certificate with no extended key usage at all is allowed for everything. |
-| containerd calling this node | `deploy/containerd/hosts.toml` names SIC as `https://127.0.0.1:5000`, and containerd checks that address: the certificate needs the **IP SAN `127.0.0.1`**. (hosts.toml has no setting to check a name instead.) |
+| containerd calling this node | Both sample `hosts.toml` files name SIC as `https://127.0.0.1:5000`, and containerd checks that address: the certificate needs the **IP SAN `127.0.0.1`**. (hosts.toml has no setting to check a name instead.) |
 
 All of them must be signed by the CA in `ca.crt` (an intermediate CA is fine if `tls.crt` carries it after the certificate) and be in date.
 
@@ -275,6 +278,8 @@ A second phase puts a real registry (`registry:2`, served over HTTPS with a cert
 
 A third phase puts a second registry that wants a password (HTTP Basic) behind SIC. A pull with no credentials or the wrong ones is refused and nothing is fetched; with the right ones it works, the password is found neither in SIC's cache directory nor in its logs, and the next node gets the blobs from its peer. The same phase pins the boundary described under "Upstream fallback": a node that has fetched an image with credentials serves its tag to a client that has none, a node that has fetched nothing cannot, and a digest is handed over by any peer that has it.
 
+A fourth phase installs the sample mirror configuration, `deploy/containerd/mirror-hosts.toml` (only the registry's name and its CA filled in), for a registry that SIC is not allowed to contact. It checks that containerd goes on to the registry when SIC has nothing, over the registry's own CA through the sample's root-level `ca`; that what it fetched there reaches SIC through the containerd import, so the next node gets it from its peer and the registry serves no blob twice; that a pull still works, straight from the registry, while SIC's port refuses connections on the node, as it does when its pod is gone; and that a moved tag is followed with the sample's `pull`-only capabilities. It also pins the hazard the sample warns about: with `resolve` added and no way for SIC to check tags, a node is handed the old digest by a peer's imported alias.
+
 `MODE=registries test/e2e/run.sh` (the workflow `e2e-registries.yml`, run on release tags, weekly and by hand, not on every pull request) deploys the same way and pulls from public ECR and GHCR through their own anonymous token services, then from a second node through the first. Public registries throttle shared addresses, so a registry that keeps answering `429` is skipped with a warning and the others still decide the result; the run fails if every registry was throttled, since then nothing was checked. It does not cover Docker Hub or private images behind a token service; the relay of their challenges is tested in the unit tests against a fake registry.
 
 ## Endpoints
@@ -301,7 +306,22 @@ CI validates the manifest against the Kubernetes schemas (strictly, for 1.28 and
 
 ### Bootstrap
 
-With `deploy/containerd/hosts.toml` as the `_default` configuration, SIC is the only host containerd tries. If SIC is not running on a node, nothing can be pulled there, SIC's own image included. So after a node restart or a node-image upgrade the image must already be on the node: keep `imagePullPolicy: IfNotPresent`, pin the tag or digest so a changed tag does not need a pull, and bake the SIC image into the node image or pre-pull it before `hosts.toml` is installed. Restricting `hosts.toml` to the registries you cache, instead of `_default`, leaves the others (the one that holds SIC's image, say) on the normal path.
+With `deploy/containerd/hosts.toml` as the `_default` configuration, SIC is the only host containerd tries. If SIC is not running on a node, nothing can be pulled there, SIC's own image included. So after a node restart or a node-image upgrade the image must already be on the node: keep `imagePullPolicy: IfNotPresent`, pin the tag or digest so a changed tag does not need a pull, and bake the SIC image into the node image or pre-pull it before `hosts.toml` is installed. Using `deploy/containerd/mirror-hosts.toml` for the registries you cache instead of `_default` removes the problem: containerd falls back to the registry, and the registry that holds SIC's image can simply be left without a `hosts.toml`.
+
+### Upgrading
+
+The DaemonSet uses the host network and a fixed port, so a new pod cannot start next to the old one (no surge): the old SIC stops, then the new one starts and needs its image. What that costs depends on the configuration:
+
+* **Mirror configuration (`mirror-hosts.toml`).** Nothing special. While SIC restarts, containerd pulls from the registry; the new image comes from the registry too. Raise `maxUnavailable` (for example `10%`) to roll out faster, since a restarting node only loses its cache for a moment.
+* **SIC as the only host (`_default`).** The new image has to be on the node before the old pod stops, or the new pod sits in `ImagePullBackOff` with nothing able to pull it. Pulling it through SIC works only when SIC can get it from somewhere: from a peer that already has it, or from the registry if upstream fallback is enabled for the registry that holds it. With the sample's `SIC_UPSTREAM_ENABLED=false` no node has it yet, a `crictl pull` gets a `404`, and nothing falls through. So seed it first:
+
+  1. On one node, load the image into containerd's `k8s.io` namespace from an archive made with `docker save` or `ctr images export`: `ctr -n k8s.io images import sic-vX.Y.Z.tar`. By default this loads only the platform of the node it runs on (`--all-platforms` is off for `ctr images import` and `ctr images export`), so on a cluster with more than one CPU architecture seed one node per architecture; a node of another architecture asks for a manifest and layers that no peer has, and with upstream off that pull fails.
+  2. SIC copies containerd's content and image names into its cache when it starts and every `SIC_IMPORT_INTERVAL` (five minutes by default), one blob at a time. Do not go on until `crictl pull` of the exact image reference you will deploy succeeds on a second node of the same architecture that does not have it. `sic_containerd_imported_blobs_total` is not a signal for this: it counts every blob of the whole content store, so it rises for unrelated blobs, and for this image's manifest, before its layers are in SIC.
+  3. Pull it on every other node: `crictl pull ghcr.io/steadyinfratech/steady-image-cache:vX.Y.Z`. Each is served by a peer. Asking is capped at `SIC_PEER_MAX_TRIES` peers per miss, so on a cluster larger than that, seed a few nodes per architecture, or load the archive on every node. (Enabling upstream fallback for the registry that holds the image makes steps 1 and 2 unnecessary.)
+
+  A throwaway DaemonSet that uses the new image in an init container is an alternative to `crictl pull` for getting it onto every node without node access, but it depends on the same seeding. Only then change the tag in `deploy/daemonset.yaml` and roll out one node at a time (`maxUnavailable: 1`, the default), watching `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from the same archive.
+
+Either way, change the image tag (or digest) in the DaemonSet and nothing else in the same rollout, so that a problem is attributable.
 
 ## Production notes
 
