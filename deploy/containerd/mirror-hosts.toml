@@ -35,4 +35,9 @@ server = "https://registry-1.docker.io"
 [host."https://127.0.0.1:5000"]
   capabilities = ["pull"]
   ca = "/etc/steady-image-cache/ca.crt"
+  # containerd's own client certificate, for the mutual TLS that SIC requires: a
+  # client-only pair from the same CA as SIC's certificate (README, "TLS"), put on
+  # the node by your provisioning. Do not copy the DaemonSet's tls.key here: that
+  # is the server key of the SIC pod, and a copy readable on the node widens what
+  # its exposure costs.
   client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]
