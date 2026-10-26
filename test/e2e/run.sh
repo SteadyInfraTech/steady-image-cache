@@ -607,6 +607,24 @@ sic_serves() {
     "https://127.0.0.1:5000/v2/e2e/mirror/manifests/$2?ns=$MIRROR_HOST"
 }
 
+# sic_holds_all NODE MANIFEST_DIGEST: NODE's SIC serves the manifest and every
+# blob it names (config and layers). The import copies them one by one, so having
+# the manifest says nothing about the layers: a node that asks in between is
+# answered "not here" for those, and containerd then takes them from the registry.
+sic_holds_all() {
+  local manifest ids d
+  manifest=$(docker exec "$1" curl -fsS --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/mirror/manifests/$2?ns=$MIRROR_HOST") || return 1
+  ids=$(grep -o 'sha256:[0-9a-f]\{64\}' <<<"$manifest" | sort -u)
+  [ -n "$ids" ] || return 1
+  for d in $ids; do
+    docker exec "$1" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
+      --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/mirror/blobs/$d?ns=$MIRROR_HOST" || return 1
+  done
+}
+
 wait_for "all three nodes to see all their peers" 90 all_see_peers
 DM1=$(push_m v1)
 [[ $DM1 == sha256:* ]] || fail "could not push to the mirror-test registry (digest '$DM1')"
@@ -621,7 +639,7 @@ gets_a=$(mirror_blob_gets)
 [ "$gets_a" -ge 3 ] || fail "the registry's log shows $gets_a blob requests after $A's pull, want at least 3 (config and two layers)"
 
 log "what $A fetched there reaches SIC through the import; $B gets it from $A, not from the registry"
-wait_for "$A's SIC to serve the manifest by digest" 90 sic_serves "$A" "$DM1"
+wait_for "$A's SIC to hold the manifest and all its blobs" 90 sic_holds_all "$A" "$DM1"
 wait_for "$A's SIC to serve the tag (an alias imported from containerd)" 90 sic_serves "$A" v1
 peer_before=$(metric "$B" sic_peer_hits_total)
 docker exec "$B" crictl pull "$M:v1"
