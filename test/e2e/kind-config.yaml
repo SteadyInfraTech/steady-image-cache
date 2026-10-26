@@ -8,6 +8,12 @@ containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry]
     config_path = "/etc/containerd/certs.d"
+# kind discards a layer from containerd's content store once it is unpacked.
+# SIC fills its cache from that store, so the layers a pull fetched through the
+# registry fallback would never reach it (a stock containerd keeps them).
+- |-
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    discard_unpacked_layers = false
 nodes:
 - role: control-plane
 - role: worker
