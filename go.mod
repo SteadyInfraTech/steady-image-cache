@@ -5,7 +5,7 @@ go 1.26.10
 require (
 	github.com/containerd/containerd v1.7.36
 	github.com/opencontainers/go-digest v1.0.0
-	github.com/opencontainers/image-spec v1.1.0
+	github.com/opencontainers/image-spec v1.1.1
 )
 
 require (
