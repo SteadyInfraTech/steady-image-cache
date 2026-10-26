@@ -46,8 +46,12 @@ type Store struct {
 	root           string
 	writeMu        sync.Mutex // guards the per-digest writer-lock map
 	writes         map[string]*blobWriteLock
-	mu             sync.RWMutex
+	mu             sync.RWMutex // guards aliases and root; never held across disk I/O
 	aliases        map[string]string
+	aliasSaveMu    sync.Mutex // one alias write at a time; see setAlias
+
+	// beforeAliasSave, when set (by tests), runs at the start of each alias save.
+	beforeAliasSave func()
 
 	minFree    atomic.Int64
 	minFreePct atomic.Int64
@@ -669,23 +673,34 @@ func (s *Store) SetAliasIfAbsent(ns, repo, ref, d string) (bool, error) {
 	return true, nil
 }
 
+// setAlias records one alias. The alias file is rewritten as a whole, which
+// takes as long as the file is big and ends in an fsync, so none of that may
+// happen while holding s.mu: every manifest request looks a tag up with Resolve,
+// and would otherwise wait for the disk. Writers are serialized by aliasSaveMu,
+// so nothing changes the map between taking a copy of it and publishing the
+// result, and an alias becomes visible only after it has been saved.
 func (s *Store) setAlias(k, d string, onlyIfAbsent bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.aliasSaveMu.Lock()
+	defer s.aliasSaveMu.Unlock()
+	s.mu.RLock()
 	previous, existed := s.aliases[k]
 	if existed && (previous == d || onlyIfAbsent) {
+		s.mu.RUnlock()
 		return nil
 	}
-	s.aliases[k] = d
-	if err := s.saveLocked(); err != nil {
-		// Do not expose an alias in memory when its durable update failed.
-		if existed {
-			s.aliases[k] = previous
-		} else {
-			delete(s.aliases, k)
-		}
-		return err
+	root := s.root
+	next := make(map[string]string, len(s.aliases)+1)
+	for key, v := range s.aliases {
+		next[key] = v
 	}
+	s.mu.RUnlock()
+	next[k] = d
+	if err := s.saveAliases(root, next); err != nil {
+		return err // nothing was published
+	}
+	s.mu.Lock()
+	s.aliases[k] = d
+	s.mu.Unlock()
 	return nil
 }
 
@@ -706,14 +721,19 @@ func (s *Store) AliasChecked(ns, repo, ref string) (time.Time, bool) {
 	return time.Unix(t, 0), ok
 }
 
-// saveLocked writes the alias file via a temporary file and a rename, so a
-// crash can never leave a half-written aliases.json behind.
-func (s *Store) saveLocked() error {
-	b, err := json.MarshalIndent(s.aliases, "", "  ")
+// saveAliases writes aliases to root/aliases.json via a temporary file and a
+// rename, so a crash can never leave a half-written aliases.json behind. The
+// document is compact: nobody reads it by eye often enough to pay for the
+// indentation on every write.
+func (s *Store) saveAliases(root string, aliases map[string]string) error {
+	if s.beforeAliasSave != nil {
+		s.beforeAliasSave()
+	}
+	b, err := json.Marshal(aliases)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.root, ".aliases-")
+	tmp, err := os.CreateTemp(root, ".aliases-")
 	if err != nil {
 		return err
 	}
@@ -732,7 +752,7 @@ func (s *Store) saveLocked() error {
 	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), filepath.Join(s.root, "aliases.json"))
+	return os.Rename(tmp.Name(), filepath.Join(root, "aliases.json"))
 }
 
 // Resolve maps a tag to a digest. A digest reference resolves to itself,
