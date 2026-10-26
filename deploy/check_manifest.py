@@ -57,13 +57,17 @@ for p in c.get("ports", []):
           "hostPort and containerPort must both be the SIC_LISTEN port (hostNetwork)")
 
 # --- probes: both exist and use the admin port, because the main one needs a client certificate ---
-for name in ("readinessProbe", "livenessProbe"):
+# Readiness may use /readyz (cache directory must be writable) or /healthz. The
+# manifest names a released image, so it can only use /readyz once that release
+# has it (RELEASING.md); liveness must stay on /healthz either way, so that a
+# broken cache never restarts the process.
+for name, want in (("readinessProbe", ("/readyz", "/healthz")), ("livenessProbe", ("/healthz",))):
     pr = c.get(name)
     check(pr is not None, f"{name} is missing")
     if pr:
         h = pr.get("httpGet", {})
-        check(h.get("port") == admin and h.get("scheme") == "HTTP" and h.get("path") == "/healthz",
-              f"{name} must GET /healthz over HTTP on the admin port {admin}")
+        check(h.get("port") == admin and h.get("scheme") == "HTTP" and h.get("path") in want,
+              f"{name} must GET {' or '.join(want)} over HTTP on the admin port {admin}")
         check(h.get("host") == "127.0.0.1", f"{name} must target 127.0.0.1 (the admin port listens on loopback only)")
 lp = c.get("livenessProbe", {})
 check(lp.get("failureThreshold", 3) * lp.get("periodSeconds", 10) >= 60,

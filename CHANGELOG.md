@@ -5,6 +5,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 ## Unreleased
 
 - Saving a new tag no longer blocks tag lookups. The alias file was rewritten and fsynced while holding the lock that every manifest request takes to resolve a tag, so a lookup waited as long as the write took (measured: about 20 ms at 10,000 tags and 240 ms at 100,000). Lookups now wait for nothing; an alias still becomes visible only after it has been saved. `aliases.json` is written compactly instead of indented. Saving one new tag still costs time proportional to the number of tags (about 150 ms at 100,000 in the same measurement); bounding or restructuring the alias store is a separate change.
+- New `GET /readyz` on the admin and main listeners: it answers `503` with the reason when the cache directory cannot be written (read-only, unmounted, permissions), and `200` otherwise. The sample DaemonSet's readiness probe should use it from this release on (the manifest changes together with its image tag), so a node with a broken cache leaves the other nodes' peer lists within one discovery interval instead of staying in them and failing their requests. A full disk does not make a node unready: it can still serve what it holds. `/healthz` is unchanged and remains the liveness probe.
 
 ## 1.0.3 - 2026-10-26
 

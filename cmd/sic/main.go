@@ -12,6 +12,7 @@ import (
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/config"
 	cd "github.com/SteadyInfraTech/steady-image-cache/internal/containerd"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/health"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
@@ -19,11 +20,6 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/version"
 )
-
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
-}
 
 func main() {
 	if version.Requested(os.Args[1:]) {
@@ -155,7 +151,8 @@ func main() {
 	mux.Handle("/v2/", h)
 	mux.Handle("/v2", h)
 	mux.Handle("/metrics", m)
-	mux.HandleFunc("/healthz", healthz)
+	mux.HandleFunc("/healthz", health.Live)
+	mux.Handle("/readyz", health.Ready(st.Writable))
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	// Health and metrics on a plain-HTTP address for kubelet probes and local
@@ -164,7 +161,8 @@ func main() {
 	if cfg.AdminListen != "" {
 		am := http.NewServeMux()
 		am.Handle("/metrics", m)
-		am.HandleFunc("/healthz", healthz)
+		am.HandleFunc("/healthz", health.Live)
+		am.Handle("/readyz", health.Ready(st.Writable))
 		admin = &http.Server{Addr: cfg.AdminListen, Handler: am, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			log.Printf("SIC admin HTTP %s", cfg.AdminListen)
