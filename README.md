@@ -4,6 +4,20 @@ A node-local, peer-assisted OCI registry cache for Kubernetes/containerd, design
 
 **Project website and documentation:** https://steadyinfra.com/sic/
 
+## Status
+
+SIC is a young project: the first release was on 2026-10-24. What is covered so far: unit and race-detector tests, fuzzing of request and pod-list parsing, fault-injection tests of the cache, and an end-to-end test on a three-node [kind](https://kind.sigs.k8s.io/) cluster that includes real registries (see "End-to-end test"). What is not covered yet: clusters beyond a handful of nodes, long-running soak and failure-injection tests, and containerd versions other than the one the kind node image ships. Published numbers for rollout time and registry traffic do not exist yet either, so measure on your own cluster before relying on it for one.
+
+Things to know before deploying, each described in the section named:
+
+* Every node can read the whole cache, private images included, and the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
+* Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and a node can share a download only once it has received its first bytes, so nodes that all miss in the same instant mostly go to the registry ("Peer requests", "Streaming a miss").
+* Peer discovery lists the pods through the Kubernetes API from every node, so its cost grows with the square of the node count and it is not suited to very large clusters (see the known limits in `CHANGELOG.md`, 1.0.0; "Health and metrics" describes the listing).
+* The containerd import keeps a second copy of every blob on the node ("Production notes").
+* With SIC as the only registry host, an upgrade needs the new image on the node first ("Upgrading").
+
+The settings, the metric names and the HTTP paths are the public interface and follow semantic versioning (see `CHANGELOG.md`); anything not listed there may change in a minor release.
+
 ## Highlights
 
 * OCI manifest and blob proxy/cache with containerd `?ns=` registry namespace handling.
