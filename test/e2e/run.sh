@@ -92,6 +92,11 @@ dump() {
     docker logs --tail 25 "$REGISTRY" 2>&1 | tee "$WORK/reg.txt" || true
     annotate "registry" < "$WORK/reg.txt"
   fi
+  if declare -F extra_diag >/dev/null; then
+    echo "--- extra diagnostics"
+    extra_diag 2>&1 | tee "$WORK/extra.txt" || true
+    annotate "extra diagnostics" < "$WORK/extra.txt"
+  fi
   for n in "${NODES[@]:-}"; do
     [ -n "$n" ] || continue
     echo "--- containerd on $n"
@@ -623,6 +628,24 @@ sic_holds_all() {
       --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
       "https://127.0.0.1:5000/v2/e2e/mirror/blobs/$d?ns=$MIRROR_HOST" || return 1
   done
+}
+
+# What a failed wait for the import should show: where each blob of the image is,
+# on node $A, in SIC (by an HTTP HEAD, as containerd would ask), in SIC's cache
+# directory and in containerd's content store, and what the import counted.
+extra_diag() {
+  local mf ids d h
+  echo "import on $A: blobs=$(metric "$A" sic_containerd_imported_blobs_total) errors=$(metric "$A" sic_containerd_import_errors_total) store_errors=$(metric "$A" sic_store_errors_total) disk_full=$(metric "$A" sic_disk_full_total)"
+  mf=$(docker exec "$A" curl -sS --cacert /etc/steady-image-cache/ca.crt --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/mirror/manifests/${DM1:-none}?ns=$MIRROR_HOST" 2>&1) || true
+  ids=$(grep -o 'sha256:[0-9a-f]\{64\}' <<<"$mf" | sort -u)
+  [ -n "$ids" ] || echo "SIC on $A did not return a manifest with digests: ${mf:0:200}"
+  for d in $ids; do
+    h=$(docker exec "$A" curl -s -o /dev/null -w '%{http_code}' -I --cacert /etc/steady-image-cache/ca.crt --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/mirror/blobs/$d?ns=$MIRROR_HOST" 2>&1)
+    echo "$d: SIC HEAD $h; in SIC's cache: $(docker exec "$A" sh -c "ls -l /var/lib/steady-image-cache/blobs/sha256/${d#sha256:} 2>&1 | awk '{print \$5, \$NF}'"); containerd: $(docker exec "$A" ctr -n k8s.io content ls 2>&1 | grep -c "${d#sha256:}" || true) listing(s)"
+  done
+  echo "free space on $A: $(docker exec "$A" df -h /var/lib/steady-image-cache 2>&1 | tail -1)"
 }
 
 wait_for "all three nodes to see all their peers" 90 all_see_peers
