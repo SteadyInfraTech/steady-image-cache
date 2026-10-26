@@ -4,6 +4,8 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Saving a new tag no longer blocks tag lookups. The alias file was rewritten and fsynced while holding the lock that every manifest request takes to resolve a tag, so a lookup waited as long as the write took (measured: about 20 ms at 10,000 tags and 240 ms at 100,000). Lookups now wait for nothing; an alias still becomes visible only after it has been saved. `aliases.json` is written compactly instead of indented. Saving one new tag still costs time proportional to the number of tags (about 150 ms at 100,000 in the same measurement); bounding or restructuring the alias store is a separate change.
+
 ## 1.0.3 - 2026-10-26
 
 - A cached blob that could not be read (no file descriptors left, an I/O error) was deleted and counted as corrupt when the same blob was stored again. Only a blob that was read in full and does not match its digest is removed now.
