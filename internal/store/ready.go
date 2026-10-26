@@ -25,13 +25,19 @@ func (s *Store) Writable() error {
 	if err != nil {
 		return probeResult(err)
 	}
+	// The write path syncs before it renames, and a filesystem can take a
+	// buffered write and fail only on the sync, so the probe has to sync too.
 	_, werr := f.Write([]byte{0})
+	var serr error
+	if werr == nil {
+		serr = f.Sync()
+	}
 	cerr := f.Close()
 	rerr := s.removeBlob(f.Name())
 	if errors.Is(rerr, os.ErrNotExist) {
 		rerr = nil
 	}
-	return probeResult(errors.Join(werr, cerr, rerr))
+	return probeResult(errors.Join(werr, serr, cerr, rerr))
 }
 
 // probeResult tags err as a local failure, except that a full disk is not one.

@@ -74,3 +74,43 @@ func TestWritableReportsAFailedRemoval(t *testing.T) {
 	// Clean up the file the failing remover left, as the next start would.
 	removePartials(filepath.Join(s.root, "blobs", "sha256"))
 }
+
+// flakyFile accepts writes and fails on Sync, as a filesystem with a failing
+// device can.
+type flakyFile struct {
+	*os.File
+	syncErr error
+}
+
+func (f flakyFile) Sync() error { return f.syncErr }
+
+func TestWritableFailsWhenTheFileCannotBeSynced(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		syncErr error
+		wantErr bool
+	}{
+		{"I/O error", syscall.EIO, true},
+		{"full disk", syscall.ENOSPC, false},
+	} {
+		s.createBlobTemp = func(dir, pattern string) (blobTempFile, error) {
+			f, err := os.CreateTemp(dir, pattern)
+			return flakyFile{f, tc.syncErr}, err
+		}
+		err := s.Writable()
+		if tc.wantErr && !errors.Is(err, ErrLocal) {
+			t.Errorf("%s: got %v, want ErrLocal", tc.name, err)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("%s: got %v, want ready", tc.name, err)
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Join(s.root, "blobs", "sha256"))
+	if len(entries) != 0 {
+		t.Fatalf("%d probe file(s) left behind", len(entries))
+	}
+}
