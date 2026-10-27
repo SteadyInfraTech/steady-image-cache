@@ -126,6 +126,14 @@ metric() {
   docker exec "$1" curl -fsS http://127.0.0.1:5001/metrics | awk -v n="$2" '$1==n {print $2; found=1} END {if (!found) print 0}'
 }
 
+# cluster_metric NAME: the sum of a counter over every node. With coordination a
+# blob a node asked for may have been fetched from the registry by another node.
+cluster_metric() {
+  local n total=0
+  for n in "${NODES[@]}"; do total=$(( total + $(metric "$n" "$1") )); done
+  echo "$total"
+}
+
 # sees_all_peers NODE: whether NODE's SIC lists every other node's SIC. Waiting
 # for just one is a race: a node that has only seen some of them asks those, and
 # goes to the registry for what only the others hold.
@@ -183,13 +191,13 @@ registries_phase() {
     local img=$1 rc ch_before up_before peer_before
     log "registries: $img on $A, then on $B"
     ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
-    up_before=$(metric "$A" sic_upstream_hits_total)
+    up_before=$(cluster_metric sic_upstream_hits_total)
     pull_retry "$A" "$img" && rc=0 || rc=$?
     [ "$rc" = 0 ] || return "$rc"
     echo "challenges relayed on $A: $ch_before -> $(metric "$A" sic_upstream_auth_challenges_total)"
-    echo "upstream fetches on $A:   $up_before -> $(metric "$A" sic_upstream_hits_total)"
+    echo "upstream fetches in the cluster: $up_before -> $(cluster_metric sic_upstream_hits_total)"
     [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$img: no authentication challenge was relayed on $A"
-    [ $(( $(metric "$A" sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: $A fetched fewer than 2 objects from the registry"
+    [ $(( $(cluster_metric sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: fewer than 2 objects were fetched from the registry for $A"
 
     peer_before=$(metric "$B" sic_peer_hits_total)
     pull_retry "$B" "$img" && rc=0 || rc=$?
@@ -378,7 +386,8 @@ REGISTRY_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAd
 for n in "${NODES[@]}"; do docker exec "$n" sh -c "echo '$REGISTRY_IP $REGISTRY_HOST' >> /etc/hosts"; done
 start_private_registry
 
-# push NAME: a new image with random layers under $LOCAL:v1; prints its digest.
+# push NAME [TAG]: a new image with random layers under $LOCAL:TAG (default v1);
+# prints its digest.
 # The docker daemon treats localhost registries as insecure, so it does not
 # need the test CA.
 push() {
@@ -387,8 +396,8 @@ push() {
   head -c 3000000 /dev/urandom > "$dir/one"
   head -c 2000000 /dev/urandom > "$dir/two"
   printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$dir/Dockerfile"
-  docker build -q -t "$LOCAL:v1" "$dir" >/dev/null
-  docker push "$LOCAL:v1" | awk '/digest: sha256:/ {print $3}'
+  docker build -q -t "$LOCAL:${2:-v1}" "$dir" >/dev/null
+  docker push "$LOCAL:${2:-v1}" | awk '/digest: sha256:/ {print $3}'
 }
 registry_blob_gets() { docker logs "$REGISTRY" 2>&1 | grep -c 'GET /v2/e2e/up/blobs/sha256:' || true; }
 node_digest() { docker exec "$1" ctr -n k8s.io images ls "name==$UP:v1" | awk 'NR==2 {print $3}'; }
@@ -411,7 +420,8 @@ echo "pushed $UP:v1 = $D1"
 log "pull the tag on $A: from the registry, through SIC, over the private CA"
 docker exec "$A" crictl pull "$UP:v1"
 [ "$(node_digest "$A")" = "$D1" ] || fail "$A has $(node_digest "$A") for the tag, want $D1"
-[ "$(metric "$A" sic_upstream_hits_total)" -ge 3 ] || fail "$A made $(metric "$A" sic_upstream_hits_total) upstream fetches, want at least 3 (config and two layers)"
+# A blob may have been fetched by the node that coordinates it, so count the cluster.
+[ "$(cluster_metric sic_upstream_hits_total)" -ge 3 ] || fail "the cluster made $(cluster_metric sic_upstream_hits_total) upstream fetches for $A's pull, want at least 3 (config and two layers)"
 gets_after_a=$(registry_blob_gets)
 [ "$gets_after_a" -ge 3 ] || fail "the registry's log shows $gets_after_a blob requests after $A's pull, want at least 3 (is the log format as expected?)"
 
@@ -430,6 +440,22 @@ sleep 4  # longer than SIC_TAG_TTL
 docker exec "$A" crictl pull "$UP:v1"
 [ "$(node_digest "$A")" = "$D2" ] || fail "$A still has $(node_digest "$A") for the moved tag, want $D2"
 [ "$(metric "$A" sic_tag_changes_total)" -ge 1 ] || fail "$A did not count a tag change"
+
+log "every node pulls a new image at the same moment: the registry serves each blob once"
+push herd herd >/dev/null
+herd_before=$(registry_blob_gets)
+coord_before=$(cluster_metric sic_coordinator_served_total)
+pids=()
+for n in "$A" "$B" "$CLUSTER-control-plane"; do
+  docker exec "$n" crictl pull "$UP:herd" >"$WORK/herd-$n.log" 2>&1 &
+  pids+=($!)
+done
+for pid in "${pids[@]}"; do wait "$pid" || { cat "$WORK"/herd-*.log; fail "a pull of $UP:herd failed"; }; done
+herd_gets=$(( $(registry_blob_gets) - herd_before ))
+echo "registry blob requests for three simultaneous pulls: $herd_gets (config and two layers = 3)"
+echo "coordinator requests served: $coord_before -> $(cluster_metric sic_coordinator_served_total)"
+[ "$herd_gets" = 3 ] || fail "the registry served $herd_gets blobs for three simultaneous pulls, want 3, one per blob"
+[ "$(cluster_metric sic_coordinator_served_total)" -gt "$coord_before" ] || fail "no node answered as a coordinator"
 
 log "the registry goes away: a cached tag is still served, and counted as stale"
 docker stop "$REGISTRY" >/dev/null
@@ -491,7 +517,7 @@ ch_before=$(metric "$A" sic_upstream_auth_challenges_total)
 docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 [ "$(priv_digest "$A")" = "$DP" ] || fail "$A has '$(priv_digest "$A")' for the tag, want $DP"
 [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$A relayed no challenge (did the registry ask for credentials?)"
-[ "$(metric "$A" sic_upstream_hits_total)" -ge 3 ] || fail "$A fetched $(metric "$A" sic_upstream_hits_total) objects from the registry, want at least 3"
+[ "$(cluster_metric sic_upstream_hits_total)" -ge 3 ] || fail "the cluster fetched $(cluster_metric sic_upstream_hits_total) objects from the registry, want at least 3"
 gets=$(blob_gets)
 [ "$gets" -ge 3 ] || fail "the private registry's log shows $gets blob requests, want at least 3 (is the log format as expected?)"
 GETS_BASE=$gets
