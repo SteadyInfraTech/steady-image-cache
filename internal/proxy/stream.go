@@ -146,7 +146,12 @@ func streamable(r *http.Request) bool {
 // wait for the other to start would otherwise wait for ever: a source that has
 // bytes got them from somewhere that had them first, so the chain cannot be a
 // loop.
-func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *download, immediate bool) bool {
+//
+// held makes the response wait, however long the caller allows, until the first
+// byte has arrived before it sends its headers (a peer asking immediate is
+// always served that way). A coordinator's asker bounds the wait for the
+// headers, which is then a bound on the wait for the content.
+func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *download, immediate, held bool) bool {
 	ctx := r.Context()
 	var a *attempt
 	var f *os.File
@@ -154,7 +159,7 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 		dl.mu.Lock()
 		cur, done, ch := dl.cur, dl.done, dl.notify
 		var usable bool
-		if cur != nil && !cur.ended && (!immediate || cur.written > 0) {
+		if cur != nil && !cur.ended && ((!immediate && !held) || cur.written > 0) {
 			a, usable = cur, true
 		}
 		dl.mu.Unlock()

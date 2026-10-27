@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -91,7 +93,11 @@ func main() {
 	if useTLS {
 		scheme = "https"
 	}
+	var self string // this node as the others list it, for coordination
 	if cfg.KubernetesDiscovery {
+		if ip := os.Getenv("HOST_IP"); net.ParseIP(ip) != nil {
+			self = scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(cfg.PeerPort))
+		}
 		k, err := peer.NewKubernetes(cfg.PodNamespace, cfg.PodLabelSelector, os.Getenv("HOST_IP"), cfg.PeerPort, scheme)
 		if err != nil {
 			log.Printf("kubernetes discovery disabled: %v", err)
@@ -133,6 +139,9 @@ func main() {
 		PeerTimeout:        cfg.PeerTimeout,
 		PeerBackoff:        cfg.PeerBackoff,
 		PeerMaxTries:       cfg.PeerMaxTries,
+		Self:               self,
+		Coordinate:         cfg.Coordinate,
+		CoordWait:          cfg.CoordWait,
 		TagTTL:             cfg.TagTTL,
 		Upstream:           cfg.UpstreamEnabled,
 		UpstreamRegistries: cfg.UpstreamRegistries,
