@@ -351,6 +351,28 @@ func (s *Store) path(d string) (string, error) {
 	return filepath.Join(s.root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:")), nil
 }
 
+// openVerifiedUnlocked opens the file at p if its digest was checked and it has
+// not changed since, without taking the blob's lock. It returns nil otherwise.
+func (s *Store) openVerifiedUnlocked(p, d string) *os.File {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil
+	}
+	s.verifiedMu.Lock()
+	known, ok := s.verified[d]
+	s.verifiedMu.Unlock()
+	if !ok || known != stampOf(st) {
+		_ = f.Close()
+		return nil
+	}
+	return f
+}
+
 // Open returns the stored blob d after checking it against its digest. While
 // the blob is being written Open does not wait for the write to finish: it
 // reports the blob as missing (os.ErrNotExist), since it is not available yet.
@@ -363,6 +385,16 @@ func (s *Store) Open(d string) (*os.File, error) {
 	}
 	unlock, ok := s.tryRLockBlob(d)
 	if !ok {
+		// Somebody is writing the blob. If the transfer is a new one there is no
+		// file yet, and that is a miss. If the file is already there, complete
+		// and verified (the writer is storing content that arrived a second time,
+		// and re-checks what is on disk first), it can be read: files are only
+		// ever put in place by a rename, so what is at the path is never half
+		// written. Refusing it would turn a blob that was stored a moment ago
+		// into a miss for whoever asks while the second copy is being checked.
+		if f := s.openVerifiedUnlocked(p, d); f != nil {
+			return f, nil
+		}
 		return nil, fmt.Errorf("blob %s is still being written: %w", d, os.ErrNotExist)
 	}
 	defer unlock()
