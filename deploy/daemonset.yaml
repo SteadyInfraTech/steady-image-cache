@@ -47,7 +47,7 @@ spec:
         # Pin a release tag or an @sha256: digest. There is no moving "latest":
         # IfNotPresent keeps a restart from needing the network (see "Bootstrap"
         # in the README), so a moving tag would never be updated on a node.
-        image: ghcr.io/steadyinfratech/steady-image-cache:v1.0.3
+        image: ghcr.io/steadyinfratech/steady-image-cache:v1.1.0
         imagePullPolicy: IfNotPresent
         # Root is only needed to open containerd's socket, which is usually
         # root:root 0660. Everything else is dropped; without the socket (set
@@ -108,13 +108,11 @@ spec:
         # client certificate that kubelet does not have. /healthz answers from
         # the HTTP server itself, so a hung process fails it. The liveness
         # threshold is generous: a restart empties nothing, but it interrupts
-        # transfers that are under way. From the first release that has it, the
-        # readiness probe should use /readyz instead (RELEASING.md): it also
-        # checks that the cache directory can be written, so a node whose cache
-        # has become read-only drops out of the other nodes' peer lists. This
-        # image predates it, and a probe for a path it lacks would mark every pod
-        # NotReady.
-        readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
+        # transfers that are under way. Readiness uses /readyz, which also checks
+        # that the cache directory can be written, so a node whose cache has
+        # become read-only drops out of the other nodes' peer lists. (Images
+        # before v1.1.0 have no /readyz: use /healthz with those.)
+        readinessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /readyz, port: 5001}, initialDelaySeconds: 2, periodSeconds: 10}
         livenessProbe: {httpGet: {scheme: HTTP, host: 127.0.0.1, path: /healthz, port: 5001}, initialDelaySeconds: 10, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 6}
       volumes:
       - name: cache
