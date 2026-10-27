@@ -12,7 +12,7 @@ Things to know before deploying, each described in the section named:
 
 * Every node can read the whole cache, private images included, and the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
 * Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and a node can share a download only once it has received its first bytes, so nodes that all miss in the same instant mostly go to the registry ("Peer requests", "Streaming a miss").
-* Peer discovery lists the pods through the Kubernetes API from every node, so its cost grows with the square of the node count and it is not suited to very large clusters (see the known limits in `CHANGELOG.md`, 1.0.0; "Health and metrics" describes the listing).
+* Peer discovery asks the Kubernetes API from every node: one list (answered from the API server's cache) and then a watch, so a steady cluster costs the API server almost nothing, but every node still receives an event for every pod change, so a rolling restart of a very large DaemonSet costs the square of the node count in events. It is not tested beyond a few hundred nodes ("Health and metrics" describes it).
 * The containerd import keeps a second copy of every blob on the node ("Production notes").
 * With SIC as the only registry host, an upgrade needs the new image on the node first ("Upgrading").
 
@@ -181,6 +181,7 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | `SIC_PEERS` | unset | Fixed peer URLs, comma separated, instead of or in addition to discovery. |
 | `SIC_PEER_PORT` | `5000` | Port on which discovered peers listen. |
 | `SIC_PEER_TIMEOUT`, `SIC_PEER_BACKOFF`, `SIC_PEER_MAX_TRIES` | `5s`, `30s`, `4` | See "Peer requests". |
+| `SIC_PEER_WATCH` | `true` | Follow pods with a watch instead of listing every 30s. See "Health and metrics". |
 | `SIC_COORDINATE`, `SIC_COORDINATE_WAIT` | `true`, `20s` | One fetch per digest for nodes that miss at the same moment. See "Simultaneous pulls". |
 | `SIC_UPSTREAM_ENABLED` | `false` | Fetch misses from registries. |
 | `SIC_UPSTREAM_REGISTRIES` | unset | The registries that may be contacted, comma separated. Anything else is refused. |
@@ -202,7 +203,7 @@ Metrics on the admin (or main) listener, all counters unless noted: `sic_local_h
 
 The others are named where their behaviour is described above.
 
-`sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods every 30 seconds and keeps only Ready ones, so a node that starts together with the others sees no peers for up to 30 seconds, and a newly Ready neighbour is not asked until the next listing. Until then a miss goes straight to the registry (or fails, if upstream fallback is off).
+`sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods once (with `resourceVersion=0`, which the API server answers from its cache instead of reading etcd) and then follows them with a watch, keeping only Ready ones, so a neighbour that becomes Ready, or goes away, is known within moments. The watch needs the `watch` verb on pods, which the sample RBAC grants; without it the node says so in its log and lists every 30 seconds instead. It lists again when the server ends the watch (after five minutes), when the server says it has lost the point to resume from, and when a miss finds no peers (at most every 5 seconds). `SIC_PEER_WATCH=false` always lists every 30 seconds. While a list or watch cannot be made, the node keeps the peers it knew.
 
 ## Registry mirror
 

@@ -102,6 +102,9 @@ func main() {
 		if err != nil {
 			log.Printf("kubernetes discovery disabled: %v", err)
 		} else {
+			if cfg.PeerWatch {
+				k.EnableWatch()
+			}
 			finders = append(finders, k)
 			go k.Run(ctx, 30*time.Second, log.Printf)
 		}

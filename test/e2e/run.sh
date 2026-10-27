@@ -487,6 +487,11 @@ C=$CLUSTER-control-plane
 log "phase 3: a registry with a password"
 all_see_peers() { for n in "$A" "$B" "$C"; do sees_all_peers "$n" || return 1; done; }
 wait_for "all three nodes to see all their peers" 90 all_see_peers
+# Discovery follows the pods with a watch on a real API server. It logs when a
+# listing or the watch fails, and when the watch is refused and it falls back to
+# listing; none of that may have happened.
+discovery_log=$(kubectl -n kube-system logs -l app=steady-image-cache --tail=-1 --prefix 2>&1 | grep 'peer discovery' || true)
+[ -z "$discovery_log" ] || fail "peer discovery logged problems (is the watch refused?): $discovery_log"
 
 # A docker config of its own, so that nothing is written to the user's.
 export DOCKER_CONFIG=$WORK/dockercfg
