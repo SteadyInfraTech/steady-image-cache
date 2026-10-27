@@ -34,6 +34,10 @@ type Config struct {
 	// Kubernetes discovery) and is otherwise off.
 	Coordinate bool
 	CoordWait  time.Duration
+	// PeerWatch makes Kubernetes discovery follow pod changes with a watch
+	// instead of listing every 30 seconds. It falls back to listing when the
+	// service account may not watch.
+	PeerWatch bool
 	// MinFreeBytes and MinFreePercent are the free disk space that must remain
 	// after a download; the larger applies. MaxCacheBytes limits the cache size
 	// (zero: no limit). When a download would break either, the least recently
@@ -112,6 +116,7 @@ func FromEnv() Config {
 		PeerBackoff:         30 * time.Second,
 		PeerMaxTries:        4,
 		Coordinate:          boolenv("SIC_COORDINATE", true),
+		PeerWatch:           boolenv("SIC_PEER_WATCH", true),
 		CoordWait:           20 * time.Second,
 		MinFreeBytes:        1 << 30,
 		MinFreePercent:      20,

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -68,8 +69,16 @@ type Kubernetes struct {
 	port                        int
 	scheme                      string
 	client                      *http.Client
-	mu                          sync.RWMutex
+	watchClient                 *http.Client // no overall timeout: a watch is long
+	mu                          sync.RWMutex // guards peers, pods and rv
 	peers                       []string
+	pods                        map[string]pod // by name, as of rv
+	rv                          string         // resourceVersion to watch from
+
+	// watch makes Run follow pod changes as they happen instead of listing on a
+	// timer. noWatch is set once the API server refused to watch (no "watch"
+	// permission): discovery then lists on the interval as it does without.
+	watch, noWatch bool
 
 	// poke asks Run to list the pods again before its interval is up. It holds
 	// at most one request, so any number of pokes made while one is waiting
@@ -93,21 +102,27 @@ func (k *Kubernetes) setup() {
 	k.list = k.Refresh
 }
 
+type pod struct {
+	Metadata struct {
+		Name              string  `json:"name"`
+		ResourceVersion   string  `json:"resourceVersion"`
+		DeletionTimestamp *string `json:"deletionTimestamp"`
+	} `json:"metadata"`
+	Status struct {
+		HostIP     string `json:"hostIP"`
+		Phase      string `json:"phase"`
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"conditions"`
+	} `json:"status"`
+}
+
 type podList struct {
-	Items []struct {
-		Metadata struct {
-			Name              string  `json:"name"`
-			DeletionTimestamp *string `json:"deletionTimestamp"`
-		} `json:"metadata"`
-		Status struct {
-			HostIP     string `json:"hostIP"`
-			Phase      string `json:"phase"`
-			Conditions []struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-			} `json:"conditions"`
-		} `json:"status"`
-	} `json:"items"`
+	Metadata struct {
+		ResourceVersion string `json:"resourceVersion"`
+	} `json:"metadata"`
+	Items []pod `json:"items"`
 }
 
 func NewKubernetes(namespace, selector, selfIP string, port int, scheme string) (*Kubernetes, error) {
@@ -127,9 +142,12 @@ func NewKubernetes(namespace, selector, selfIP string, port int, scheme string) 
 		return nil, fmt.Errorf("no valid certificates in %s", caFile)
 	}
 	base := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+	auth := &authTransport{tokenFile: tokenFile, base: base}
 	k := &Kubernetes{
 		namespace: namespace, selector: selector, selfIP: selfIP, port: port, scheme: scheme,
-		client: &http.Client{Timeout: 10 * time.Second, Transport: &authTransport{tokenFile: tokenFile, base: base}},
+		client:      &http.Client{Timeout: 10 * time.Second, Transport: auth},
+		watchClient: &http.Client{Transport: auth},
+		pods:        map[string]pod{},
 	}
 	k.setup()
 	return k, nil
@@ -181,16 +199,16 @@ func parsePeers(pl podList, selfIP, scheme string, port int) []string {
 }
 
 func (k *Kubernetes) Refresh(ctx context.Context) error {
-	host := os.Getenv("KUBERNETES_SERVICE_HOST")
-	port := os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS")
-	if port == "" {
-		port = "443"
+	u, err := k.podsURL(url.Values{
+		// Zero lets the API server answer from its own cache, which costs far
+		// less than the quorum read of etcd that an unset version means, and is
+		// no problem here: a watch from the list's version catches up with
+		// anything the cache was behind on.
+		"resourceVersion": {"0"},
+	})
+	if err != nil {
+		return err
 	}
-	if host == "" {
-		return fmt.Errorf("KUBERNETES_SERVICE_HOST is empty")
-	}
-	u := fmt.Sprintf("https://%s/api/v1/namespaces/%s/pods?%s",
-		net.JoinHostPort(host, port), url.PathEscape(k.namespace), url.Values{"labelSelector": {k.selector}}.Encode())
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return err
@@ -208,11 +226,30 @@ func (k *Kubernetes) Refresh(ctx context.Context) error {
 	if err := json.NewDecoder(resp.Body).Decode(&pl); err != nil {
 		return err
 	}
-	peers := parsePeers(pl, k.selfIP, k.scheme, k.port)
+	pods := make(map[string]pod, len(pl.Items))
+	for _, p := range pl.Items {
+		pods[p.Metadata.Name] = p
+	}
 	k.mu.Lock()
-	k.peers = peers
+	k.pods, k.rv = pods, pl.Metadata.ResourceVersion
+	k.peers = parsePeers(pl, k.selfIP, k.scheme, k.port)
 	k.mu.Unlock()
 	return nil
+}
+
+// podsURL is the address of the labelled pods, with q added to the query.
+func (k *Kubernetes) podsURL(q url.Values) (string, error) {
+	host := os.Getenv("KUBERNETES_SERVICE_HOST")
+	port := os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS")
+	if port == "" {
+		port = "443"
+	}
+	if host == "" {
+		return "", fmt.Errorf("KUBERNETES_SERVICE_HOST is empty")
+	}
+	q.Set("labelSelector", k.selector)
+	return fmt.Sprintf("https://%s/api/v1/namespaces/%s/pods?%s",
+		net.JoinHostPort(host, port), url.PathEscape(k.namespace), q.Encode()), nil
 }
 
 func (k *Kubernetes) Candidates() []string {
@@ -233,35 +270,79 @@ func (k *Kubernetes) Poke() {
 	}
 }
 
-// Run lists the pods every interval, and sooner when poked, but never twice
-// within minGap.
+// EnableWatch makes Run follow changes to the pods as they happen. A node then
+// learns of a neighbour becoming Ready, or going away, at once and not at the
+// next listing, and the API server is asked for one list and one long-lived
+// watch per node instead of a list every interval.
+func (k *Kubernetes) EnableWatch() { k.watch = true }
+
+// Run keeps the peers up to date. Without a watch it lists the pods every
+// interval, and sooner when poked, but never twice within minGap. With one it
+// lists, then follows the changes since that listing; it lists again when the
+// watch ends (the server ends it after 10 intervals, which is also the
+// safety net against a missed event), when the server says the version it was
+// asked to resume from is gone, and when poked, within the same minGap.
 func (k *Kubernetes) Run(ctx context.Context, interval time.Duration, logf func(string, ...any)) {
 	for {
 		started := time.Now()
-		if err := k.list(ctx); err != nil {
+		err := k.list(ctx)
+		if err != nil {
 			logf("peer discovery: %v", err)
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		case <-k.poke:
-			timer.Stop()
-			if wait := k.minGap - time.Since(started); wait > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(wait):
-				}
+		if k.watch && !k.noWatch && err == nil {
+			werr := k.watchOnce(ctx, 10*interval)
+			if ctx.Err() != nil {
+				return
 			}
-			// Pokes that came in while waiting are answered by the listing
-			// that is about to happen.
-			select {
-			case <-k.poke:
-			default:
+			if errors.Is(werr, errWatchUnsupported) {
+				k.noWatch = true
+				logf("peer discovery: %v; listing every %v instead (grant the \"watch\" verb on pods to follow changes as they happen)", werr, interval)
+			} else if werr != nil {
+				logf("peer discovery: watch: %v", werr)
+			}
+			if werr == nil || errors.Is(werr, errWatchGone) {
+				// The watch ended as it is meant to: list again, not sooner
+				// than minGap after the last listing.
+				if wait := k.minGap - time.Since(started); wait > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(wait):
+					}
+				}
+				continue
 			}
 		}
+		if !k.waitForNext(ctx, started, interval) {
+			return
+		}
 	}
+}
+
+// waitForNext waits for the interval, or for a poke and then for minGap since
+// started. It returns false when ctx is done.
+func (k *Kubernetes) waitForNext(ctx context.Context, started time.Time, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	case <-timer.C:
+	case <-k.poke:
+		timer.Stop()
+		if wait := k.minGap - time.Since(started); wait > 0 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(wait):
+			}
+		}
+		// Pokes that came in while waiting are answered by the listing
+		// that is about to happen.
+		select {
+		case <-k.poke:
+		default:
+		}
+	}
+	return true
 }

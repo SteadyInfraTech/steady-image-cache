@@ -205,3 +205,18 @@ func TestCoordinateSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestPeerWatchIsOnUnlessTurnedOff(t *testing.T) {
+	t.Setenv("SIC_PEER_WATCH", "")
+	if !FromEnv().PeerWatch {
+		t.Fatal("off by default")
+	}
+	t.Setenv("SIC_PEER_WATCH", "false")
+	if FromEnv().PeerWatch {
+		t.Fatal("not turned off")
+	}
+	t.Setenv("SIC_PEER_WATCH", "nonsense")
+	if !FromEnv().PeerWatch {
+		t.Fatal("a typo turned it off")
+	}
+}
