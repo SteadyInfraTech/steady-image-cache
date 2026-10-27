@@ -53,16 +53,18 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *Kubernetes) {
 			w.Write([]byte(f.list.Load().(string)))
 			return
 		}
+		// Counting the watch and taking its event channel are one step, so a
+		// test that waits for the count can swap the channel afterwards.
+		f.mu.Lock()
 		f.watches.Add(1)
+		ev := f.events
+		f.mu.Unlock()
 		f.watchURL.Store(r.URL.String())
 		if st := int(f.watchStatus.Load()); st != 0 {
 			w.WriteHeader(st)
 			w.Write([]byte(`{"message":"no"}`))
 			return
 		}
-		f.mu.Lock()
-		ev := f.events
-		f.mu.Unlock()
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
 		for {
@@ -215,6 +217,7 @@ func TestWatchEndingIsAFreshListing(t *testing.T) {
 	f, k := newFakeAPI(t)
 	startRun(t, k, time.Hour)
 	waitPeers(t, k, "https://10.0.0.2:5000")
+	waitFor(t, "the first watch", func() bool { return f.watches.Load() == 1 })
 	f.list.Store(listJSON("20", podJSON("f", "10.0.0.6", true, "19")))
 	f.mu.Lock()
 	old := f.events
