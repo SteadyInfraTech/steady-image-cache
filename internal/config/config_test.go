@@ -186,3 +186,22 @@ func TestPeerMaxTries(t *testing.T) {
 		}
 	}
 }
+
+func TestCoordinateSettings(t *testing.T) {
+	t.Setenv("SIC_COORDINATE", "")
+	t.Setenv("SIC_COORDINATE_WAIT", "")
+	if c := FromEnv(); !c.Coordinate || c.CoordWait != 20*time.Second {
+		t.Fatalf("defaults: %v, %v", c.Coordinate, c.CoordWait)
+	}
+	t.Setenv("SIC_COORDINATE", "false")
+	t.Setenv("SIC_COORDINATE_WAIT", "7s")
+	if c := FromEnv(); c.Coordinate || c.CoordWait != 7*time.Second {
+		t.Fatalf("set: %v, %v", c.Coordinate, c.CoordWait)
+	}
+	for _, bad := range []string{"0", "-1s", "x"} {
+		t.Setenv("SIC_COORDINATE_WAIT", bad)
+		if got := FromEnv().CoordWait; got != 20*time.Second {
+			t.Fatalf("SIC_COORDINATE_WAIT=%q: got %v", bad, got)
+		}
+	}
+}

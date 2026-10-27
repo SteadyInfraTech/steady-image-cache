@@ -33,6 +33,11 @@ const (
 	// that both miss from asking each other (and waiting on themselves).
 	PeerHeader = "X-SIC-Peer"
 
+	// CoordHeader marks a peer request that asks the receiver to fetch the
+	// blob, if it does not have it and it is the blob's coordinator, and to
+	// stream it while it does.
+	CoordHeader = "X-SIC-Coordinate"
+
 	defaultManifestType = "application/vnd.oci.image.manifest.v1+json"
 	maxManifestSize     = 4 << 20
 
@@ -66,6 +71,15 @@ type Options struct {
 	// would otherwise take that many round trips to reach the registry. Zero:
 	// all of them.
 	PeerMaxTries int
+	// Self is this node's own peer address, spelled as the other nodes spell it
+	// (the finder's candidates). Coordinate needs it; without it each node
+	// fetches on its own.
+	Self string
+	// Coordinate makes a miss ask the digest's coordinator first, so nodes that
+	// miss at the same moment share one fetch instead of each going upstream.
+	// CoordWait is how long the coordinator may take to start delivering.
+	Coordinate bool
+	CoordWait  time.Duration
 	// TagTTL is how long a tag keeps pointing at the digest it was last
 	// confirmed to have, when its registry can be asked. Zero: never ask again.
 	TagTTL time.Duration
@@ -97,6 +111,9 @@ type Proxy struct {
 
 	peerTimeout, backoff time.Duration
 	maxTries             int
+	self                 string
+	coordWait            time.Duration
+	coordClient          *http.Client
 	tagTTL               time.Duration
 	tls                  *tlsutil.Reloader
 	serverName           string
@@ -120,6 +137,9 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 	if o.PeerTimeout <= 0 {
 		o.PeerTimeout = 5 * time.Second
 	}
+	if o.CoordWait <= 0 {
+		o.CoordWait = 20 * time.Second
+	}
 	regs := map[string]bool{}
 	for _, r := range o.UpstreamRegistries {
 		if r = strings.ToLower(strings.TrimSpace(r)); r != "" {
@@ -140,6 +160,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		peerTimeout:     o.PeerTimeout,
 		backoff:         o.PeerBackoff,
 		maxTries:        o.PeerMaxTries,
+		coordWait:       o.CoordWait,
 		tagTTL:          o.TagTTL,
 		tls:             o.TLS,
 		serverName:      o.ServerName,
@@ -150,11 +171,16 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		lastLog:         map[string]time.Time{},
 		skipped:         map[string]int{},
 	}
+	if o.Coordinate {
+		px.self = o.Self
+	}
 	if o.TLS != nil {
 		snap := o.TLS.Current()
-		px.peerClient, px.peerGen = px.newPeerClient(&snap), snap.Gen
+		px.peerClient, px.peerGen = px.newPeerClient(&snap, px.peerTimeout), snap.Gen
+		px.coordClient = px.newPeerClient(&snap, px.coordWait)
 	} else {
-		px.peerClient = px.newPeerClient(nil)
+		px.peerClient = px.newPeerClient(nil, px.peerTimeout)
+		px.coordClient = px.newPeerClient(nil, px.coordWait)
 	}
 	return px, nil
 }
@@ -208,9 +234,11 @@ func (p *Proxy) peerAnswered(base string, resp *http.Response) {
 	}
 }
 
-func (p *Proxy) newPeerClient(snap *tlsutil.Snapshot) *http.Client {
+// newPeerClient builds a client for peer requests; header is how long a peer
+// may take to start answering.
+func (p *Proxy) newPeerClient(snap *tlsutil.Snapshot, header time.Duration) *http.Client {
 	// Peer traffic never goes through an HTTP proxy, whatever the environment says.
-	tr := newTransport(p.peerTimeout, p.peerTimeout, false)
+	tr := newTransport(p.peerTimeout, header, false)
 	if snap != nil {
 		tr.TLSClientConfig = snap.ClientConfig(p.serverName)
 	}
@@ -227,11 +255,22 @@ func (p *Proxy) peerHTTP() *http.Client {
 	p.cmu.Lock()
 	defer p.cmu.Unlock()
 	if snap.Gen != p.peerGen {
-		old := p.peerClient
-		p.peerClient, p.peerGen = p.newPeerClient(&snap), snap.Gen
+		old, oldCoord := p.peerClient, p.coordClient
+		p.peerClient, p.peerGen = p.newPeerClient(&snap, p.peerTimeout), snap.Gen
+		p.coordClient = p.newPeerClient(&snap, p.coordWait)
 		old.CloseIdleConnections()
+		oldCoord.CloseIdleConnections()
 	}
 	return p.peerClient
+}
+
+// coordHTTP is peerHTTP for requests to a coordinator, which may take longer
+// to start answering because it fetches the blob first.
+func (p *Proxy) coordHTTP() *http.Client {
+	p.peerHTTP() // rebuilds both after a certificate rotation
+	p.cmu.Lock()
+	defer p.cmu.Unlock()
+	return p.coordClient
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -499,6 +538,13 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		// under way: with a rollout the first node's pull is then passed down
 		// the line while it runs, instead of every other node waiting for it
 		// to finish and then going to the registry.
+		if r.Header.Get(CoordHeader) != "" && streamable(r) && p.coordinates(d) {
+			// This node is the digest's coordinator, and the asking node
+			// is waiting for it to fetch the blob once for all of them.
+			if p.coordinate(w, r, repo, d) {
+				return
+			}
+		}
 		if dl := p.activeDownload(d); dl != nil && streamable(r) && p.stream(w, r, d, dl, true) {
 			p.metrics.PeerStreams.Add(1)
 			return
@@ -521,31 +567,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	var res fetchResult
 	for attempt := 0; ; attempt++ {
-		dl := p.join(d, in.auth, func(dl *download) fetchResult {
-			in := in
-			in.dl = dl
-			if _, err := p.store.Stat(d); err == nil {
-				return fetched
-			}
-			pr := p.fetchPeers(in, path, d)
-			if pr.ok {
-				p.metrics.PeerHits.Add(1)
-				return pr
-			}
-			if pr.status != 0 && pr.status != http.StatusInsufficientStorage {
-				return pr
-			}
-			// A peer's claim that the blob does not fit is not the last word
-			// (see fetchPeers): the registry gets its turn, and the client
-			// hears "insufficient storage" only if nothing else delivered.
-			r := p.fetchUpstream(in, path, d)
-			if r.ok {
-				p.metrics.UpstreamHits.Add(1)
-			} else if r.status == 0 {
-				return pr
-			}
-			return r
-		})
+		dl := p.join(d, in.auth, p.missFetch(in, path, d, true))
 		// A plain GET is answered while the blob is still arriving. Anything
 		// else (a byte range) needs the whole blob, so it waits for it.
 		if streamable(r) && p.stream(w, r, d, dl, false) {
@@ -572,6 +594,51 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	p.metrics.Misses.Add(1)
 	http.Error(w, "blob unavailable", 404)
+}
+
+// missFetch returns the function that fetches the blob d when this node does
+// not have it: from the digest's coordinator if there is another one and asked
+// is set, then from the peers, then from the registry.
+func (p *Proxy) missFetch(in info, path, d string, viaCoordinator bool) func(*download) fetchResult {
+	return func(dl *download) fetchResult {
+		in := in
+		in.dl = dl
+		if _, err := p.store.Stat(d); err == nil {
+			return fetched
+		}
+		if viaCoordinator {
+			if c, ok := p.otherCoordinator(d); ok {
+				cr := p.fetchCoordinator(in, c, path, d)
+				if cr.ok {
+					p.metrics.PeerHits.Add(1)
+					p.metrics.CoordHits.Add(1)
+					return cr
+				}
+				if cr.status != 0 && cr.status != http.StatusInsufficientStorage {
+					return cr
+				}
+				p.metrics.CoordFallbacks.Add(1)
+			}
+		}
+		pr := p.fetchPeers(in, path, d)
+		if pr.ok {
+			p.metrics.PeerHits.Add(1)
+			return pr
+		}
+		if pr.status != 0 && pr.status != http.StatusInsufficientStorage {
+			return pr
+		}
+		// A peer's claim that the blob does not fit is not the last word
+		// (see fetchPeers): the registry gets its turn, and the client
+		// hears "insufficient storage" only if nothing else delivered.
+		r := p.fetchUpstream(in, path, d)
+		if r.ok {
+			p.metrics.UpstreamHits.Add(1)
+		} else if r.status == 0 {
+			return pr
+		}
+		return r
+	}
 }
 
 // downloading reports whether d is being fetched right now.
@@ -753,6 +820,14 @@ func (p *Proxy) peerFailed(base string, e error) {
 // spread over the cluster instead of all going to the same first peer. Peers
 // that failed recently are left out until their back-off has passed.
 func (p *Proxy) shuffledPeers() []string {
+	out := p.livePeers()
+	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	return out
+}
+
+// livePeers returns the known peers that have not failed recently, in no
+// particular order.
+func (p *Proxy) livePeers() []string {
 	all := p.peers.Candidates()
 	if len(all) == 0 {
 		// Nobody is known. That is also what a node sees while its neighbours
@@ -776,7 +851,6 @@ func (p *Proxy) shuffledPeers() []string {
 		}
 	}
 	p.dmu.Unlock()
-	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	return out
 }
 
@@ -896,43 +970,61 @@ func refused(e error) bool {
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	var noSpace fetchResult
 	for _, base := range p.askablePeers() {
-		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
-		if e != nil {
-			p.peerFailed(base, e)
-			continue
+		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, map[string]string{PeerHeader: "1"}, false)
+		if done {
+			return res
 		}
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			p.peerAnswered(base, resp)
-			continue
-		}
-		size := resp.ContentLength
-		e = p.putBlob(d, resp, in.dl)
-		resp.Body.Close()
-		if e == nil {
-			return fetched
-		}
-		if r, ours := p.localFailure(e, d, size); ours {
-			if r.status == http.StatusInsufficientStorage {
-				// The size is whatever this peer declared, and nothing has
-				// been checked yet: a peer that claims more than the disk
-				// holds must not end the miss for the peers (and the registry)
-				// that would tell the truth. If the blob really is too big, the
-				// next one fails the same way, quickly, before any byte is read.
-				noSpace = r
-				continue
-			}
-			return r // no other peer can help, and this one did nothing wrong
-		}
-		if refused(e) {
-			p.metrics.VerifyErrors.Add(1)
-			p.warn("verify:"+base, "refused blob %s from peer %s: %v", d, base, e)
-			p.markDown(base, e)
-		} else {
-			p.peerFailed(base, e)
+		if res.status == http.StatusInsufficientStorage {
+			// The size is whatever this peer declared, and nothing has
+			// been checked yet: a peer that claims more than the disk
+			// holds must not end the miss for the peers (and the registry)
+			// that would tell the truth. If the blob really is too big, the
+			// next one fails the same way, quickly, before any byte is read.
+			noSpace = res
 		}
 	}
 	return noSpace
+}
+
+// tryPeer asks one peer for the blob and stores what it sends. slowOK says the
+// peer may take long to start answering, so that is not held against it. done is false
+// when the next peer should be asked; the result then carries only a possible
+// "insufficient storage".
+func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[string]string, slowOK bool) (res fetchResult, done bool) {
+	resp, e := p.get(in.ctx, c, p.peerURL(base, path, in.ns), hdr)
+	if e != nil {
+		var ne net.Error
+		if slowOK && errors.As(e, &ne) && ne.Timeout() {
+			return fetchResult{}, false // slow to start is not down
+		}
+		p.peerFailed(base, e)
+		return fetchResult{}, false
+	}
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		p.peerAnswered(base, resp)
+		return fetchResult{}, false
+	}
+	size := resp.ContentLength
+	e = p.putBlob(d, resp, in.dl)
+	resp.Body.Close()
+	if e == nil {
+		return fetched, true
+	}
+	if r, ours := p.localFailure(e, d, size); ours {
+		if r.status == http.StatusInsufficientStorage {
+			return r, false
+		}
+		return r, true // no other peer can help, and this one did nothing wrong
+	}
+	if refused(e) {
+		p.metrics.VerifyErrors.Add(1)
+		p.warn("verify:"+base, "refused blob %s from peer %s: %v", d, base, e)
+		p.markDown(base, e)
+	} else {
+		p.peerFailed(base, e)
+	}
+	return fetchResult{}, false
 }
 
 // errBadManifest marks a manifest that was refused.

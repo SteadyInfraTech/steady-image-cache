@@ -27,6 +27,13 @@ type Config struct {
 	// PeerMaxTries limits how many peers one miss asks before it moves on to
 	// the registry (or gives up). Zero means no limit.
 	PeerMaxTries int
+	// Coordinate makes nodes that miss on the same blob at the same moment
+	// share one fetch through that blob's coordinator node. CoordWait is how
+	// long the coordinator may take to start delivering before the asking node
+	// fetches on its own. It needs the node's own address (HOST_IP with
+	// Kubernetes discovery) and is otherwise off.
+	Coordinate bool
+	CoordWait  time.Duration
 	// MinFreeBytes and MinFreePercent are the free disk space that must remain
 	// after a download; the larger applies. MaxCacheBytes limits the cache size
 	// (zero: no limit). When a download would break either, the least recently
@@ -104,6 +111,8 @@ func FromEnv() Config {
 		PeerTimeout:         5 * time.Second,
 		PeerBackoff:         30 * time.Second,
 		PeerMaxTries:        4,
+		Coordinate:          boolenv("SIC_COORDINATE", true),
+		CoordWait:           20 * time.Second,
 		MinFreeBytes:        1 << 30,
 		MinFreePercent:      20,
 		ScrubInterval:       24 * time.Hour,
@@ -153,6 +162,11 @@ func FromEnv() Config {
 	if v := os.Getenv("SIC_PEER_BACKOFF"); v != "" {
 		if d, e := time.ParseDuration(v); e == nil && d >= 0 {
 			c.PeerBackoff = d
+		}
+	}
+	if v := os.Getenv("SIC_COORDINATE_WAIT"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil && d > 0 {
+			c.CoordWait = d
 		}
 	}
 	if v := os.Getenv("SIC_PEER_MAX_TRIES"); v != "" {
