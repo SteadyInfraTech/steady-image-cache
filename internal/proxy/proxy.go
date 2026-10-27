@@ -688,6 +688,15 @@ func (p *Proxy) missFetch(in info, path, d string, viaCoordinator bool) func(*do
 		// (see fetchPeers): the registry gets its turn, and the client
 		// hears "insufficient storage" only if nothing else delivered.
 		r := p.fetchUpstream(in, path, d)
+		// A registry that broke off partway is asked for the rest, as long as
+		// each try gets further than the one before.
+		for try := 0; try < maxResumes && !r.ok && r.status == 0 && dl.resume.Size() > 0; try++ {
+			before := dl.resume.Size()
+			r = p.fetchUpstream(in, path, d)
+			if !r.ok && r.status == 0 && dl.resume.Size() <= before {
+				break // no progress
+			}
+		}
 		if r.ok {
 			p.metrics.UpstreamHits.Add(1)
 		} else if r.status == 0 {
@@ -989,25 +998,105 @@ var (
 	errBuildRequest = errors.New("cannot build request")
 )
 
+// maxResumes bounds how many times one source is asked again for the rest of a
+// blob after it broke off, so that a source that dies every few bytes cannot
+// hold a download for ever. Only attempts that got further than the last one
+// count as progress and are repeated.
+const maxResumes = 3
+
+// rangeFrom is the header that asks for a blob from byte offset on.
+func rangeFrom(offset int64) string { return "bytes=" + strconv.FormatInt(offset, 10) + "-" }
+
+// resumeHeader returns hdr with a Range for the rest of the blob when an
+// earlier attempt of this download left its start behind, and whether it did.
+func resumeHeader(dl *download, hdr map[string]string) (map[string]string, bool) {
+	if dl == nil || dl.resume.Size() == 0 {
+		return hdr, false
+	}
+	out := make(map[string]string, len(hdr)+1)
+	for k, v := range hdr {
+		out[k] = v
+	}
+	out["Range"] = rangeFrom(dl.resume.Size())
+	return out, true
+}
+
+// answered reports whether resp is the answer wanted: 200, or 206 when a range
+// was asked for.
+func answered(resp *http.Response, ranged bool) bool {
+	return resp.StatusCode == http.StatusOK || ranged && resp.StatusCode == http.StatusPartialContent
+}
+
+// parseContentRange reads "bytes START-END/TOTAL".
+func parseContentRange(v string) (start, end, total int64, ok bool) {
+	rest, found := strings.CutPrefix(strings.TrimSpace(v), "bytes ")
+	if !found {
+		return
+	}
+	span, size, found := strings.Cut(rest, "/")
+	if !found {
+		return
+	}
+	first, last, found := strings.Cut(span, "-")
+	if !found {
+		return
+	}
+	var err1, err2, err3 error
+	start, err1 = strconv.ParseInt(first, 10, 64)
+	end, err2 = strconv.ParseInt(last, 10, 64)
+	total, err3 = strconv.ParseInt(size, 10, 64)
+	ok = err1 == nil && err2 == nil && err3 == nil && start >= 0 && end >= start && total > end
+	return
+}
+
 // putBlob stores a response body as the blob d. The server must declare how
 // long the body is: that length is the bound on what gets written, and it has
 // to fit on the disk. Without a declared length a peer could stream data until
 // the disk is full, because the digest can only be checked at the end.
+//
+// When an earlier source of this download broke off, its bytes are kept and a
+// source that answers 206 for the rest completes them. A source that sends
+// everything again (200) replaces them. Either way the digest is checked over
+// the whole blob, so what any source said about the start is not trusted.
 func (p *Proxy) putBlob(d string, resp *http.Response, dl *download, received *atomic.Uint64) error {
 	if resp.ContentLength < 0 {
 		return fmt.Errorf("%w: no Content-Length", errBadContent)
+	}
+	var res *store.Resume
+	if dl != nil {
+		res = &dl.resume
+	}
+	total := resp.ContentLength
+	switch {
+	case res != nil && res.Size() > 0 && resp.StatusCode == http.StatusPartialContent:
+		start, end, size, ok := parseContentRange(resp.Header.Get("Content-Range"))
+		if !ok || start != res.Size() || size != res.Total() || resp.ContentLength != end-start+1 || end+1 != size {
+			p.store.DropResume(res)
+			return fmt.Errorf("%w: a range that does not continue the blob (%q, wanted from %d of %d)", errBadContent, resp.Header.Get("Content-Range"), res.Size(), res.Total())
+		}
+		total = size
+		p.metrics.Resumed.Add(1)
+		p.metrics.ResumedBytes.Add(uint64(start))
+	case resp.StatusCode == http.StatusPartialContent:
+		// Nobody asked for a range.
+		return fmt.Errorf("%w: a partial answer to a request for all of it", errBadContent)
+	case res != nil && res.Size() > 0:
+		p.store.DropResume(res) // all of it comes again
 	}
 	// Counted as it is read, so that content that fails verification or is cut
 	// short still shows as the traffic it cost.
 	body := &countingReader{r: resp.Body, n: received}
 	var err error
-	if dl != nil {
-		_, err = p.store.PutStream(d, body, resp.ContentLength, dl)
-	} else {
-		_, err = p.store.PutVerifiedLimit(d, body, resp.ContentLength)
+	switch {
+	case dl != nil && total > 0:
+		_, err = p.store.PutResumable(d, body, total, dl, res)
+	case dl != nil:
+		_, err = p.store.PutStream(d, body, total, dl)
+	default:
+		_, err = p.store.PutVerifiedLimit(d, body, total)
 	}
 	if errors.Is(err, store.ErrTooLarge) {
-		return fmt.Errorf("%w: longer than the declared %d bytes", errBadContent, resp.ContentLength)
+		return fmt.Errorf("%w: longer than the declared %d bytes", errBadContent, total)
 	}
 	return err
 }
@@ -1058,6 +1147,7 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 // when the next peer should be asked; the result then carries only a possible
 // "insufficient storage".
 func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[string]string, slowOK bool) (res fetchResult, done bool) {
+	hdr, ranged := resumeHeader(in.dl, hdr)
 	resp, e := p.get(in.ctx, c, p.peerURL(base, path, in.ns), hdr)
 	if e != nil {
 		if slowOK && isSlowStart(e) {
@@ -1066,7 +1156,7 @@ func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[s
 		p.peerFailed(base, e)
 		return fetchResult{}, false
 	}
-	if resp.StatusCode != 200 {
+	if !answered(resp, ranged) {
 		resp.Body.Close()
 		p.peerAnswered(base, resp)
 		return fetchResult{}, false
@@ -1223,13 +1313,14 @@ func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 	if !ok {
 		return fetchResult{}
 	}
-	resp, e := p.get(in.ctx, p.upstreamClient, "https://"+host+path, map[string]string{"Authorization": in.auth})
+	hdr, ranged := resumeHeader(in.dl, map[string]string{"Authorization": in.auth})
+	resp, e := p.get(in.ctx, p.upstreamClient, "https://"+host+path, hdr)
 	if e != nil {
 		p.upstreamFailed(host, e)
 		return fetchResult{}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if !answered(resp, ranged) {
 		if r, ok := p.upstreamChallenge(resp); ok {
 			return r
 		}

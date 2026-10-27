@@ -467,7 +467,7 @@ func (s *Store) PutVerified(d string, r io.Reader) (int64, error) {
 // the free disk space, above the reserve set by SetMinFree, before any data is
 // written.
 func (s *Store) PutVerifiedLimit(d string, r io.Reader, max int64) (int64, error) {
-	return s.put(d, r, max, true, nil)
+	return s.put(d, r, max, true, nil, nil)
 }
 
 // Progress observes a store in progress so that its content can be passed on
@@ -486,9 +486,62 @@ type Progress interface {
 	End(err error)
 }
 
+// A Resume carries the start of a blob from one attempt at fetching it to the
+// next, within one download. When a source fails partway, the bytes already
+// written stay in a partial file, and the next source is asked only for the
+// rest (PutResumable). The zero value is "nothing yet".
+//
+// Its owner must call DropResume when the download is over, whatever came of
+// it, or a partial file is left behind until the next start.
+type Resume struct {
+	path        string
+	size, total int64
+}
+
+// Size is how many bytes of the blob are kept.
+func (r *Resume) Size() int64 { return r.size }
+
+// Total is the size of the whole blob, as the source that started it declared.
+func (r *Resume) Total() int64 { return r.total }
+
+// Resumable reports whether a failed transfer left a prefix that is worth
+// continuing: the source failed, as opposed to this node's disk or content
+// that is wrong.
+func Resumable(err error) bool {
+	return err != nil && !errors.Is(err, ErrLocal) && !errors.Is(err, ErrNoSpace) &&
+		!errors.Is(err, ErrDigestMismatch) && !errors.Is(err, ErrTooLarge)
+}
+
+// DropResume deletes what a Resume keeps.
+func (s *Store) DropResume(r *Resume) {
+	if r == nil {
+		return
+	}
+	if r.path != "" {
+		_ = s.removeBlob(r.path)
+	}
+	*r = Resume{}
+}
+
+// PutResumable is PutStream for a blob that may be fetched in pieces: total is
+// the size of the whole blob, and r yields the bytes after the first res.Size()
+// of it, which are already in the partial file that res holds (none, the first
+// time). The prefix is hashed again from the file, so nothing a source said
+// about it is trusted: the digest is checked over all of it at the end, as for
+// any blob.
+//
+// When the source fails partway (Resumable), the partial file stays and res
+// says how much of it there is. Any other failure, and success, leave res empty.
+func (s *Store) PutResumable(d string, r io.Reader, total int64, prog Progress, res *Resume) (int64, error) {
+	if total <= 0 {
+		return 0, errors.New("a resumable blob needs a known size")
+	}
+	return s.put(d, r, total, true, prog, res)
+}
+
 // PutStream is PutVerifiedLimit that reports its progress to prog.
 func (s *Store) PutStream(d string, r io.Reader, max int64, prog Progress) (int64, error) {
-	return s.put(d, r, max, true, prog)
+	return s.put(d, r, max, true, prog, nil)
 }
 
 type progressWriter struct {
@@ -511,21 +564,21 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 // content that containerd already holds must not push out blobs that were
 // fetched for a pull.
 func (s *Store) PutIfRoom(d string, r io.Reader, max int64) (int64, error) {
-	return s.put(d, r, max, false, nil)
+	return s.put(d, r, max, false, nil, nil)
 }
 
-func (s *Store) put(d string, r io.Reader, max int64, evict bool, prog Progress) (int64, error) {
+func (s *Store) put(d string, r io.Reader, max int64, evict bool, prog Progress, res *Resume) (int64, error) {
 	if prog == nil {
-		return s.putLocked(d, r, max, evict, nil)
+		return s.putLocked(d, r, max, evict, nil, res)
 	}
-	n, err := s.putLocked(d, r, max, evict, prog)
+	n, err := s.putLocked(d, r, max, evict, prog, res)
 	// Only now, with the partial file renamed or removed and the blob's lock
 	// released, so that End(nil) means the blob can be opened.
 	prog.End(err)
 	return n, err
 }
 
-func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Progress) (written int64, retErr error) {
+func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Progress, res *Resume) (written int64, retErr error) {
 	unlock := s.lockBlob(d)
 	defer unlock()
 	p, e := s.path(d)
@@ -549,6 +602,7 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		case hashErr != nil:
 			return 0, local(hashErr)
 		case match:
+			s.DropResume(res)
 			return st.Size(), nil
 		default:
 			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -560,18 +614,49 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return 0, local(e)
 	}
+	// How much of the blob is already in a partial file from an earlier attempt.
+	var offset int64
+	if res != nil && res.size > 0 {
+		if st, err := os.Stat(res.path); err == nil && st.Size() >= res.size && res.total == max {
+			offset = res.size
+		} else {
+			s.DropResume(res) // gone, shorter than it says, or for another size
+		}
+	}
 	var reservation *capacityReservation
-	if max > 0 {
+	if max-offset > 0 {
 		var err error
-		reservation, err = s.reserveSpace(max, evict)
+		reservation, err = s.reserveSpace(max-offset, evict)
 		if err != nil {
+			s.DropResume(res)
 			return 0, err
 		}
 		defer reservation.release()
 	}
-	tmp, e := s.createBlobTemp(filepath.Dir(p), ".part-")
-	if e != nil {
-		return 0, local(e)
+	h := sha256.New()
+	var tmp blobTempFile
+	if offset > 0 {
+		f, err := os.OpenFile(res.path, os.O_RDWR, 0)
+		if err == nil {
+			err = f.Truncate(offset)
+		}
+		if err == nil {
+			_, err = io.CopyN(h, f, offset) // leaves the file positioned at its end
+		}
+		if err != nil {
+			if f != nil {
+				f.Close()
+			}
+			s.DropResume(res)
+			return 0, local(err)
+		}
+		tmp = f
+	} else {
+		var e error
+		tmp, e = s.createBlobTemp(filepath.Dir(p), ".part-")
+		if e != nil {
+			return 0, local(e)
+		}
 	}
 	cleanup := true
 	defer func() {
@@ -581,28 +666,36 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		if removeErr := s.removeBlob(tmp.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			retErr = errors.Join(retErr, local(removeErr))
 		}
+		if res != nil {
+			*res = Resume{} // nothing is kept
+		}
 	}()
 	src := r
 	if max >= 0 {
-		src = io.LimitReader(r, max+1) // one byte more than allowed, to notice an excess
+		src = io.LimitReader(r, max-offset+1) // one byte more than allowed, to notice an excess
 	}
-	h := sha256.New()
 	var dst io.Writer = localWriter{tmp}
 	if reservation != nil {
 		dst = reservingWriter{w: dst, reservation: reservation}
 	}
 	if prog != nil && max > 0 {
 		prog.Begin(tmp.Name(), max)
-		dst = &progressWriter{w: dst, prog: prog}
+		dst = &progressWriter{w: dst, prog: prog, total: offset}
 	}
 	n, e := io.Copy(io.MultiWriter(dst, h), src)
 	if e != nil {
 		if closeErr := tmp.Close(); closeErr != nil {
 			e = errors.Join(e, local(closeErr))
 		}
+		if res != nil && Resumable(e) {
+			// The source failed, not this node: keep what arrived for the
+			// next source to continue.
+			res.path, res.size, res.total = tmp.Name(), offset+n, max
+			cleanup = false
+		}
 		return n, e
 	}
-	if max >= 0 && n > max {
+	if max >= 0 && offset+n > max {
 		e = ErrTooLarge
 		if closeErr := tmp.Close(); closeErr != nil {
 			e = errors.Join(e, local(closeErr))
@@ -630,15 +723,18 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		return n, local(e)
 	}
 	cleanup = false
+	if res != nil {
+		*res = Resume{}
+	}
 	// The digest was computed while the content was written, so this is a
 	// verified blob already; recording that saves hashing it again on first read.
 	if fi, err := os.Stat(p); err == nil {
 		s.markVerified(d, stampOf(fi))
 	}
-	s.used.Add(n)
+	s.used.Add(offset + n)
 	s.markUsed(d)
 	s.forgetEvicted(d)
-	return n, nil
+	return offset + n, nil
 }
 
 // fileHashes reports whether the file at path hashes to digest d. The error is
