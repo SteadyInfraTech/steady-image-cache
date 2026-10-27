@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -232,5 +235,83 @@ func TestCoordinatorWithoutCredentialsFallsBackToTheAskersOwn(t *testing.T) {
 	}
 	if _, err := top.st.Stat(d); err == nil {
 		t.Fatal("the coordinator has content it had no credentials for")
+	}
+}
+
+// stallingRegistry sends headers for its first request and then nothing: the
+// body never starts. Later requests are answered in full.
+func stallingRegistry(t *testing.T, body []byte) (host string, client *http.Client, gets *atomic.Int32) {
+	t.Helper()
+	gets = new(atomic.Int32)
+	gate := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		n := gets.Add(1)
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		if n == 1 {
+			select {
+			case <-gate:
+			case <-req.Context().Done():
+				return
+			}
+		}
+		w.Write(body)
+	}))
+	t.Cleanup(func() { close(gate); srv.Close() })
+	return srv.Listener.Addr().String(), srv.Client(), gets
+}
+
+// CoordWait bounds the wait for the first byte, not just for the response to
+// start: a coordinator whose source sends headers and then stalls is given up
+// on after CoordWait, and is not counted as down for being slow.
+func TestCoordinatorThatStallsBeforeTheFirstByteIsGivenUpOn(t *testing.T) {
+	body := []byte(strings.Repeat("stall", 8000))
+	d := digestOf(body)
+	host, client, gets := stallingRegistry(t, body)
+	nodes := cluster(t, 3, host, client)
+	top := coordinatorOf(nodes, d)
+	var asker *node
+	for _, n := range nodes {
+		if n != top {
+			asker = n
+		}
+		n.p.coordWait = 300 * time.Millisecond
+	}
+	asker.p.coordClient = asker.p.newPeerClient(nil, 300*time.Millisecond)
+
+	start := time.Now()
+	resp, got := get(t, asker.srv.URL+"/v2/lib/app/blobs/"+d+"?ns="+host)
+	if resp.StatusCode != 200 || string(got) != string(body) {
+		t.Fatalf("status %d, %d bytes", resp.StatusCode, len(got))
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("took %v: the wait for the coordinator was not bounded by CoordWait", took)
+	}
+	if gets.Load() != 2 {
+		t.Fatalf("the registry was asked %d times, want 2 (the coordinator's stalled one and the asker's own)", gets.Load())
+	}
+	if asker.m.CoordFallbacks.Load() != 1 {
+		t.Fatalf("fallbacks = %d, want 1", asker.m.CoordFallbacks.Load())
+	}
+	asker.p.dmu.Lock()
+	down := len(asker.p.down)
+	asker.p.dmu.Unlock()
+	if down != 0 {
+		t.Fatalf("%d peers were put into back-off for being slow", down)
+	}
+}
+
+// A connection that cannot be made in time is a failure, unlike a slow start.
+func TestOnlyAResponseHeaderTimeoutCountsAsSlow(t *testing.T) {
+	dialTimeout := &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	if isSlowStart(dialTimeout) {
+		t.Fatal("a dial timeout was taken for a slow start")
+	}
+	if isSlowStart(fmt.Errorf("Get x: %w", dialTimeout)) {
+		t.Fatal("a wrapped dial timeout was taken for a slow start")
+	}
+	if isSlowStart(errors.New("connection refused")) {
+		t.Fatal("a refused connection was taken for a slow start")
 	}
 }

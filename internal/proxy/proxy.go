@@ -545,7 +545,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 				return
 			}
 		}
-		if dl := p.activeDownload(d); dl != nil && streamable(r) && p.stream(w, r, d, dl, true) {
+		if dl := p.activeDownload(d); dl != nil && streamable(r) && p.stream(w, r, d, dl, true, true) {
 			p.metrics.PeerStreams.Add(1)
 			return
 		}
@@ -570,7 +570,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		dl := p.join(d, in.auth, p.missFetch(in, path, d, true))
 		// A plain GET is answered while the blob is still arriving. Anything
 		// else (a byte range) needs the whole blob, so it waits for it.
-		if streamable(r) && p.stream(w, r, d, dl, false) {
+		if streamable(r) && p.stream(w, r, d, dl, false, false) {
 			return
 		}
 		var ok bool
@@ -993,8 +993,7 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[string]string, slowOK bool) (res fetchResult, done bool) {
 	resp, e := p.get(in.ctx, c, p.peerURL(base, path, in.ns), hdr)
 	if e != nil {
-		var ne net.Error
-		if slowOK && errors.As(e, &ne) && ne.Timeout() {
+		if slowOK && isSlowStart(e) {
 			return fetchResult{}, false // slow to start is not down
 		}
 		p.peerFailed(base, e)

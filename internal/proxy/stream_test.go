@@ -281,7 +281,7 @@ func TestLastByteWaitsForVerification(t *testing.T) {
 		a := newNode(t, Options{})
 		dl := newDownload("")
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			a.p.stream(w, r, digestOf(body), dl, false)
+			a.p.stream(w, r, digestOf(body), dl, false, false)
 		}))
 		defer srv.Close()
 		dl.Begin(f, int64(len(body)))
@@ -397,7 +397,7 @@ func TestStreamEndsWhenTheDownloadPanics(t *testing.T) {
 	go func() {
 		defer close(finished)
 		req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d, nil)
-		a.p.stream(httptest.NewRecorder(), req, d, dl, false)
+		a.p.stream(httptest.NewRecorder(), req, d, dl, false, false)
 	}()
 	time.Sleep(50 * time.Millisecond) // let the client attach and wait for more
 	close(release)

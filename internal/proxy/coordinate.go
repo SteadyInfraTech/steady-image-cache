@@ -3,7 +3,10 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
+	"net"
 	"net/http"
+	"strings"
 )
 
 // Coordination keeps nodes that miss on the same blob at the same moment from
@@ -70,9 +73,22 @@ func (p *Proxy) coordinate(w http.ResponseWriter, r *http.Request, repo, d strin
 	in := newInfo(r)
 	in.auth = "" // a peer's request carries none, and none is borrowed from another client
 	dl := p.join(d, "", p.missFetch(in, "/v2/"+repo+"/blobs/"+d, d, false))
-	if p.stream(w, r, d, dl, false) {
+	if p.stream(w, r, d, dl, false, true) {
 		p.metrics.CoordServed.Add(1)
 		return true
 	}
 	return false
+}
+
+// isSlowStart reports whether a request failed only because the peer took
+// longer than CoordWait to start answering. A connection that could not be made
+// in time is a different matter: that peer is down, and is to be left alone for
+// the back-off like any other.
+func isSlowStart(e error) bool {
+	var ne net.Error
+	if !errors.As(e, &ne) || !ne.Timeout() {
+		return false
+	}
+	// net/http has no exported value for its response header timeout.
+	return strings.Contains(e.Error(), "timeout awaiting response headers")
 }
