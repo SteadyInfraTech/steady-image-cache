@@ -134,6 +134,11 @@ cluster_metric() {
   echo "$total"
 }
 
+# from_cluster NODE: blobs NODE got without the registry, from a peer or from
+# its own cache. A blob can already be on a node that coordinated its fetch for
+# another one, so a pull there counts a local hit where a peer hit was expected.
+from_cluster() { echo $(( $(metric "$1" sic_peer_hits_total) + $(metric "$1" sic_local_hits_total) )); }
+
 # sees_all_peers NODE: whether NODE's SIC lists every other node's SIC. Waiting
 # for just one is a race: a node that has only seen some of them asks those, and
 # goes to the registry for what only the others hold.
@@ -199,11 +204,11 @@ registries_phase() {
     [ "$(metric "$A" sic_upstream_auth_challenges_total)" -gt "$ch_before" ] || fail "$img: no authentication challenge was relayed on $A"
     [ $(( $(cluster_metric sic_upstream_hits_total) - up_before )) -ge 2 ] || fail "$img: fewer than 2 objects were fetched from the registry for $A"
 
-    peer_before=$(metric "$B" sic_peer_hits_total)
+    peer_before=$(from_cluster "$B")
     pull_retry "$B" "$img" && rc=0 || rc=$?
     [ "$rc" = 0 ] || return "$rc"
-    echo "peer hits on $B: $peer_before -> $(metric "$B" sic_peer_hits_total)"
-    [ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 2 ] || fail "$img: $B got fewer than 2 blobs from its peer"
+    echo "peer or local hits on $B: $peer_before -> $(from_cluster "$B")"
+    [ $(( $(from_cluster "$B") - peer_before )) -ge 2 ] || fail "$img: $B got fewer than 2 blobs from its peer"
   }
 
   local img rc checked=() skipped=()
@@ -426,11 +431,11 @@ gets_after_a=$(registry_blob_gets)
 [ "$gets_after_a" -ge 3 ] || fail "the registry's log shows $gets_after_a blob requests after $A's pull, want at least 3 (is the log format as expected?)"
 
 log "pull the same tag on $B: blobs from $A, none from the registry"
-peer_before=$(metric "$B" sic_peer_hits_total)
+peer_before=$(from_cluster "$B")
 docker exec "$B" crictl pull "$UP:v1"
 [ "$(node_digest "$B")" = "$D1" ] || fail "$B has $(node_digest "$B") for the tag, want $D1"
 [ "$(registry_blob_gets)" = "$gets_after_a" ] || fail "the registry served blobs again for $B ($gets_after_a -> $(registry_blob_gets))"
-peer_gain=$(( $(metric "$B" sic_peer_hits_total) - peer_before ))
+peer_gain=$(( $(from_cluster "$B") - peer_before ))
 [ "$peer_gain" -ge 3 ] || fail "$B had $peer_gain peer hits, want at least 3"
 
 log "the tag moves: a node must not keep serving the old digest"
@@ -538,11 +543,11 @@ logs=$(kubectl -n kube-system logs -l app=steady-image-cache --tail=-1 --prefix 
 if grep -qF -e "$PASS" -e "$b64" <<<"$logs"; then fail "the password appears in SIC's logs"; fi
 
 log "right credentials on $B: the blobs come from $A, not the registry"
-peer_before=$(metric "$B" sic_peer_hits_total)
+peer_before=$(from_cluster "$B")
 docker exec "$B" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 [ "$(priv_digest "$B")" = "$DP" ] || fail "$B has '$(priv_digest "$B")' for the tag, want $DP"
 [ "$(blob_gets)" = "$gets" ] || fail "the registry served blobs again for $B ($gets -> $(blob_gets))"
-[ $(( $(metric "$B" sic_peer_hits_total) - peer_before )) -ge 3 ] || fail "$B had fewer than 3 peer hits"
+[ $(( $(from_cluster "$B") - peer_before )) -ge 3 ] || fail "$B had fewer than 3 peer hits"
 
 log "the documented boundary: the cache does not check who is asking"
 # README, "Upstream fallback": once something has been fetched with credentials,
@@ -559,7 +564,7 @@ refused "no credentials on $C, by tag" docker exec "$C" crictl pull "$PRIV:v1"
 # ...but a digest is a capability: a peer that has it hands it over.
 docker exec "$C" crictl pull "$PRIV@$DP"
 [ "$(blob_gets)" = "$gets" ] || fail "the registry served blobs for $C, which asked a peer"
-[ "$(metric "$C" sic_peer_hits_total)" -ge 3 ] || fail "$C had fewer than 3 peer hits by digest"
+[ "$(from_cluster "$C")" -ge 3 ] || fail "$C had fewer than 3 peer hits by digest"
 
 log "phase 3 passed: credentials passed on and never kept, shared between nodes, and the boundary is as documented"
 
@@ -690,11 +695,11 @@ gets_a=$(mirror_blob_gets)
 log "what $A fetched there reaches SIC through the import; $B gets it from $A, not from the registry"
 wait_for "$A's SIC to hold the manifest and all its blobs" 90 sic_holds_all "$A" "$DM1"
 wait_for "$A's SIC to serve the tag (an alias imported from containerd)" 90 sic_serves "$A" v1
-peer_before=$(metric "$B" sic_peer_hits_total)
+peer_before=$(from_cluster "$B")
 docker exec "$B" crictl pull "$M:v1"
 [ "$(m_digest "$B" v1)" = "$DM1" ] || fail "$B has '$(m_digest "$B" v1)' for the tag, want $DM1"
 [ "$(mirror_blob_gets)" = "$gets_a" ] || fail "the registry served blobs again for $B ($gets_a -> $(mirror_blob_gets))"
-peer_gain=$(( $(metric "$B" sic_peer_hits_total) - peer_before ))
+peer_gain=$(( $(from_cluster "$B") - peer_before ))
 [ "$peer_gain" -ge 3 ] || fail "$B had $peer_gain peer hits, want at least 3"
 
 log "the tag moves, and SIC cannot check tags for this registry"
