@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- A request for a blob or manifest that had just been stored could be answered with a `404` (a miss, nothing in the log) if the same content arrived a second time at that moment, as when two clients ask for one manifest with different `Accept` headers: the store refused to open a blob while any writer held it, including one only re-checking a complete file. A blob that is complete, verified and unchanged is now served regardless.
 ## 1.1.0 - 2026-10-28
 
 Upgrading from 1.0.x: the sample DaemonSet changes its readiness probe to `/readyz` (a 1.0.x image has no such path, so apply the manifest together with the new image, not before). Nodes running 1.0.x and 1.1.0 together are safe: an older node answers a coordinator request like any peer request. The coordinator and the discovery watch are on by default (`SIC_COORDINATE=false` and `SIC_PEER_WATCH=false` turn them off); the discovery watch needs the `watch` verb on pods, which the sample RBAC already grants, and falls back to listing without it. The DaemonSet cannot surge on its fixed host port, so see "Upgrading" in the README for rolling it out.
