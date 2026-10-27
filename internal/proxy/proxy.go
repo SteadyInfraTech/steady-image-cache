@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/flight"
@@ -377,7 +378,8 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", ct)
 	// ServeContent implements GET/HEAD, RFC 7233 byte ranges, If-Modified-Since and 416 responses.
-	http.ServeContent(w, r, "", st.ModTime(), f)
+	cw := &countingWriter{ResponseWriter: w, n: p.servedCounter(r)}
+	http.ServeContent(cw, r, "", st.ModTime(), f)
 	return true
 }
 
@@ -929,15 +931,18 @@ var (
 // long the body is: that length is the bound on what gets written, and it has
 // to fit on the disk. Without a declared length a peer could stream data until
 // the disk is full, because the digest can only be checked at the end.
-func (p *Proxy) putBlob(d string, resp *http.Response, dl *download) error {
+func (p *Proxy) putBlob(d string, resp *http.Response, dl *download, received *atomic.Uint64) error {
 	if resp.ContentLength < 0 {
 		return fmt.Errorf("%w: no Content-Length", errBadContent)
 	}
+	// Counted as it is read, so that content that fails verification or is cut
+	// short still shows as the traffic it cost.
+	body := &countingReader{r: resp.Body, n: received}
 	var err error
 	if dl != nil {
-		_, err = p.store.PutStream(d, resp.Body, resp.ContentLength, dl)
+		_, err = p.store.PutStream(d, body, resp.ContentLength, dl)
 	} else {
-		_, err = p.store.PutVerifiedLimit(d, resp.Body, resp.ContentLength)
+		_, err = p.store.PutVerifiedLimit(d, body, resp.ContentLength)
 	}
 	if errors.Is(err, store.ErrTooLarge) {
 		return fmt.Errorf("%w: longer than the declared %d bytes", errBadContent, resp.ContentLength)
@@ -1005,7 +1010,7 @@ func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[s
 		return fetchResult{}, false
 	}
 	size := resp.ContentLength
-	e = p.putBlob(d, resp, in.dl)
+	e = p.putBlob(d, resp, in.dl, &p.metrics.BytesFromPeers)
 	resp.Body.Close()
 	if e == nil {
 		return fetched, true
@@ -1172,7 +1177,7 @@ func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 		return fetchResult{}
 	}
 	size := resp.ContentLength
-	if e = p.putBlob(d, resp, in.dl); e != nil {
+	if e = p.putBlob(d, resp, in.dl, &p.metrics.BytesFromUpstream); e != nil {
 		if r, ours := p.localFailure(e, d, size); ours {
 			return r
 		}
@@ -1219,3 +1224,42 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 	}
 	return d, fetched
 }
+
+// servedCounter is the byte counter for what a response to r sends: another
+// node's pull of a blob is counted apart from a client's.
+func (p *Proxy) servedCounter(r *http.Request) *atomic.Uint64 {
+	if isPeer(r) {
+		return &p.metrics.BytesToPeers
+	}
+	return &p.metrics.BytesToClients
+}
+
+// countingReader adds the bytes read to n.
+type countingReader struct {
+	r io.Reader
+	n *atomic.Uint64
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	m, err := c.r.Read(b)
+	if m > 0 {
+		c.n.Add(uint64(m))
+	}
+	return m, err
+}
+
+// countingWriter adds the bytes written to n.
+type countingWriter struct {
+	http.ResponseWriter
+	n *atomic.Uint64
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	m, err := c.ResponseWriter.Write(b)
+	if m > 0 {
+		c.n.Add(uint64(m))
+	}
+	return m, err
+}
+
+func (c *countingWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }

@@ -218,6 +218,7 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 					return true // the client went away
 				}
 				off += int64(m)
+				p.servedCounter(r).Add(uint64(m))
 			}
 			if e != nil && m == 0 {
 				break
