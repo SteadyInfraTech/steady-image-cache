@@ -1058,7 +1058,8 @@ func readManifest(resp *http.Response, ref string) (string, []byte, error) {
 }
 
 // storeManifest reads a manifest from resp and stores it.
-func (p *Proxy) storeManifest(resp *http.Response, ref string) (string, int64, error) {
+func (p *Proxy) storeManifest(resp *http.Response, ref string, received *atomic.Uint64) (string, int64, error) {
+	resp.Body = &countedBody{ReadCloser: resp.Body, n: received}
 	d, b, e := readManifest(resp, ref)
 	if e != nil {
 		return "", int64(len(b)), e
@@ -1080,7 +1081,7 @@ func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResu
 			p.peerAnswered(base, resp)
 			continue
 		}
-		d, size, e := p.storeManifest(resp, ref)
+		d, size, e := p.storeManifest(resp, ref, &p.metrics.BytesFromPeers)
 		resp.Body.Close()
 		if e == nil {
 			return d, fetched
@@ -1211,7 +1212,7 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 		p.upstreamAnswered(host, resp)
 		return "", fetchResult{}
 	}
-	d, size, e := p.storeManifest(resp, ref)
+	d, size, e := p.storeManifest(resp, ref, &p.metrics.BytesFromUpstream)
 	if e != nil {
 		if r, ours := p.localFailure(e, d, size); ours {
 			return "", r
@@ -1248,6 +1249,20 @@ func (c *countingReader) Read(b []byte) (int, error) {
 	return m, err
 }
 
+// countedBody is a response body that adds the bytes read to n.
+type countedBody struct {
+	io.ReadCloser
+	n *atomic.Uint64
+}
+
+func (c *countedBody) Read(b []byte) (int, error) {
+	m, err := c.ReadCloser.Read(b)
+	if m > 0 {
+		c.n.Add(uint64(m))
+	}
+	return m, err
+}
+
 // countingWriter adds the bytes written to n.
 type countingWriter struct {
 	http.ResponseWriter
@@ -1260,6 +1275,23 @@ func (c *countingWriter) Write(b []byte) (int, error) {
 		c.n.Add(uint64(m))
 	}
 	return m, err
+}
+
+// ReadFrom passes the copy on to the response writer, which sends a file
+// straight from the kernel (sendfile) when it is handed one; hiding the method
+// would make every cached layer go through a buffer in user space.
+func (c *countingWriter) ReadFrom(r io.Reader) (int64, error) {
+	var n int64
+	var err error
+	if rf, ok := c.ResponseWriter.(io.ReaderFrom); ok {
+		n, err = rf.ReadFrom(r)
+	} else {
+		n, err = io.Copy(struct{ io.Writer }{c.ResponseWriter}, r)
+	}
+	if n > 0 {
+		c.n.Add(uint64(n))
+	}
+	return n, err
 }
 
 func (c *countingWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }

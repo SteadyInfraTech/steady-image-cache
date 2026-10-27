@@ -214,11 +214,14 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 			}
 			m, e := f.ReadAt(buf[:n], off)
 			if m > 0 {
-				if _, we := w.Write(buf[:m]); we != nil {
+				wn, we := w.Write(buf[:m])
+				if wn > 0 {
+					p.servedCounter(r).Add(uint64(wn)) // what was accepted counts, even if the write then failed
+				}
+				if we != nil {
 					return true // the client went away
 				}
 				off += int64(m)
-				p.servedCounter(r).Add(uint64(m))
 			}
 			if e != nil && m == 0 {
 				break

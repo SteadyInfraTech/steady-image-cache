@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -86,5 +90,101 @@ func TestBytesFromTheRegistryAreCounted(t *testing.T) {
 	waitCount(t, &a.m.BytesToClients, uint64(len(body)))
 	if a.m.BytesFromPeers.Load() != 0 {
 		t.Fatalf("bytes from peers = %d", a.m.BytesFromPeers.Load())
+	}
+}
+
+// Manifests count like blobs: what a miss reads from a peer or a registry.
+func TestBytesOfAManifestFromAPeerAreCounted(t *testing.T) {
+	a := newNode(t, Options{})
+	d := put(t, a, testManifest)
+	b := newNode(t, Options{})
+	b.setPeers(a)
+	resp, got := get(t, b.srv.URL+"/v2/lib/app/manifests/"+d)
+	if resp.StatusCode != 200 || string(got) != string(testManifest) {
+		t.Fatalf("status %d, %q", resp.StatusCode, got)
+	}
+	waitCount(t, &b.m.BytesFromPeers, uint64(len(testManifest)))
+	waitCount(t, &a.m.BytesToPeers, uint64(len(testManifest)))
+	waitCount(t, &b.m.BytesToClients, uint64(len(testManifest)))
+}
+
+func TestBytesOfAManifestFromTheRegistryAreCounted(t *testing.T) {
+	reg := newTokenRegistry(t, []byte("unused"), testManifest)
+	host := reg.Listener.Addr().String()
+	a := newNode(t, Options{Upstream: true, UpstreamRegistries: []string{host}})
+	a.p.upstreamClient = reg.Client()
+	resp, _ := get(t, a.srv.URL+"/v2/lib/app/manifests/"+digestOf(testManifest)+"?ns="+host, "Authorization", "Bearer tok")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	waitCount(t, &a.m.BytesFromUpstream, uint64(len(testManifest)))
+}
+
+// The cache's file is sent by the response writer's own copy (sendfile on a
+// real connection), so the counting wrapper must not hide it.
+type readerFromRecorder struct {
+	*httptest.ResponseRecorder
+	readFrom bool
+}
+
+func (r *readerFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	r.readFrom = true
+	return io.Copy(struct{ io.Writer }{r.ResponseRecorder}, src)
+}
+
+func TestCountingWriterKeepsTheFastCopyPath(t *testing.T) {
+	var n atomic.Uint64
+	rec := &readerFromRecorder{ResponseRecorder: httptest.NewRecorder()}
+	cw := &countingWriter{ResponseWriter: rec, n: &n}
+	if _, ok := any(cw).(io.ReaderFrom); !ok {
+		t.Fatal("the wrapper hides ReadFrom")
+	}
+	if m, err := io.CopyN(cw, strings.NewReader(strings.Repeat("z", 1000)), 700); err != nil || m != 700 {
+		t.Fatalf("copied %d, %v", m, err)
+	}
+	if !rec.readFrom {
+		t.Fatal("the copy did not go through the writer's own ReadFrom")
+	}
+	if n.Load() != 700 {
+		t.Fatalf("counted %d bytes, want 700", n.Load())
+	}
+	// A writer without ReadFrom still gets the bytes, and they are counted.
+	plain := httptest.NewRecorder()
+	var n2 atomic.Uint64
+	cw2 := &countingWriter{ResponseWriter: plain, n: &n2}
+	if _, err := cw2.ReadFrom(strings.NewReader("abcde")); err != nil || n2.Load() != 5 || plain.Body.String() != "abcde" {
+		t.Fatalf("fallback: %v, %d, %q", err, n2.Load(), plain.Body.String())
+	}
+}
+
+// failingWriter accepts some of a write and then fails, as a connection does
+// when the client goes away in the middle of a response.
+type failingWriter struct {
+	*httptest.ResponseRecorder
+	accept int
+}
+
+func (f *failingWriter) Write(b []byte) (int, error) {
+	n := f.accept
+	if n > len(b) {
+		n = len(b)
+	}
+	return n, errors.New("broken pipe")
+}
+
+func TestBytesAcceptedBeforeAWriteErrorAreCounted(t *testing.T) {
+	body := []byte(strings.Repeat("abcdefghij", 1000))
+	f := t.TempDir() + "/part"
+	if err := os.WriteFile(f, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newNode(t, Options{})
+	dl := newDownload("")
+	dl.Begin(f, int64(len(body)))
+	dl.Wrote(int64(len(body)))
+	req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+digestOf(body), nil)
+	a.p.stream(&failingWriter{ResponseRecorder: httptest.NewRecorder(), accept: 7}, req, digestOf(body), dl, false, false)
+	if got := a.m.BytesToClients.Load(); got != 7 {
+		t.Fatalf("counted %d bytes, want the 7 that were accepted", got)
 	}
 }
