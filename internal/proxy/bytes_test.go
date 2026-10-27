@@ -47,7 +47,8 @@ func TestBytesOfARangeRequestAreOnlyTheRange(t *testing.T) {
 	waitCount(t, &a.m.BytesToClients, 100)
 }
 
-// Content that is refused cost the traffic anyway, and is not stored or served.
+// Content that is refused cost the traffic anyway, and is not stored or served
+// in full.
 func TestBytesOfRefusedContentAreStillCounted(t *testing.T) {
 	d := digestOf([]byte("the real content"))
 	lying := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,8 +63,11 @@ func TestBytesOfRefusedContentAreStillCounted(t *testing.T) {
 	if _, err := b.st.Stat(d); err == nil {
 		t.Fatal("refused content was stored")
 	}
-	if got := b.m.BytesToClients.Load(); got != 0 {
-		t.Fatalf("%d bytes counted as sent to clients", got)
+	// A client that was already waiting got what had arrived, all but the last
+	// byte, which is held back until the digest is checked; it never gets the
+	// whole of content that fails.
+	if got := b.m.BytesToClients.Load(); got >= 4096 {
+		t.Fatalf("%d bytes counted as sent to clients: the whole of refused content", got)
 	}
 }
 
