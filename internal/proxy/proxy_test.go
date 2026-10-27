@@ -941,10 +941,12 @@ func TestRefusedContentNamesThePeerInTheLog(t *testing.T) {
 	a := newNode(t, Options{Logf: sink.logf})
 	a.fin.urls.Store(&[]string{lying.URL})
 	get(t, a.srv.URL+"/v2/lib/app/blobs/"+digestOf([]byte("the real one")))
-	log := sink.all()
-	if !strings.Contains(log, lying.URL) || !strings.Contains(log, "digest mismatch") {
-		t.Fatalf("log: %q", log)
-	}
+	// The log line is written by the download, which may still be finishing
+	// when the client has its answer.
+	eventually(t, "the refusal in the log", func() bool {
+		log := sink.all()
+		return strings.Contains(log, lying.URL) && strings.Contains(log, "digest mismatch")
+	})
 }
 
 // upstreamProxy builds a proxy that may contact the given TLS test server as a

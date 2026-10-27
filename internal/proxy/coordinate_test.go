@@ -50,6 +50,20 @@ func newSlowRegistry(t *testing.T, body []byte) *slowRegistry {
 	return r
 }
 
+// eventually waits for a condition that holds just after a response ends: the
+// counters are bumped by the goroutine that served it, which may be a moment
+// behind the client that already has the whole body.
+func eventually(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 400; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
 // cluster starts n nodes that know each other and know themselves, with the
 // registry as the only upstream.
 func cluster(t *testing.T, n int, host string, client *http.Client) []*node {
@@ -145,17 +159,21 @@ func TestSimultaneousMissesMakeOneRegistryRequest(t *testing.T) {
 	if g := reg.gets.Load(); g != 1 {
 		t.Fatalf("the registry was asked %d times, want 1", g)
 	}
-	var coordHits, served uint64
 	for _, n := range nodes {
 		if _, err := n.st.Stat(d); err != nil {
 			t.Fatal("a node did not keep the blob")
 		}
-		coordHits += n.m.CoordHits.Load()
-		served += n.m.CoordServed.Load()
 	}
-	if coordHits != 3 || served != 3 {
-		t.Fatalf("coordinator hits %d, served %d, want 3 and 3", coordHits, served)
+	sum := func(f func(*node) uint64) (t uint64) {
+		for _, n := range nodes {
+			t += f(n)
+		}
+		return
 	}
+	eventually(t, "3 coordinator hits and 3 served", func() bool {
+		return sum(func(n *node) uint64 { return n.m.CoordHits.Load() }) == 3 &&
+			sum(func(n *node) uint64 { return n.m.CoordServed.Load() }) == 3
+	})
 }
 
 // A coordinator that is gone costs the asking node nothing but the attempt.
@@ -177,9 +195,9 @@ func TestDeadCoordinatorFallsBackToTheRegistry(t *testing.T) {
 	if resp.StatusCode != 200 || string(got) != string(body) {
 		t.Fatalf("status %d, %d bytes", resp.StatusCode, len(got))
 	}
-	if asker.m.CoordFallbacks.Load() == 0 || asker.m.UpstreamHits.Load() != 1 {
-		t.Fatalf("fallbacks %d, upstream hits %d", asker.m.CoordFallbacks.Load(), asker.m.UpstreamHits.Load())
-	}
+	eventually(t, "a fallback and one registry fetch", func() bool {
+		return asker.m.CoordFallbacks.Load() > 0 && asker.m.UpstreamHits.Load() == 1
+	})
 }
 
 // A node that is not the coordinator in its own view does not fetch for a
@@ -291,9 +309,7 @@ func TestCoordinatorThatStallsBeforeTheFirstByteIsGivenUpOn(t *testing.T) {
 	if gets.Load() != 2 {
 		t.Fatalf("the registry was asked %d times, want 2 (the coordinator's stalled one and the asker's own)", gets.Load())
 	}
-	if asker.m.CoordFallbacks.Load() != 1 {
-		t.Fatalf("fallbacks = %d, want 1", asker.m.CoordFallbacks.Load())
-	}
+	waitCount(t, &asker.m.CoordFallbacks, 1)
 	asker.p.dmu.Lock()
 	down := len(asker.p.down)
 	asker.p.dmu.Unlock()

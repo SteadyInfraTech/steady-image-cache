@@ -67,9 +67,7 @@ func TestPeerStreamsFromADownloadThatIsStillRunning(t *testing.T) {
 		t.Fatalf("the source was asked %d times, want 1: B must not go around A", calls.Load())
 	}
 	waitCount(t, &a.m.PeerStreams, 1)
-	if b.m.PeerHits.Load() != 1 {
-		t.Fatalf("B's PeerHits = %d", b.m.PeerHits.Load())
-	}
+	waitCount(t, &b.m.PeerHits, 1)
 }
 
 // What B gets from a download is verified by B like anything else. A download
