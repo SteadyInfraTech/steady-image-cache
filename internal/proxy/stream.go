@@ -159,7 +159,7 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 		dl.mu.Lock()
 		cur, done, ch := dl.cur, dl.done, dl.notify
 		var usable bool
-		if cur != nil && !cur.ended && (!(immediate || held) || cur.written > 0) {
+		if cur != nil && !cur.ended && ((!immediate && !held) || cur.written > 0) {
 			a, usable = cur, true
 		}
 		dl.mu.Unlock()
