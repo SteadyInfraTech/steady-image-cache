@@ -4,6 +4,9 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Security: a cached JSON document is served under a registry media type (OCI or Docker, `+json`/`+prettyjws`) or the default manifest type, never under the `mediaType` its publisher wrote. Before, an image config asked for by its digest with `"mediaType": "text/html"` was served as a page on the cache's origin. Responses also carry `X-Content-Type-Options: nosniff`, and stored documents a restrictive `Content-Security-Policy`.
+- Security: with mutual TLS on, a peer that is not an `https://` URL is never asked, and `SIC_PEERS` with such an entry fails startup (it is allowed with `SIC_INSECURE=true`). A plain request authenticates nobody, and its answer could set a tag.
+- Security: `SSL_CERT_FILE` and `SSL_CERT_DIR` now make the upstream trust exactly what they name. Go also loaded the default certificate directory, where the image keeps its public bundle, so the documented way to trust only a private CA still trusted every public one. A setting that yields no certificate stops startup.
 - A request for a blob or manifest that had just been stored could be answered with a `404` (a miss, nothing in the log) if the same content arrived a second time at that moment, as when two clients ask for one manifest with different `Accept` headers: the store refused to open a blob while any writer held it, including one only re-checking a complete file. A blob that is complete, verified and unchanged is now served regardless.
 ## 1.1.0 - 2026-10-28
 

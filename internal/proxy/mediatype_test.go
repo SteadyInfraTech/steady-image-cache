@@ -1,10 +1,18 @@
 package proxy
 
 import (
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil/tlstest"
 )
 
 // A stored JSON document is served with a media type of the registry formats or
@@ -70,5 +78,49 @@ func TestPlainHTTPPeersAreNotAskedWhenTLSIsOn(t *testing.T) {
 	got := n.p.livePeers()
 	if len(got) != 1 || got[0] != "https://10.0.0.2:5000" {
 		t.Fatalf("with TLS only the https peer is asked: %v", got)
+	}
+}
+
+// SSL_CERT_FILE makes the upstream client trust that bundle and nothing else.
+func TestUpstreamClientTrustsOnlyWhatSSLCertFileNames(t *testing.T) {
+	secured := func(name string) (*httptest.Server, []byte) {
+		pki := tlstest.New(t, name)
+		cert, err := tls.X509KeyPair(pki.CertPEM, pki.KeyPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewUnstartedServer(http.NotFoundHandler())
+		srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		return srv, pki.CAPEM
+	}
+	a, caA := secured("a")
+	b, _ := secured("b")
+	file := filepath.Join(t.TempDir(), "roots.crt")
+	if err := os.WriteFile(file, caA, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", file)
+	n := newNode(t, Options{Upstream: true})
+	if resp, err := n.p.upstreamClient.Get(a.URL); err != nil {
+		t.Fatalf("a server in the bundle: %v", err)
+	} else {
+		resp.Body.Close()
+	}
+	if resp, err := n.p.upstreamClient.Get(b.URL); err == nil {
+		resp.Body.Close()
+		t.Fatal("a server outside the bundle was trusted")
+	}
+}
+
+func TestStartupFailsOnAnUnusableSSLCertFile(t *testing.T) {
+	t.Setenv("SSL_CERT_FILE", filepath.Join(t.TempDir(), "missing.crt"))
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{}); err == nil {
+		t.Fatal("started with a trust setting that names nothing")
 	}
 }

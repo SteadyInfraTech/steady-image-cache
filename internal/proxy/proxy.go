@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -148,12 +149,20 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 			regs[r] = true
 		}
 	}
+	roots, err := tlsutil.UpstreamRoots(os.Getenv("SSL_CERT_FILE"), os.Getenv("SSL_CERT_DIR"))
+	if err != nil {
+		return nil, err
+	}
+	upstreamTransport := newTransport(o.Timeout, o.Timeout, true)
+	if roots != nil {
+		upstreamTransport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
 	px := &Proxy{
 		store: s,
 		peers: p,
 		// Upstream registries are public services: verify them against the
 		// system roots, not against the private CA used between SIC nodes.
-		upstreamClient:  &http.Client{Transport: newTransport(o.Timeout, o.Timeout, true), CheckRedirect: upstreamRedirect},
+		upstreamClient:  &http.Client{Transport: upstreamTransport, CheckRedirect: upstreamRedirect},
 		metrics:         m,
 		upstream:        o.Upstream,
 		registries:      regs,
