@@ -234,3 +234,68 @@ func TestResumeKeepsOneFileAndContinuesTheProgress(t *testing.T) {
 		t.Fatalf("progress %v, ends %v", pl.wrote, pl.ends)
 	}
 }
+
+// peek runs f the first time it is read from, while the write is in flight.
+type peek struct {
+	r io.Reader
+	f func()
+}
+
+func (p *peek) Read(b []byte) (int, error) {
+	if p.f != nil {
+		p.f()
+		p.f = nil
+	}
+	return p.r.Read(b)
+}
+
+// What a resumed download already has on disk counts against the cache size
+// limit while it continues, even though only the rest is new to free space.
+func TestResumeCountsThePrefixAgainstTheSizeLimit(t *testing.T) {
+	s := newTestStore(t)
+	body := []byte(strings.Repeat("0123456789", 10000))
+	d := digestOf(body)
+	var res Resume
+	if _, err := s.PutResumable(d, cutAfter(body, 60000), int64(len(body)), nil, &res); err == nil {
+		t.Fatal("a cut transfer reported success")
+	}
+
+	var pending, reserved int64
+	rest := &peek{r: bytes.NewReader(body[60000:]), f: func() {
+		s.capacityMu.Lock()
+		pending, reserved = s.pending, s.reserved
+		s.capacityMu.Unlock()
+	}}
+	if _, err := s.PutResumable(d, rest, int64(len(body)), nil, &res); err != nil {
+		t.Fatal(err)
+	}
+	if pending != int64(len(body)) {
+		t.Fatalf("size limit saw %d bytes in flight, want the whole %d", pending, len(body))
+	}
+	if reserved != int64(len(body))-60000 {
+		t.Fatalf("free space saw %d bytes reserved, want only the missing %d", reserved, len(body)-60000)
+	}
+	if s.pending != 0 || s.reserved != 0 {
+		t.Fatalf("reservation left behind: pending %d reserved %d", s.pending, s.reserved)
+	}
+}
+
+// A source that fails before sending anything leaves no file behind and no
+// state that points at one.
+func TestResumeAfterAnEmptyFailureLeavesNoFile(t *testing.T) {
+	s := newTestStore(t)
+	body := []byte(strings.Repeat("0123456789", 1000))
+	d := digestOf(body)
+	var res Resume
+	for i := 0; i < 3; i++ {
+		if _, err := s.PutResumable(d, errReader{io.ErrUnexpectedEOF}, int64(len(body)), nil, &res); err == nil {
+			t.Fatal("a failed transfer reported success")
+		}
+		if res.Size() != 0 {
+			t.Fatalf("kept %d bytes of nothing", res.Size())
+		}
+	}
+	if left := partials(t, s); len(left) != 0 {
+		t.Fatalf("left behind %v", left)
+	}
+}

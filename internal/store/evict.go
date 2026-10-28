@@ -138,11 +138,13 @@ func (s *Store) reserve() int64 {
 // shortfallLocked is how many bytes would have to be freed before need more
 // bytes can be stored: the larger of what the size limit and the free-space
 // reserve ask for. Zero or less means it fits. Where free space cannot be
-// determined only the size limit applies. The caller holds capacityMu.
-func (s *Store) shortfallLocked(need int64) int64 {
+// determined only the size limit applies. held is what a resumed download
+// already has on disk: it counts against the size limit, not against free space,
+// which has seen it. The caller holds capacityMu.
+func (s *Store) shortfallLocked(need, held int64) int64 {
 	var short int64
 	if max := s.maxBytes.Load(); max > 0 {
-		if over := s.used.Load() + s.pending + need - max; over > short {
+		if over := s.used.Load() + s.pending + need + held - max; over > short {
 			short = over
 		}
 	}

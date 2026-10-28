@@ -248,14 +248,14 @@ func (w reservingWriter) Write(p []byte) (int, error) {
 // fit and evict is set, the least recently used blobs are removed to make room,
 // unless even removing all of them would not be enough: emptying the cache for
 // nothing would only cost the cache.
-func (s *Store) reserveSpace(need int64, evict bool) (*capacityReservation, error) {
+func (s *Store) reserveSpace(need, held int64, evict bool) (*capacityReservation, error) {
 	for attempt := 0; ; attempt++ {
 		s.capacityMu.Lock()
-		short := s.shortfallLocked(need)
+		short := s.shortfallLocked(need, held)
 		if short <= 0 {
 			s.reserved += need
-			s.pending += need
-			r := &capacityReservation{store: s, remaining: need, total: need}
+			s.pending += need + held
+			r := &capacityReservation{store: s, remaining: need, total: need + held}
 			s.capacityMu.Unlock()
 			return r, nil
 		}
@@ -626,7 +626,7 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 	var reservation *capacityReservation
 	if max-offset > 0 {
 		var err error
-		reservation, err = s.reserveSpace(max-offset, evict)
+		reservation, err = s.reserveSpace(max-offset, offset, evict)
 		if err != nil {
 			s.DropResume(res)
 			return 0, err
@@ -687,7 +687,7 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		if closeErr := tmp.Close(); closeErr != nil {
 			e = errors.Join(e, local(closeErr))
 		}
-		if res != nil && Resumable(e) {
+		if res != nil && Resumable(e) && offset+n > 0 {
 			// The source failed, not this node: keep what arrived for the
 			// next source to continue.
 			res.path, res.size, res.total = tmp.Name(), offset+n, max
