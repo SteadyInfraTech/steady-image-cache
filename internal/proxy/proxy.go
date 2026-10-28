@@ -1031,22 +1031,29 @@ func answered(resp *http.Response, ranged bool) bool {
 func parseContentRange(v string) (start, end, total int64, ok bool) {
 	rest, found := strings.CutPrefix(strings.TrimSpace(v), "bytes ")
 	if !found {
-		return
+		return 0, 0, 0, false
 	}
 	span, size, found := strings.Cut(rest, "/")
 	if !found {
-		return
+		return 0, 0, 0, false
 	}
 	first, last, found := strings.Cut(span, "-")
 	if !found {
-		return
+		return 0, 0, 0, false
 	}
-	var err1, err2, err3 error
-	start, err1 = strconv.ParseInt(first, 10, 64)
-	end, err2 = strconv.ParseInt(last, 10, 64)
-	total, err3 = strconv.ParseInt(size, 10, 64)
-	ok = err1 == nil && err2 == nil && err3 == nil && start >= 0 && end >= start && total > end
-	return
+	start, err := strconv.ParseInt(first, 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	end, err = strconv.ParseInt(last, 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	total, err = strconv.ParseInt(size, 10, 64)
+	if err != nil || start < 0 || end < start || total <= end {
+		return 0, 0, 0, false
+	}
+	return start, end, total, true
 }
 
 // putBlob stores a response body as the blob d. The server must declare how
