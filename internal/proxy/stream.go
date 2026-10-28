@@ -236,7 +236,7 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 			// without having said how this source ended (it panicked).
 			break
 		}
-		if !ended && avail >= a.size {
+		if (!ended || pending) && avail >= a.size {
 			avail = a.size - 1 // the last byte waits for the digest check
 		}
 		if off < avail {
