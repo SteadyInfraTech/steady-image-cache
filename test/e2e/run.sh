@@ -682,13 +682,17 @@ extra_diag() {
     echo "$d: SIC HEAD $h; in SIC's cache: $(docker exec "$A" sh -c "ls -l /var/lib/steady-image-cache/blobs/sha256/${d#sha256:} 2>&1 | awk '{print \$5, \$NF}'"); containerd: $(docker exec "$A" ctr -n k8s.io content ls 2>&1 | grep -c "${d#sha256:}" || true) listing(s)"
   done
   echo "free space on $A: $(docker exec "$A" df -h /var/lib/steady-image-cache 2>&1 | tail -1)"
-  echo "containerd on $A: $(docker exec "$A" containerd --version 2>&1)"
-  echo "discard_unpacked_layers as the CRI sees it:"
-  docker exec "$A" crictl info 2>&1 | grep -i -n "discardUnpacked\|discard_unpacked\|snapshotter\"" | head -5
-  echo "content in k8s.io on $A (digest size labels):"
-  docker exec "$A" ctr -n k8s.io content ls 2>&1 | awk '{print substr($1,8,12), $2, $4, $5}' | tail -25
-  echo "SIC log lines on the import and its errors:"
-  kubectl -n kube-system logs -l app=steady-image-cache --prefix --tail=-1 2>&1 | grep -i "import\|containerd" | tail -10
+  echo "env: $(grep -h PRETTY_NAME /etc/os-release) kernel $(uname -r) docker $(docker version --format '{{.Server.Version}}' 2>&1) $(docker info --format 'cgroup{{.CgroupVersion}} {{.Driver}}' 2>&1)"
+  echo "containerd: $(docker exec "$A" containerd --version 2>&1 | cut -c1-60)"
+  echo "discard: $(docker exec "$A" crictl info 2>&1 | grep -io '"discardUnpackedLayers": *[a-z]*' | head -1)"
+  echo "recent content in containerd (short digest size; * = in SIC):"
+  docker exec "$A" ctr -n k8s.io content ls 2>&1 | awk '$3 ~ /minutes|seconds/ {print $1, $2}' | while read -r dg sz; do
+    h=${dg#sha256:}
+    if docker exec "$A" test -e "/var/lib/steady-image-cache/blobs/sha256/$h"; then m='*'; else m=' '; fi
+    echo "$m ${h:0:10} $sz"
+  done
+  echo "SIC import log:"
+  kubectl -n kube-system logs "$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$A" -o name | head -1)" 2>&1 | grep -i "import" | tail -5 | cut -c1-200
 }
 
 wait_for "all three nodes to see all their peers" 90 all_see_peers
