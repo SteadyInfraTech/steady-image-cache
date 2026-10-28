@@ -26,6 +26,10 @@
 #                              public registries (needs the internet); see
 #                              .github/workflows/e2e-registries.yml
 set -Eeuo pipefail
+# Newer Docker adds an attestation manifest to every image it builds. The images
+# here are pushed to a test registry and pulled by containerd, which fetches only
+# the platform manifest, so an index naming an attestation nobody pulls would
+# make "SIC holds everything the manifest names" impossible. Build them plain.
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
@@ -279,7 +283,7 @@ mkdir "$WORK/app"
 head -c 3000000 /dev/urandom > "$WORK/app/one"
 head -c 2000000 /dev/urandom > "$WORK/app/two"
 printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$WORK/app/Dockerfile"
-docker build -t "$APP:v1" "$WORK/app"
+docker build --provenance=false --sbom=false -t "$APP:v1" "$WORK/app"
 kind load docker-image "$APP:v1" --name "$CLUSTER" --nodes "$A"
 DIGEST=$(docker exec "$A" ctr -n k8s.io images ls "name==$APP:v1" | awk 'NR==2 {print $3}')
 [[ $DIGEST == sha256:* ]] || fail "could not read the image digest on $A (got '$DIGEST')"
@@ -401,7 +405,7 @@ push() {
   head -c 3000000 /dev/urandom > "$dir/one"
   head -c 2000000 /dev/urandom > "$dir/two"
   printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$dir/Dockerfile"
-  docker build -q -t "$LOCAL:${2:-v1}" "$dir" >/dev/null
+  docker build --provenance=false --sbom=false -q -t "$LOCAL:${2:-v1}" "$dir" >/dev/null
   docker push "$LOCAL:${2:-v1}" | awk '/digest: sha256:/ {print $3}'
 }
 registry_blob_gets() { docker logs "$REGISTRY" 2>&1 | grep -c 'GET /v2/e2e/up/blobs/sha256:' || true; }
@@ -500,7 +504,7 @@ printf '%s' "$PASS" | docker login localhost:5444 -u "$USER_NAME" --password-std
 head -c 3000000 /dev/urandom > "$WORK/auth/one"
 head -c 2000000 /dev/urandom > "$WORK/auth/two"
 printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$WORK/auth/Dockerfile"
-docker build -q -t "$PRIV_LOCAL:v1" "$WORK/auth" >/dev/null
+docker build --provenance=false --sbom=false -q -t "$PRIV_LOCAL:v1" "$WORK/auth" >/dev/null
 DP=$(docker push "$PRIV_LOCAL:v1" | awk '/digest: sha256:/ {print $3}')
 [[ $DP == sha256:* ]] || fail "could not push to the private registry (digest '$DP')"
 echo "pushed $PRIV:v1 = $DP"
@@ -636,7 +640,7 @@ push_m() {
   head -c 3000000 /dev/urandom > "$dir/one"
   head -c 2000000 /dev/urandom > "$dir/two"
   printf 'FROM scratch\nCOPY one /one\nCOPY two /two\n' > "$dir/Dockerfile"
-  docker build -q -t "$LOCAL_M:$1" "$dir" >/dev/null
+  docker build --provenance=false --sbom=false -q -t "$LOCAL_M:$1" "$dir" >/dev/null
   docker push "$LOCAL_M:$1" | awk '/digest: sha256:/ {print $3}'
 }
 mirror_blob_gets() { docker logs "$MIRROR" 2>&1 | grep -c 'GET /v2/e2e/mirror/blobs/sha256:' || true; }
