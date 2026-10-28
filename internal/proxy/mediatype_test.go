@@ -3,6 +3,8 @@ package proxy
 import (
 	"strings"
 	"testing"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
 )
 
 // A stored JSON document is served with a media type of the registry formats or
@@ -53,5 +55,20 @@ func TestRegistryMediaTypesAreServedAsTheyAre(t *testing.T) {
 		if ct := resp.Header.Get("Content-Type"); ct != mt {
 			t.Errorf("%q was served as %q", mt, ct)
 		}
+	}
+}
+
+// With mutual TLS on, a peer that is only reachable over plain HTTP is not asked:
+// nothing authenticates the answer.
+func TestPlainHTTPPeersAreNotAskedWhenTLSIsOn(t *testing.T) {
+	n := newNode(t, Options{})
+	n.fin.urls.Store(&[]string{"http://10.0.0.1:5000", "https://10.0.0.2:5000"})
+	if got := n.p.livePeers(); len(got) != 2 {
+		t.Fatalf("without TLS both are peers: %v", got)
+	}
+	n.p.tls = &tlsutil.Reloader{}
+	got := n.p.livePeers()
+	if len(got) != 1 || got[0] != "https://10.0.0.2:5000" {
+		t.Fatalf("with TLS only the https peer is asked: %v", got)
 	}
 }

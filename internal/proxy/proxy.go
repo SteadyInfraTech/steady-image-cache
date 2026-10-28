@@ -873,6 +873,12 @@ func (p *Proxy) livePeers() []string {
 		}
 	}
 	for _, base := range all {
+		if p.tls != nil && !strings.HasPrefix(strings.ToLower(base), "https://") {
+			// Mutual TLS is what authenticates a peer, and a plain HTTP request
+			// has none: whoever sits on the path could answer it, and what it
+			// answers would be stored (a tag pointing at its choice of content).
+			continue
+		}
 		if _, down := p.down[base]; !down {
 			out = append(out, base)
 		}

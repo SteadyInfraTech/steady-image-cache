@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -239,6 +240,11 @@ func (c Config) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("mutual TLS is required but %s not set; set the missing settings, or set SIC_INSECURE=true to run without any authentication (development only)",
 			plural(missing))
+	}
+	for _, peer := range c.Peers {
+		if u, err := url.Parse(peer); err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+			return fmt.Errorf("SIC_PEERS entry %q is not an https:// URL; without SIC_INSECURE=true every peer is reached over mutual TLS, and a plain HTTP request authenticates nobody", peer)
+		}
 	}
 	return nil
 }
