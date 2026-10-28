@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -377,6 +378,9 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	w.Header().Set("Docker-Content-Digest", d)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", ct)
+	// Whatever the bytes are, a browser must not take them for a page.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	// ServeContent implements GET/HEAD, RFC 7233 byte ranges, If-Modified-Since and 416 responses.
 	cw := &countingWriter{ResponseWriter: w, n: p.servedCounter(r)}
 	http.ServeContent(cw, r, "", st.ModTime(), f)
@@ -397,6 +401,19 @@ func (p *Proxy) cacheReadFailed(d string, e error) {
 	p.warn("read", "cannot read %s from the cache: %v", d, e)
 }
 
+// registryMediaType reports whether t is a media type of the OCI or Docker
+// registry formats: a JSON document that is not rendered by a browser.
+func registryMediaType(t string) bool {
+	m, params, err := mime.ParseMediaType(t)
+	if err != nil || len(params) > 0 || m != strings.ToLower(t) {
+		return false
+	}
+	if !strings.HasPrefix(m, "application/vnd.oci.") && !strings.HasPrefix(m, "application/vnd.docker.") {
+		return false
+	}
+	return strings.HasSuffix(m, "+json") || strings.HasSuffix(m, "+prettyjws")
+}
+
 // manifestType reports the media type of a stored manifest. It uses the
 // document's own mediaType and falls back to telling an index from a manifest
 // by its shape, because mediaType is optional in OCI documents.
@@ -415,7 +432,14 @@ func manifestType(f io.ReadSeeker) string {
 	}
 	switch {
 	case doc.MediaType != "":
-		return doc.MediaType
+		// The field is the publisher's. Only a registry document type goes into
+		// Content-Type: anything else (text/html in an image config that is
+		// asked for by its digest, say) would make a browser run the cached
+		// bytes as a page on this node's origin.
+		if registryMediaType(doc.MediaType) {
+			return doc.MediaType
+		}
+		return defaultManifestType
 	case len(doc.Manifests) > 0:
 		return "application/vnd.oci.image.index.v1+json"
 	default:
@@ -709,6 +733,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	h.Set("Docker-Content-Digest", d)
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Type", "application/octet-stream")
+	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 }
