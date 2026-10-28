@@ -385,7 +385,7 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	w.Header().Set("Content-Type", ct)
 	// ServeContent implements GET/HEAD, RFC 7233 byte ranges, If-Modified-Since and 416 responses.
 	cw := &countingWriter{ResponseWriter: w, n: p.servedCounter(r), idle: p.writeIdle}
-	defer http.NewResponseController(w).SetWriteDeadline(time.Time{}) // the connection is reused
+	defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) }() // the connection is reused
 	http.ServeContent(cw, r, "", st.ModTime(), f)
 	return true
 }
