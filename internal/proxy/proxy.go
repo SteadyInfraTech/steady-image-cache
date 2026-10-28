@@ -1180,11 +1180,18 @@ func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[s
 		}
 		return r, true // no other peer can help, and this one did nothing wrong
 	}
-	if refused(e) {
+	switch {
+	case ranged && resp.StatusCode == http.StatusPartialContent && errors.Is(e, store.ErrDigestMismatch):
+		// This peer only sent the end; the start came from an earlier source, and
+		// either could be the one that is wrong. The partial file is discarded,
+		// so the next source starts over, and nobody is blamed on a guess.
+		p.metrics.VerifyErrors.Add(1)
+		p.warn("verify:"+base, "blob %s did not verify after resuming from peer %s: %v", d, base, e)
+	case refused(e):
 		p.metrics.VerifyErrors.Add(1)
 		p.warn("verify:"+base, "refused blob %s from peer %s: %v", d, base, e)
 		p.markDown(base, e)
-	} else {
+	default:
 		p.peerFailed(base, e)
 	}
 	return fetchResult{}, false
