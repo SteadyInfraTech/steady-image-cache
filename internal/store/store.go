@@ -203,6 +203,49 @@ type capacityReservation struct {
 	store     *Store
 	remaining int64
 	total     int64
+	// later is what the source declared beyond what has been reserved so far;
+	// it is reserved as the bytes arrive (grow), so that a source that declares
+	// a great deal and sends little cannot have the cache emptied on its word.
+	later int64
+	evict bool
+}
+
+// reserveChunk is how much of a declared size is reserved at a time. Making room
+// for a blob takes eviction, and eviction is paid for by the cache: only the
+// first chunk of it is spent before the source has delivered a byte, and every
+// further chunk after the previous one has arrived.
+var reserveChunk int64 = 64 << 20
+
+// grow reserves more of what the source declared, at least n bytes beyond what
+// is reserved now, evicting if allowed. It fails with ErrNoSpace when that does
+// not fit.
+func (r *capacityReservation) grow(n int64) error {
+	if r.later <= 0 {
+		return nil // past the declared size: the write is refused when it is checked
+	}
+	take := max(n, reserveChunk)
+	if take > r.later {
+		take = r.later
+	}
+	s := r.store
+	for attempt := 0; ; attempt++ {
+		s.capacityMu.Lock()
+		short := s.shortfallLocked(take, 0)
+		if short <= 0 {
+			s.reserved += take
+			s.pending += take
+			r.remaining += take
+			r.total += take
+			r.later -= take
+			s.capacityMu.Unlock()
+			return nil
+		}
+		s.capacityMu.Unlock()
+		if !r.evict || attempt >= 2 || short > s.used.Load() {
+			return ErrNoSpace
+		}
+		s.evict(short)
+	}
 }
 
 func (r *capacityReservation) consume(n int64) {
@@ -234,11 +277,28 @@ type reservingWriter struct {
 }
 
 func (w reservingWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.reservation.remaining {
+		if err := w.reservation.grow(int64(len(p)) - w.reservation.remaining); err != nil {
+			return 0, err
+		}
+	}
 	n, err := w.w.Write(p)
 	if n > 0 {
 		w.reservation.consume(int64(n))
 	}
 	return n, err
+}
+
+// fitsAtAll reports ErrNoSpace when need more bytes (and held already on disk)
+// could not be stored even if every blob were evicted. It changes nothing.
+func (s *Store) fitsAtAll(need, held int64) error {
+	s.capacityMu.Lock()
+	short := s.shortfallLocked(need, held)
+	s.capacityMu.Unlock()
+	if short > s.used.Load() {
+		return ErrNoSpace
+	}
+	return nil
 }
 
 // reserveSpace makes sure need more bytes fit within the size limit and the
@@ -642,11 +702,21 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 	var reservation *capacityReservation
 	if max-offset > 0 {
 		var err error
-		reservation, err = s.reserveSpace(max-offset, offset, evict)
+		// Whether it can fit at all is settled now, on the declared size, so that
+		// a blob that never could is refused before anything is evicted for it.
+		// Room is then made for the first chunk, and for the rest as it arrives.
+		if err = s.fitsAtAll(max-offset, offset); err != nil {
+			s.DropResume(res)
+			return 0, err
+		}
+		first := min(max-offset, reserveChunk)
+		reservation, err = s.reserveSpace(first, offset, evict)
 		if err != nil {
 			s.DropResume(res)
 			return 0, err
 		}
+		reservation.later = max - offset - first
+		reservation.evict = evict
 		defer reservation.release()
 	}
 	h := sha256.New()
