@@ -307,11 +307,16 @@ func splitPath(path, marker string) (string, string, bool) {
 func blobPath(path string) (string, string, bool)     { return splitPath(path, "/blobs/") }
 func manifestPath(path string) (string, string, bool) { return splitPath(path, "/manifests/") }
 
+// ns is the registry a request is for. Host names are case-insensitive and
+// upstream selection already ignores case, so the namespace is lower-cased once
+// here: otherwise every spelling of one registry would get its own alias, flight
+// and download keys, and a client could make the cache keep as many copies of
+// one tag's record as it likes.
 func ns(r *http.Request) string {
 	if v := r.URL.Query().Get("ns"); v != "" {
-		return v
+		return strings.ToLower(v)
 	}
-	return r.Host
+	return strings.ToLower(r.Host)
 }
 
 func isPeer(r *http.Request) bool { return r.Header.Get(PeerHeader) != "" }

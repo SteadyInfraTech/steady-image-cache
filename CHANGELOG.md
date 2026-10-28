@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Security: the registry name of a request (`?ns=`, or the Host header) is lower-cased once on arrival. Upstream selection already ignored case but tag records and download keys did not, so a client could make the cache keep a record of one tag for every spelling of one registry name. (Records written under other spellings by an earlier version are ignored.)
 - A request for a blob or manifest that had just been stored could be answered with a `404` (a miss, nothing in the log) if the same content arrived a second time at that moment, as when two clients ask for one manifest with different `Accept` headers: the store refused to open a blob while any writer held it, including one only re-checking a complete file. A blob that is complete, verified and unchanged is now served regardless.
 ## 1.1.0 - 2026-10-28
 
