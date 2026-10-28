@@ -686,11 +686,14 @@ extra_diag() {
   echo "containerd: $(docker exec "$A" containerd --version 2>&1 | cut -c1-60)"
   echo "discard: $(docker exec "$A" crictl info 2>&1 | grep -io '"discardUnpackedLayers": *[a-z]*' | head -1)"
   echo "recent content in containerd (short digest size; * = in SIC):"
-  docker exec "$A" ctr -n k8s.io content ls 2>&1 | awk '$3 ~ /minutes|seconds/ {print $1, $2}' | while read -r dg sz; do
+  docker exec "$A" ctr -n k8s.io content ls 2>&1 | awk '$4 ~ /minutes|seconds/ {print $1, $2}' | while read -r dg sz; do
     h=${dg#sha256:}
     if docker exec "$A" test -e "/var/lib/steady-image-cache/blobs/sha256/$h"; then m='*'; else m=' '; fi
     echo "$m ${h:0:10} $sz"
   done
+  echo "the missing one, in containerd:"
+  docker exec "$A" ctr -n k8s.io content get "${DM1:-none}" 2>&1 | head -c 700
+  echo
   echo "SIC import log:"
   kubectl -n kube-system logs "$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$A" -o name | head -1)" 2>&1 | grep -i "import" | tail -5 | cut -c1-200
 }
