@@ -178,7 +178,7 @@ func (p *Proxy) markProtected(namespace, d string) error {
 	}
 	if err := p.store.MarkProtected(d); err != nil {
 		p.warn("mark", "cannot mark %s as protected: %v", d, err)
-		return fmt.Errorf("%w: %v", errMark, err)
+		return fmt.Errorf("%w: %w", errMark, err)
 	}
 	return nil
 }
