@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // A download is one fetch of a blob that every client asking for it shares.
@@ -193,6 +194,7 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 	w.WriteHeader(http.StatusOK)
 	p.metrics.Streamed.Add(1)
 	rc := http.NewResponseController(w)
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }() // the connection is reused
 
 	buf := make([]byte, 64<<10)
 	var off int64
@@ -215,6 +217,9 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 			}
 			m, e := f.ReadAt(buf[:n], off)
 			if m > 0 {
+				if p.writeIdle > 0 {
+					_ = rc.SetWriteDeadline(time.Now().Add(p.writeIdle))
+				}
 				wn, we := w.Write(buf[:m])
 				if wn > 0 {
 					p.servedCounter(r).Add(uint64(wn)) // what was accepted counts, even if the write then failed
