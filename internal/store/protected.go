@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -40,18 +41,38 @@ func (s *Store) MarkProtected(d string) error {
 	return f.Close()
 }
 
-// IsProtected reports whether blob d carries the mark.
+// IsProtected reports whether blob d carries the mark. When that cannot be
+// told (the file system fails), it says yes: the caller then asks the registry,
+// which is the safe way to be wrong.
 func (s *Store) IsProtected(d string) bool {
 	p, err := s.markPath(d)
 	if err != nil {
-		return false
+		return false // not a digest; nothing is stored under it
 	}
 	_, err = os.Stat(p)
-	return err == nil
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-func (s *Store) unmark(d string) {
-	if p, err := s.markPath(d); err == nil {
-		_ = os.Remove(p)
+// pruneMarks removes the marks of blobs that are no longer stored. It runs at
+// start, before anything is served: a mark is never removed while the cache is
+// in use, because a blob that is evicted and fetched again must not pass,
+// however briefly, for one that came from anywhere else.
+func (s *Store) pruneMarks() {
+	dir := filepath.Join(s.root, "protected")
+	marks, err := os.ReadDir(dir)
+	if err != nil || len(marks) == 0 {
+		return
+	}
+	have := map[string]bool{}
+	if blobs, err := os.ReadDir(filepath.Join(s.root, "blobs", "sha256")); err == nil {
+		for _, b := range blobs {
+			sum := sha256.Sum256([]byte("sha256:" + b.Name()))
+			have[hex.EncodeToString(sum[:])] = true
+		}
+	}
+	for _, m := range marks {
+		if !have[m.Name()] {
+			_ = os.Remove(filepath.Join(dir, m.Name()))
+		}
 	}
 }

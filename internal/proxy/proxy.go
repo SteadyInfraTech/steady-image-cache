@@ -415,6 +415,14 @@ func newInfo(r *http.Request) info {
 	}
 }
 
+// markedServe serves manifest d, having marked it first when namespace is
+// protected: a client that knows the digest must not be able to read it as a
+// blob of another namespace while this one is still being sent.
+func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, namespace, d string) bool {
+	p.markProtected(namespace, d)
+	return p.serveDigest(w, r, d, manifestType)
+}
+
 // serveDigest serves a stored object. ctype may inspect the content to choose a
 // Content-Type; nil means application/octet-stream.
 func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ctype func(io.ReadSeeker) string) bool {
@@ -827,8 +835,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	// A node that asks us for a tag is answered with what we have, however old:
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
-	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.serveDigest(w, r, d, manifestType) {
-		p.markProtected(namespace, d)
+	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
@@ -850,8 +857,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		return // the client gave up
 	}
 	if res.ok {
-		if d, found := p.store.Resolve(namespace, repo, ref); found && p.serveDigest(w, r, d, manifestType) {
-			p.markProtected(namespace, d)
+		if d, found := p.store.Resolve(namespace, repo, ref); found && p.markedServe(w, r, namespace, d) {
 			return
 		}
 	}
@@ -1262,12 +1268,15 @@ func readManifest(resp *http.Response, ref string) (string, []byte, error) {
 }
 
 // storeManifest reads a manifest from resp and stores it.
-func (p *Proxy) storeManifest(resp *http.Response, ref string, received *atomic.Uint64) (string, int64, error) {
+func (p *Proxy) storeManifest(resp *http.Response, namespace, ref string, received *atomic.Uint64) (string, int64, error) {
 	resp.Body = &countedBody{ReadCloser: resp.Body, n: received}
 	d, b, e := readManifest(resp, ref)
 	if e != nil {
 		return "", int64(len(b)), e
 	}
+	// Marked before it is stored: from the moment it can be read by digest, it is
+	// known to come from a protected registry.
+	p.markProtected(namespace, d)
 	_, e = p.store.PutVerified(d, bytes.NewReader(b))
 	return d, int64(len(b)), e
 }
@@ -1285,7 +1294,7 @@ func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResu
 			p.peerAnswered(base, resp)
 			continue
 		}
-		d, size, e := p.storeManifest(resp, ref, &p.metrics.BytesFromPeers)
+		d, size, e := p.storeManifest(resp, in.ns, ref, &p.metrics.BytesFromPeers)
 		resp.Body.Close()
 		if e == nil {
 			return d, fetched
@@ -1417,7 +1426,7 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 		p.upstreamAnswered(host, resp)
 		return "", fetchResult{}
 	}
-	d, size, e := p.storeManifest(resp, ref, &p.metrics.BytesFromUpstream)
+	d, size, e := p.storeManifest(resp, in.ns, ref, &p.metrics.BytesFromUpstream)
 	if e != nil {
 		if r, ours := p.localFailure(e, d, size); ours {
 			return "", r

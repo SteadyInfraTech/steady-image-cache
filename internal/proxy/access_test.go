@@ -226,6 +226,23 @@ func TestProtectedBlobIsNotGivenOutUnderAnotherNamespace(t *testing.T) {
 	}
 }
 
+// A manifest fetched by tag is marked as well, so its digest is guarded as a
+// blob under any namespace.
+func TestProtectedManifestByTagIsMarked(t *testing.T) {
+	reg := newTokenRegistry(t, []byte("x"), testManifest)
+	p, _, host := protectedProxy(t, reg, true)
+	if rec := request(p, "GET", "/v2/lib/app/manifests/v1?ns="+host, "Authorization", "Bearer tok"); rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	d := digestOf(testManifest)
+	if !p.store.IsProtected(d) {
+		t.Fatal("the manifest's digest carries no mark")
+	}
+	if rec := request(p, "GET", "/v2/lib/app/blobs/"+d+"?ns=evil.example"); rec.Code == 200 {
+		t.Fatal("the manifest was read as a blob under another namespace")
+	}
+}
+
 // Nothing changes for a registry that is not listed.
 func TestUnprotectedRegistryIsAsBefore(t *testing.T) {
 	blob := []byte("layer")
