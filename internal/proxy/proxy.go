@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,6 +95,10 @@ type Options struct {
 	// registries listed in UpstreamRegistries.
 	Upstream           bool
 	UpstreamRegistries []string
+	// ProtectedRegistries are registries (a subset of UpstreamRegistries) whose
+	// content is served only to a client the registry itself confirms, see
+	// access.go.
+	ProtectedRegistries []string
 	// TLS supplies the client certificate and CA for SIC-to-SIC traffic and is
 	// re-checked for changes. Nil means plain HTTP between peers.
 	TLS        *tlsutil.Reloader
@@ -110,6 +115,8 @@ type Proxy struct {
 	metrics         *metrics.Metrics
 	upstream        bool
 	registries      map[string]bool
+	protected       map[string]bool // registries whose clients are checked, see access.go
+	access          accessCache
 	idle            time.Duration
 	manifestTimeout time.Duration             // bound on one manifest request, see maxManifestFetch
 	flights         flight.Group[fetchResult] // manifests
@@ -138,6 +145,14 @@ type Proxy struct {
 	skipped map[string]int
 }
 
+func lowered(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		out = append(out, strings.ToLower(strings.TrimSpace(v)))
+	}
+	return out
+}
+
 func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, error) {
 	if o.Timeout <= 0 {
 		o.Timeout = 30 * time.Second
@@ -147,6 +162,19 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 	}
 	if o.CoordWait <= 0 {
 		o.CoordWait = 20 * time.Second
+	}
+	prot := map[string]bool{}
+	for _, r := range o.ProtectedRegistries {
+		r = strings.ToLower(strings.TrimSpace(r))
+		if r == "" {
+			continue
+		}
+		if !o.Upstream || !slices.Contains(lowered(o.UpstreamRegistries), r) {
+			// Without the registry there is nobody to ask, and a check that
+			// cannot be made would either lock everyone out or let everyone in.
+			return nil, fmt.Errorf("SIC_PROTECTED_REGISTRIES names %s, which is not in SIC_UPSTREAM_REGISTRIES with SIC_UPSTREAM_ENABLED=true", r)
+		}
+		prot[r] = true
 	}
 	regs := map[string]bool{}
 	for _, r := range o.UpstreamRegistries {
@@ -171,6 +199,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		metrics:         m,
 		upstream:        o.Upstream,
 		registries:      regs,
+		protected:       prot,
 		idle:            o.Timeout,
 		manifestTimeout: maxManifestFetch,
 		peerTimeout:     o.PeerTimeout,
@@ -298,11 +327,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		if repo, d, ok := blobPath(r.URL.Path); ok {
-			p.blob(w, r, repo, d)
+			if p.admit(w, r, repo) {
+				p.blob(w, r, repo, d)
+			}
 			return
 		}
 		if repo, ref, ok := manifestPath(r.URL.Path); ok {
-			p.manifest(w, r, repo, ref)
+			if p.admit(w, r, repo) {
+				p.manifest(w, r, repo, ref)
+			}
 			return
 		}
 	}
@@ -380,6 +413,17 @@ func newInfo(r *http.Request) info {
 		accept: r.Header.Get("Accept"),
 		auth:   r.Header.Get("Authorization"),
 	}
+}
+
+// markedServe serves manifest d, having marked it first when namespace is
+// protected: a client that knows the digest must not be able to read it as a
+// blob of another namespace while this one is still being sent.
+func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, namespace, d string) bool {
+	if p.markProtected(namespace, d) != nil {
+		http.Error(w, "cannot record where this content came from", http.StatusServiceUnavailable)
+		return true // answered
+	}
+	return p.serveDigest(w, r, d, manifestType)
 }
 
 // serveDigest serves a stored object. ctype may inspect the content to choose a
@@ -662,7 +706,7 @@ func (p *Proxy) missFetch(in info, path, d string, viaCoordinator bool) func(*do
 		if _, err := p.store.Stat(d); err == nil {
 			return fetched
 		}
-		if viaCoordinator {
+		if viaCoordinator && !p.protected[in.ns] {
 			if c, ok := p.otherCoordinator(d); ok {
 				cr := p.fetchCoordinator(in, c, path, d)
 				if cr.ok {
@@ -723,7 +767,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	size, ok := int64(-1), false
 	var challenge []string
 	var throttle *fetchResult
-	for _, base := range p.askablePeers() {
+	for _, base := range p.askablePeers(in.ns) {
 		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
 			p.peerFailed(base, e)
@@ -794,7 +838,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	// A node that asks us for a tag is answered with what we have, however old:
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
-	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.serveDigest(w, r, d, manifestType) {
+	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
@@ -816,7 +860,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		return // the client gave up
 	}
 	if res.ok {
-		if d, found := p.store.Resolve(namespace, repo, ref); found && p.serveDigest(w, r, d, manifestType) {
+		if d, found := p.store.Resolve(namespace, repo, ref); found && p.markedServe(w, r, namespace, d) {
 			return
 		}
 	}
@@ -929,7 +973,10 @@ func (p *Proxy) livePeers() []string {
 
 // askablePeers is shuffledPeers cut to the number one miss may ask. The peers
 // are in random order, so the ones left out differ from miss to miss.
-func (p *Proxy) askablePeers() []string {
+func (p *Proxy) askablePeers(ns string) []string {
+	if p.protected[ns] {
+		return nil // protected content is not shared between nodes
+	}
 	peers := p.shuffledPeers()
 	if p.maxTries > 0 && len(peers) > p.maxTries {
 		p.metrics.PeerCapped.Add(1)
@@ -1117,6 +1164,8 @@ func (p *Proxy) localFailure(e error, d string, size int64) (fetchResult, bool) 
 		p.warn("space", "not caching %s (%d bytes): free disk space would drop below SIC_MIN_FREE_BYTES=%d, or the disk is full",
 			d, size, p.store.MinFree())
 		return fetchResult{status: http.StatusInsufficientStorage}, true
+	case errors.Is(e, errMark):
+		return fetchResult{status: http.StatusServiceUnavailable}, true
 	case errors.Is(e, store.ErrLocal):
 		p.metrics.StoreErrors.Add(1)
 		p.warn("local", "cannot write to the cache directory: %v", e)
@@ -1132,7 +1181,7 @@ func refused(e error) bool {
 
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	var noSpace fetchResult
-	for _, base := range p.askablePeers() {
+	for _, base := range p.askablePeers(in.ns) {
 		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, map[string]string{PeerHeader: "1"}, false)
 		if done {
 			return res
@@ -1224,11 +1273,16 @@ func readManifest(resp *http.Response, ref string) (string, []byte, error) {
 }
 
 // storeManifest reads a manifest from resp and stores it.
-func (p *Proxy) storeManifest(resp *http.Response, ref string, received *atomic.Uint64) (string, int64, error) {
+func (p *Proxy) storeManifest(resp *http.Response, namespace, ref string, received *atomic.Uint64) (string, int64, error) {
 	resp.Body = &countedBody{ReadCloser: resp.Body, n: received}
 	d, b, e := readManifest(resp, ref)
 	if e != nil {
 		return "", int64(len(b)), e
+	}
+	// Marked before it is stored: from the moment it can be read by digest, it is
+	// known to come from a protected registry.
+	if e := p.markProtected(namespace, d); e != nil {
+		return d, int64(len(b)), e
 	}
 	_, e = p.store.PutVerified(d, bytes.NewReader(b))
 	return d, int64(len(b)), e
@@ -1236,7 +1290,7 @@ func (p *Proxy) storeManifest(resp *http.Response, ref string, received *atomic.
 
 // fetchManifestPeers returns the digest of the manifest it stored.
 func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
-	for _, base := range p.askablePeers() {
+	for _, base := range p.askablePeers(in.ns) {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1", "Accept": in.accept})
 		if e != nil {
 			p.peerFailed(base, e)
@@ -1247,7 +1301,7 @@ func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResu
 			p.peerAnswered(base, resp)
 			continue
 		}
-		d, size, e := p.storeManifest(resp, ref, &p.metrics.BytesFromPeers)
+		d, size, e := p.storeManifest(resp, in.ns, ref, &p.metrics.BytesFromPeers)
 		resp.Body.Close()
 		if e == nil {
 			return d, fetched
@@ -1379,7 +1433,7 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 		p.upstreamAnswered(host, resp)
 		return "", fetchResult{}
 	}
-	d, size, e := p.storeManifest(resp, ref, &p.metrics.BytesFromUpstream)
+	d, size, e := p.storeManifest(resp, in.ns, ref, &p.metrics.BytesFromUpstream)
 	if e != nil {
 		if r, ours := p.localFailure(e, d, size); ours {
 			return "", r

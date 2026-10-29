@@ -76,6 +76,8 @@ dump() {
   { echo "stage: $STAGE"; echo "command: $BASH_COMMAND_FAILED (line $LINE_FAILED)"; tail -n 25 "$OUT"; } | annotate "e2e failed"
   kubectl -n kube-system get pods -o wide 2>&1 | tee "$WORK/pods.txt" || true
   annotate "pods" < "$WORK/pods.txt"
+  kubectl -n kube-system get events --sort-by=.lastTimestamp 2>&1 | tail -n 15 | tee "$WORK/events.txt" || true
+  annotate "events" < "$WORK/events.txt"
   for p in $(kubectl -n kube-system get pods -l app=steady-image-cache -o name 2>/dev/null); do
     echo "--- $p"
     { kubectl -n kube-system get "$p" -o wide --no-headers; kubectl -n kube-system logs "$p" --tail=40; } 2>&1 | tee "$WORK/pod.txt" || true
@@ -576,6 +578,41 @@ docker exec "$C" crictl pull "$PRIV@$DP"
 [ "$(from_cluster "$C")" -ge 3 ] || fail "$C had fewer than 3 peer hits by digest"
 
 log "phase 3 passed: credentials passed on and never kept, shared between nodes, and the boundary is as documented"
+
+# ---------------------------------------------------------------------------
+# Phase 3b: SIC_PROTECTED_REGISTRIES. The same registry, now listed as protected:
+# what is in the cache is no longer handed to a client the registry does not
+# know, with the same pods and the same cache directories (they survive the
+# restart), and a client it does know is answered from the cache.
+# ---------------------------------------------------------------------------
+log "phase 3b: the registry is protected: the cache asks it who is asking"
+kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES="$PRIVATE_HOST"
+kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+wait_for "all three nodes to see all their peers" 90 all_see_peers
+GETS_BASE=$(blob_gets)
+refused "no credentials on $A, protected" docker exec "$A" crictl pull "$PRIV:v1"
+refused "wrong password on $A, protected" docker exec "$A" crictl pull --creds "$USER_NAME:not-$PASS" "$PRIV:v1"
+[ "$(metric "$A" sic_access_denied_total)" -ge 2 ] || fail "$A counted $(metric "$A" sic_access_denied_total) denied checks, want at least 2"
+# A node that has nothing is not a way round: its peers have the blobs, and it must still ask.
+docker exec "$C" crictl rmi "$PRIV:v1" >/dev/null 2>&1 || true
+refused "no credentials on $C, protected" docker exec "$C" crictl pull "$PRIV:v1"
+refused "no credentials on $C, by digest, protected" docker exec "$C" crictl pull "$PRIV@$DP"
+# The right credentials: a node that has the content answers from its cache.
+docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
+[ "$(blob_gets)" = "$GETS_BASE" ] || fail "the registry served blobs to a client that was confirmed on a node that had them ($GETS_BASE -> $(blob_gets)): they should come from the cache"
+# Protected content is not passed between nodes. (The counters began at zero
+# when the pods were restarted for this phase.)
+docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
+for n in "$A" "$B" "$C"; do
+  [ "$(metric "$n" sic_peer_hits_total)" = 0 ] || fail "$n took protected content from a peer"
+  [ "$(metric "$n" sic_bytes_to_peers_total)" = 0 ] || fail "$n gave protected content to a peer"
+done
+[ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
+[ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
+kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES-
+kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+wait_for "all three nodes to see all their peers" 90 all_see_peers
+log "phase 3b passed: a protected registry's content is only served to clients the registry confirms"
 
 # ---------------------------------------------------------------------------
 # Phase 4: SIC as a mirror (deploy/containerd/mirror-hosts.toml).

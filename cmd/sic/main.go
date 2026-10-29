@@ -138,19 +138,20 @@ func main() {
 	}
 
 	h, err := proxy.New(st, finders, m, proxy.Options{
-		Timeout:            cfg.UpstreamTimeout,
-		PeerTimeout:        cfg.PeerTimeout,
-		PeerBackoff:        cfg.PeerBackoff,
-		PeerMaxTries:       cfg.PeerMaxTries,
-		Self:               self,
-		Coordinate:         cfg.Coordinate,
-		CoordWait:          cfg.CoordWait,
-		TagTTL:             cfg.TagTTL,
-		Upstream:           cfg.UpstreamEnabled,
-		UpstreamRegistries: cfg.UpstreamRegistries,
-		TLS:                clientTLS,
-		ServerName:         cfg.TLSServerName,
-		Logf:               log.Printf,
+		Timeout:             cfg.UpstreamTimeout,
+		PeerTimeout:         cfg.PeerTimeout,
+		PeerBackoff:         cfg.PeerBackoff,
+		PeerMaxTries:        cfg.PeerMaxTries,
+		Self:                self,
+		Coordinate:          cfg.Coordinate,
+		CoordWait:           cfg.CoordWait,
+		TagTTL:              cfg.TagTTL,
+		Upstream:            cfg.UpstreamEnabled,
+		UpstreamRegistries:  cfg.UpstreamRegistries,
+		ProtectedRegistries: cfg.ProtectedRegistries,
+		TLS:                 clientTLS,
+		ServerName:          cfg.TLSServerName,
+		Logf:                log.Printf,
 	})
 	if err != nil {
 		log.Fatal(err)

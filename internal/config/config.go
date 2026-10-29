@@ -63,6 +63,9 @@ type Config struct {
 	// UpstreamRegistries lists the registries SIC may contact when upstream
 	// fallback is enabled. Anything else named in ?ns= is refused.
 	UpstreamRegistries []string
+	// ProtectedRegistries are registries whose content is served only to a
+	// client that the registry confirms may read it (SIC_PROTECTED_REGISTRIES).
+	ProtectedRegistries []string
 
 	KubernetesDiscovery                               bool
 	PodNamespace, PodName, NodeName, PodLabelSelector string
@@ -127,6 +130,7 @@ func FromEnv() Config {
 		UpstreamTimeout:     30 * time.Second,
 		UpstreamEnabled:     boolenv("SIC_UPSTREAM_ENABLED", false),
 		UpstreamRegistries:  list(os.Getenv("SIC_UPSTREAM_REGISTRIES")),
+		ProtectedRegistries: list(os.Getenv("SIC_PROTECTED_REGISTRIES")),
 		KubernetesDiscovery: boolenv("SIC_KUBERNETES_DISCOVERY", true),
 		PodNamespace:        env("POD_NAMESPACE", "kube-system"),
 		PodName:             os.Getenv("POD_NAME"),

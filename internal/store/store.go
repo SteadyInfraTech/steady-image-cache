@@ -370,6 +370,7 @@ func New(root string) (*Store, error) {
 	s.minAge.Store(int64(defaultEvictMinAge))
 	s.used.Store(usage(blobs))
 	s.loadVerified()
+	s.pruneMarks()
 	aliasFile := filepath.Join(root, "aliases.json")
 	b, err := os.ReadFile(aliasFile)
 	switch {
