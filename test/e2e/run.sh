@@ -76,6 +76,8 @@ dump() {
   { echo "stage: $STAGE"; echo "command: $BASH_COMMAND_FAILED (line $LINE_FAILED)"; tail -n 25 "$OUT"; } | annotate "e2e failed"
   kubectl -n kube-system get pods -o wide 2>&1 | tee "$WORK/pods.txt" || true
   annotate "pods" < "$WORK/pods.txt"
+  kubectl -n kube-system get events --sort-by=.lastTimestamp 2>&1 | tail -n 15 | tee "$WORK/events.txt" || true
+  annotate "events" < "$WORK/events.txt"
   for p in $(kubectl -n kube-system get pods -l app=steady-image-cache -o name 2>/dev/null); do
     echo "--- $p"
     { kubectl -n kube-system get "$p" -o wide --no-headers; kubectl -n kube-system logs "$p" --tail=40; } 2>&1 | tee "$WORK/pod.txt" || true
@@ -592,7 +594,7 @@ refused "no credentials on $A, protected" docker exec "$A" crictl pull "$PRIV:v1
 refused "wrong password on $A, protected" docker exec "$A" crictl pull --creds "$USER_NAME:not-$PASS" "$PRIV:v1"
 [ "$(metric "$A" sic_access_denied_total)" -ge 2 ] || fail "$A counted $(metric "$A" sic_access_denied_total) denied checks, want at least 2"
 # A node that has nothing is not a way round: its peers have the blobs, and it must still ask.
-docker exec "$C" sh -c "crictl images -q $PRIV | xargs -r crictl rmi" >/dev/null 2>&1 || true
+docker exec "$C" crictl rmi "$PRIV:v1" >/dev/null 2>&1 || true
 refused "no credentials on $C, protected" docker exec "$C" crictl pull "$PRIV:v1"
 refused "no credentials on $C, by digest, protected" docker exec "$C" crictl pull "$PRIV@$DP"
 # The right credentials: answered from the cache, not by the registry.
