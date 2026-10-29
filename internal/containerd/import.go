@@ -125,6 +125,9 @@ func (i *Importer) importAliases(imgs []namedImage) error {
 		if !ok {
 			continue
 		}
+		// The proxy lower-cases the registry of every request, so that is the
+		// spelling a lookup uses; an alias under another one would never be found.
+		registry = strings.ToLower(registry)
 		if _, err := i.Store.SetAliasIfAbsent(registry, repo, ref, img.Target().Digest.String()); err != nil {
 			failed.add(fmt.Errorf("persist alias for image %q: %w", img.Name(), err))
 		}

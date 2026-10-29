@@ -323,11 +323,25 @@ func splitPath(path, marker string) (string, string, bool) {
 func blobPath(path string) (string, string, bool)     { return splitPath(path, "/blobs/") }
 func manifestPath(path string) (string, string, bool) { return splitPath(path, "/manifests/") }
 
+// validNamespace reports whether a registry name is fit to be part of a key: a
+// host name or address with an optional port. An IPv6 literal is allowed, since
+// a client may well reach the cache by one.
+func validNamespace(v string) bool {
+	return registryRE.MatchString(v) || ipv6NamespaceRE.MatchString(v)
+}
+
+var ipv6NamespaceRE = regexp.MustCompile(`^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$`)
+
+// ns is the registry a request is for. Host names are case-insensitive and
+// upstream selection already ignores case, so the namespace is lower-cased once
+// here: otherwise every spelling of one registry would get its own alias, flight
+// and download keys, and a client could make the cache keep as many copies of
+// one tag's record as it likes.
 func ns(r *http.Request) string {
 	if v := r.URL.Query().Get("ns"); v != "" {
-		return v
+		return strings.ToLower(v)
 	}
-	return r.Host
+	return strings.ToLower(r.Host)
 }
 
 func isPeer(r *http.Request) bool { return r.Header.Get(PeerHeader) != "" }
@@ -759,14 +773,15 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		http.Error(w, "invalid manifest reference", 400)
 		return
 	}
-	if v := r.URL.Query().Get("ns"); v != "" && !registryRE.MatchString(v) {
+	namespace := ns(r)
+	if !validNamespace(namespace) {
 		// The namespace is part of the key under which tags are remembered
 		// ("ns/repo@tag"); one with a slash in it could collide with another
-		// namespace's repository.
+		// namespace's repository. It is checked wherever it came from, the
+		// ?ns= parameter or the Host header.
 		http.Error(w, "invalid namespace", 400)
 		return
 	}
-	namespace := ns(r)
 	// A node that asks us for a tag is answered with what we have, however old:
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
