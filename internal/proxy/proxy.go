@@ -420,7 +420,8 @@ func newInfo(r *http.Request) info {
 // blob of another namespace while this one is still being sent.
 func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, namespace, d string) bool {
 	if p.markProtected(namespace, d) != nil {
-		return false
+		http.Error(w, "cannot record where this content came from", http.StatusServiceUnavailable)
+		return true // answered
 	}
 	return p.serveDigest(w, r, d, manifestType)
 }
@@ -1163,6 +1164,8 @@ func (p *Proxy) localFailure(e error, d string, size int64) (fetchResult, bool) 
 		p.warn("space", "not caching %s (%d bytes): free disk space would drop below SIC_MIN_FREE_BYTES=%d, or the disk is full",
 			d, size, p.store.MinFree())
 		return fetchResult{status: http.StatusInsufficientStorage}, true
+	case errors.Is(e, errMark):
+		return fetchResult{status: http.StatusServiceUnavailable}, true
 	case errors.Is(e, store.ErrLocal):
 		p.metrics.StoreErrors.Add(1)
 		p.warn("local", "cannot write to the cache directory: %v", e)

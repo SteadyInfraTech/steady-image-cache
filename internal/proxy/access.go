@@ -3,6 +3,8 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -165,6 +167,9 @@ func (p *Proxy) probe(in info, path, key string) fetchResult {
 	}
 }
 
+// errMark marks a failure to record where content came from.
+var errMark = errors.New("cannot record where content came from")
+
 // markProtected notes that d is being given out under a protected registry. An
 // error means it could not be noted, and then d must not be given out.
 func (p *Proxy) markProtected(namespace, d string) error {
@@ -173,7 +178,7 @@ func (p *Proxy) markProtected(namespace, d string) error {
 	}
 	if err := p.store.MarkProtected(d); err != nil {
 		p.warn("mark", "cannot mark %s as protected: %v", d, err)
-		return err
+		return fmt.Errorf("%w: %v", errMark, err)
 	}
 	return nil
 }

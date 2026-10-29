@@ -266,8 +266,8 @@ func TestProtectedContentIsRefusedWhenItCannotBeMarked(t *testing.T) {
 	}
 	for _, path := range []string{"/v2/lib/app/blobs/" + digestOf(blob), "/v2/lib/app/manifests/v1"} {
 		rec := request(p, "GET", path+"?ns="+host, "Authorization", "Bearer tok")
-		if rec.Code == 200 || rec.Body.String() == string(blob) {
-			t.Fatalf("%s: status %d, given out without a mark", path, rec.Code)
+		if rec.Code != http.StatusServiceUnavailable || rec.Body.String() == string(blob) {
+			t.Fatalf("%s: status %d, want 503: given out or called missing without a mark", path, rec.Code)
 		}
 	}
 	if _, err := p.store.Stat(digestOf(testManifest)); err == nil {
