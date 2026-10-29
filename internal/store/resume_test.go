@@ -299,3 +299,66 @@ func TestResumeAfterAnEmptyFailureLeavesNoFile(t *testing.T) {
 		t.Fatalf("left behind %v", left)
 	}
 }
+
+// A partial file that could not be removed is not forgotten: what holds its
+// path is asked to remove it again, and the failure is logged.
+func TestResumeKeepsTheNameOfAPartialItCouldNotRemove(t *testing.T) {
+	s := newTestStore(t)
+	var logged []string
+	s.SetLogf(func(f string, a ...any) { logged = append(logged, f) })
+	body := []byte(strings.Repeat("0123456789", 1000))
+	d := digestOf(body)
+	var res Resume
+	if _, err := s.PutResumable(d, cutAfter(body, 4000), int64(len(body)), nil, &res); err == nil {
+		t.Fatal("a cut transfer reported success")
+	}
+	if left := partials(t, s); len(left) != 1 {
+		t.Fatalf("partials %v", left)
+	}
+
+	real := s.removeBlob
+	s.removeBlob = func(string) error { return errors.New("remove refused") }
+	s.DropResume(&res)
+	if res.path == "" || res.Size() != 0 {
+		t.Fatalf("after a failed removal the Resume holds path %q, size %d", res.path, res.Size())
+	}
+	if len(logged) == 0 {
+		t.Fatal("the failure was not logged")
+	}
+	if left := partials(t, s); len(left) != 1 {
+		t.Fatalf("the file should still be there: %v", left)
+	}
+
+	s.removeBlob = real
+	s.DropResume(&res)
+	if left := partials(t, s); len(left) != 0 || res.path != "" {
+		t.Fatalf("not removed on the second try: %v, path %q", left, res.path)
+	}
+}
+
+// The same when the attempt itself cleans up and the removal fails: the file's
+// name stays in the Resume so that it is removed later, and the next attempt
+// removes it before starting its own.
+func TestResumeCleanupFailureIsRetried(t *testing.T) {
+	s := newTestStore(t)
+	body := []byte(strings.Repeat("0123456789", 1000))
+	d := digestOf(body)
+	var res Resume
+	real := s.removeBlob
+	s.removeBlob = func(string) error { return errors.New("remove refused") }
+	// A body that is not the blob fails verification, which is not resumable.
+	wrong := bytes.Repeat([]byte("x"), len(body))
+	if _, err := s.PutResumable(d, bytes.NewReader(wrong), int64(len(body)), nil, &res); err == nil {
+		t.Fatal("a wrong body was accepted")
+	}
+	if res.path == "" || res.Size() != 0 {
+		t.Fatalf("Resume holds path %q, size %d", res.path, res.Size())
+	}
+	s.removeBlob = real
+	if _, err := s.PutResumable(d, bytes.NewReader(body), int64(len(body)), nil, &res); err != nil {
+		t.Fatal(err)
+	}
+	if left := partials(t, s); len(left) != 0 {
+		t.Fatalf("left behind %v", left)
+	}
+}

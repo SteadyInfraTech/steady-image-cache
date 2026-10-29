@@ -518,9 +518,22 @@ func (s *Store) DropResume(r *Resume) {
 		return
 	}
 	if r.path != "" {
-		_ = s.removeBlob(r.path)
+		if err := s.removeBlob(r.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// Keep the path, with nothing resumable behind it, so that the next
+			// DropResume or attempt tries again; otherwise the file would be
+			// forgotten until the next start.
+			s.warnf("cannot remove the partial file %s: %v", r.path, err)
+			r.size, r.total = 0, 0
+			return
+		}
 	}
 	*r = Resume{}
+}
+
+func (s *Store) warnf(format string, args ...any) {
+	if s.logf != nil {
+		s.logf(format, args...)
+	}
 }
 
 // PutResumable is PutStream for a blob that may be fetched in pieces: total is
@@ -616,6 +629,9 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 	}
 	// How much of the blob is already in a partial file from an earlier attempt.
 	var offset int64
+	if res != nil && res.size == 0 && res.path != "" {
+		s.DropResume(res) // a file an earlier removal failed to delete
+	}
 	if res != nil && res.size > 0 {
 		if st, err := os.Stat(res.path); err == nil && st.Size() >= res.size && res.total == max {
 			offset = res.size
@@ -663,11 +679,16 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		if !cleanup {
 			return
 		}
-		if removeErr := s.removeBlob(tmp.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		removeErr := s.removeBlob(tmp.Name())
+		failed := removeErr != nil && !errors.Is(removeErr, os.ErrNotExist)
+		if failed {
 			retErr = errors.Join(retErr, local(removeErr))
 		}
 		if res != nil {
-			*res = Resume{} // nothing is kept
+			*res = Resume{} // nothing is kept to resume from
+			if failed {
+				res.path = tmp.Name() // but the file is still there: the next DropResume removes it
+			}
 		}
 	}()
 	src := r
