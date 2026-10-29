@@ -189,6 +189,7 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 	h := w.Header()
 	h.Set("Docker-Content-Digest", d)
 	h.Set("Content-Type", "application/octet-stream")
+	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Length", strconv.FormatInt(a.size, 10))
 	w.WriteHeader(http.StatusOK)
 	p.metrics.Streamed.Add(1)

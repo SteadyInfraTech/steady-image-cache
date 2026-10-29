@@ -5,12 +5,14 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -152,12 +154,20 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 			regs[r] = true
 		}
 	}
+	roots, err := tlsutil.UpstreamRoots(os.Getenv("SSL_CERT_FILE"), os.Getenv("SSL_CERT_DIR"))
+	if err != nil {
+		return nil, err
+	}
+	upstreamTransport := newTransport(o.Timeout, o.Timeout, true)
+	if roots != nil {
+		upstreamTransport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
 	px := &Proxy{
 		store: s,
 		peers: p,
 		// Upstream registries are public services: verify them against the
 		// system roots, not against the private CA used between SIC nodes.
-		upstreamClient:  &http.Client{Transport: newTransport(o.Timeout, o.Timeout, true), CheckRedirect: upstreamRedirect},
+		upstreamClient:  &http.Client{Transport: upstreamTransport, CheckRedirect: upstreamRedirect},
 		metrics:         m,
 		upstream:        o.Upstream,
 		registries:      regs,
@@ -383,6 +393,9 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	w.Header().Set("Docker-Content-Digest", d)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", ct)
+	// Whatever the bytes are, a browser must not take them for a page.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	// ServeContent implements GET/HEAD, RFC 7233 byte ranges, If-Modified-Since and 416 responses.
 	cw := &countingWriter{ResponseWriter: w, n: p.servedCounter(r), idle: p.writeIdle}
 	defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) }() // the connection is reused
@@ -404,6 +417,19 @@ func (p *Proxy) cacheReadFailed(d string, e error) {
 	p.warn("read", "cannot read %s from the cache: %v", d, e)
 }
 
+// registryMediaType reports whether t is a media type of the OCI or Docker
+// registry formats: a JSON document that is not rendered by a browser.
+func registryMediaType(t string) bool {
+	m, params, err := mime.ParseMediaType(t)
+	if err != nil || len(params) > 0 || m != strings.ToLower(t) {
+		return false
+	}
+	if !strings.HasPrefix(m, "application/vnd.oci.") && !strings.HasPrefix(m, "application/vnd.docker.") {
+		return false
+	}
+	return strings.HasSuffix(m, "+json") || strings.HasSuffix(m, "+prettyjws")
+}
+
 // manifestType reports the media type of a stored manifest. It uses the
 // document's own mediaType and falls back to telling an index from a manifest
 // by its shape, because mediaType is optional in OCI documents.
@@ -422,7 +448,14 @@ func manifestType(f io.ReadSeeker) string {
 	}
 	switch {
 	case doc.MediaType != "":
-		return doc.MediaType
+		// The field is the publisher's. Only a registry document type goes into
+		// Content-Type: anything else (text/html in an image config that is
+		// asked for by its digest, say) would make a browser run the cached
+		// bytes as a page on this node's origin.
+		if registryMediaType(doc.MediaType) {
+			return doc.MediaType
+		}
+		return defaultManifestType
 	case len(doc.Manifests) > 0:
 		return "application/vnd.oci.image.index.v1+json"
 	default:
@@ -716,6 +749,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	h.Set("Docker-Content-Digest", d)
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Type", "application/octet-stream")
+	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 }
@@ -855,6 +889,12 @@ func (p *Proxy) livePeers() []string {
 		}
 	}
 	for _, base := range all {
+		if p.tls != nil && !strings.HasPrefix(strings.ToLower(base), "https://") {
+			// Mutual TLS is what authenticates a peer, and a plain HTTP request
+			// has none: whoever sits on the path could answer it, and what it
+			// answers would be stored (a tag pointing at its choice of content).
+			continue
+		}
 		if _, down := p.down[base]; !down {
 			out = append(out, base)
 		}
