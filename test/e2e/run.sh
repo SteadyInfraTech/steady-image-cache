@@ -600,10 +600,13 @@ refused "no credentials on $C, by digest, protected" docker exec "$C" crictl pul
 # The right credentials: a node that has the content answers from its cache.
 docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 [ "$(blob_gets)" = "$GETS_BASE" ] || fail "the registry served blobs to a client that was confirmed on a node that had them ($GETS_BASE -> $(blob_gets)): they should come from the cache"
-# Protected content is not passed between nodes: the one without it goes to the
-# registry, with the client's credentials, and gets it.
+# Protected content is not passed between nodes. (The counters began at zero
+# when the pods were restarted for this phase.)
 docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
-[ "$(blob_gets)" != "$GETS_BASE" ] || fail "$C got protected blobs without asking the registry: they were passed between nodes"
+for n in "$A" "$B" "$C"; do
+  [ "$(metric "$n" sic_peer_hits_total)" = 0 ] || fail "$n took protected content from a peer"
+  [ "$(metric "$n" sic_bytes_to_peers_total)" = 0 ] || fail "$n gave protected content to a peer"
+done
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES-
