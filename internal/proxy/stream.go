@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
 
 // A download is one fetch of a blob that every client asking for it shares.
@@ -28,6 +30,10 @@ type download struct {
 	done   bool
 	res    fetchResult
 	auth   string // the Authorization header of the client that started it
+
+	// resume keeps the start of the blob between attempts. Only the goroutine
+	// that runs the download touches it.
+	resume store.Resume
 }
 
 // attempt is one source being copied into the store. A download may go through
@@ -38,6 +44,11 @@ type attempt struct {
 	written int64
 	ended   bool
 	err     error // why it ended, nil when the blob was stored
+	// resumable: it failed because its source did, and the bytes it wrote are
+	// kept for the next attempt to continue. cont: this attempt continues the
+	// file of the one before it, so a client that read from that one can go on
+	// reading from this one.
+	resumable, cont bool
 }
 
 func newDownload(auth string) *download {
@@ -53,7 +64,11 @@ func (dl *download) wake() {
 // Begin, Wrote and End implement store.Progress.
 func (dl *download) Begin(path string, max int64) {
 	dl.mu.Lock()
-	dl.cur = &attempt{path: path, size: max}
+	a := &attempt{path: path, size: max}
+	if c := dl.cur; c != nil && c.ended && c.resumable && c.path == path && c.size == max {
+		a.cont, a.written = true, c.written
+	}
+	dl.cur = a
 	dl.wake()
 	dl.mu.Unlock()
 }
@@ -71,6 +86,7 @@ func (dl *download) End(err error) {
 	dl.mu.Lock()
 	if dl.cur != nil {
 		dl.cur.ended, dl.cur.err = true, err
+		dl.cur.resumable = store.Resumable(err)
 	}
 	dl.wake()
 	dl.mu.Unlock()
@@ -123,6 +139,9 @@ func (p *Proxy) join(d, auth string, fn func(*download) fetchResult) *download {
 			p.dlmu.Lock()
 			delete(p.downloads, d)
 			p.dlmu.Unlock()
+			// Whatever a failed source left is of no use once nobody is trying
+			// any more.
+			p.store.DropResume(&dl.resume)
 			dl.finish(res)
 		}()
 		res = fn(dl)
@@ -200,14 +219,24 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 	var off int64
 	for off < a.size {
 		dl.mu.Lock()
+		// A source that failed partway and was followed by one that continues
+		// the same file: go on with that one, nothing was lost.
+		for a.ended && a.err != nil && a.resumable && dl.cur != nil && dl.cur != a &&
+			dl.cur.cont && dl.cur.path == a.path && dl.cur.size == a.size {
+			a = dl.cur
+		}
 		avail, ended, err, cur, ch, over := a.written, a.ended, a.err, dl.cur, dl.notify, dl.done
+		// A source that failed partway may be followed by one that continues:
+		// read what it wrote, then wait for the next, unless the download is
+		// over.
+		pending := a.ended && a.err != nil && a.resumable && cur == a && !over
 		dl.mu.Unlock()
-		if err != nil || cur != a && !ended || over && !ended {
+		if !pending && (err != nil || cur != a && !ended || over && !ended) {
 			// This source failed or was replaced, or the download is over
 			// without having said how this source ended (it panicked).
 			break
 		}
-		if !ended && avail >= a.size {
+		if (!ended || pending) && avail >= a.size {
 			avail = a.size - 1 // the last byte waits for the digest check
 		}
 		if off < avail {
@@ -231,6 +260,15 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, d string, dl *dow
 			}
 			if e != nil && m == 0 {
 				break
+			}
+			continue
+		}
+		if pending {
+			_ = rc.Flush()
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return true
 			}
 			continue
 		}
