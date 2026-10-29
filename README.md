@@ -10,7 +10,7 @@ SIC is a young project: the first release was on 2026-10-24. What is covered so 
 
 Things to know before deploying, each described in the section named:
 
-* Every node can read the whole cache, private images included, and the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
+* Unless a registry is listed in `SIC_PROTECTED_REGISTRIES`, every node can read the whole cache, private images included, and the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
 * Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and a node can share a download only once it has received its first bytes, so nodes that all miss in the same instant mostly go to the registry ("Peer requests", "Streaming a miss").
 * Peer discovery asks the Kubernetes API from every node: one list (answered from the API server's cache) and then a watch, so a steady cluster costs the API server almost nothing, but every node still receives an event for every pod change, so a rolling restart of a very large DaemonSet costs the square of the node count in events. It is not tested beyond a few hundred nodes ("Health and metrics" describes it).
 * The containerd import keeps a second copy of every blob on the node ("Production notes").
@@ -142,7 +142,9 @@ Most registries, Docker Hub and GHCR among them, answer an anonymous request wit
 
 A `401` without a `WWW-Authenticate` header cannot be acted on, so it ends as a `404` (which sends containerd on to its next host) and is logged.
 
-**The cache does not check who is asking.** Once a blob or tag has been fetched with someone's credentials, any client that can reach this node's SIC, and knows the digest or tag, gets it without credentials. For private images that means every client the listener accepts can read them: with mTLS, every holder of a certificate signed by your CA; with `SIC_INSECURE=true`, anyone who can reach the port. Keep upstream fallback off for registries whose content must not be shared on the node.
+**By default the cache does not check who is asking.** Once a blob or tag has been fetched with someone's credentials, any client that can reach this node's SIC, and knows the digest or tag, gets it without credentials. For private images that means every client the listener accepts can read them: with mTLS, every holder of a certificate signed by your CA; with `SIC_INSECURE=true`, anyone who can reach the port.
+
+**Protected registries.** List a registry in `SIC_PROTECTED_REGISTRIES` (comma separated; each must also be in `SIC_UPSTREAM_REGISTRIES` with `SIC_UPSTREAM_ENABLED=true`, or startup fails) and SIC stops taking that for granted. Before it answers a client's request for a blob or manifest of that registry, from its cache, a peer or the registry, it sends the registry a `HEAD` for the same path with the client's own `Authorization`. Only a success lets the request go on. A client with no credentials, or ones the registry refuses, gets the registry's own answer (its `401` and challenge, so containerd fetches a token and asks again; or `403`/`404`). A yes is remembered for 60 seconds per credential, repository and registry, so a pull of many layers asks once; revoked access is therefore felt within a minute. If the registry cannot be reached, nothing is served for it (`503`): SIC cannot confirm anyone, so it does not pass them. That is the price of the check, and the reason it is opt-in: do not protect a registry that you need SIC to serve while the registry is down. Requests from peers are not checked (the node that has the client in front of it has done it, and nodes trust each other over mutual TLS), so this protects against clients, not against a node with a certificate. `sic_access_checks_total` and `sic_access_denied_total` count the checks and the refusals. Without the setting, keep upstream fallback off for registries whose content must not be shared on the node.
 
 ### Tags: staying current, and who is believed
 
@@ -180,6 +182,7 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | `SIC_INSECURE` | `false` | Run without TLS or client authentication. Development only. |
 | `SIC_KUBERNETES_DISCOVERY` | `true` | Find peers through the Kubernetes API. Needs `POD_NAMESPACE`, `POD_NAME` and `NODE_NAME`. |
 | `SIC_POD_LABEL_SELECTOR` | `app=steady-image-cache` | Which pods are peers. |
+| `SIC_PROTECTED_REGISTRIES` | unset | Registries whose content is served only to a client the registry itself confirms (see "Protected registries"). Each must also be an upstream registry. |
 | `SIC_PEERS` | unset | Fixed peer URLs, comma separated, instead of or in addition to discovery. They must be `https://` unless `SIC_INSECURE=true`; startup fails otherwise. |
 | `SIC_PEER_PORT` | `5000` | Port on which discovered peers listen. |
 | `SIC_PEER_TIMEOUT`, `SIC_PEER_BACKOFF`, `SIC_PEER_MAX_TRIES` | `5s`, `30s`, `4` | See "Peer requests". |
@@ -263,7 +266,7 @@ SIC refuses to start unless mutual TLS is fully configured: `SIC_TLS_CERT`, `SIC
 
 The certificate, key and CA files are re-checked every 10 seconds and reloaded when they change, for the listener and for connections to peers alike, so a rotated Secret takes effect without restarting the pod. If a new set is unusable (a half-finished rotation, say) SIC logs it and keeps the previous one. The Kubernetes service account token used for peer discovery is likewise read afresh for every request.
 
-A cache serves any client that presents a valid certificate. It does not check registry credentials, so a blob that was pulled with credentials can be read by anyone holding a client certificate and the blob's digest. Treat the client CA as the access boundary.
+A cache serves any client that presents a valid certificate. Unless the registry is listed in `SIC_PROTECTED_REGISTRIES` ("Upstream fallback") it does not check registry credentials, so a blob that was pulled with credentials can be read by anyone holding a client certificate and the blob's digest. Treat the client CA as the access boundary.
 
 ## Build
 

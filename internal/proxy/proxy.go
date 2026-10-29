@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,6 +95,10 @@ type Options struct {
 	// registries listed in UpstreamRegistries.
 	Upstream           bool
 	UpstreamRegistries []string
+	// ProtectedRegistries are registries (a subset of UpstreamRegistries) whose
+	// content is served only to a client the registry itself confirms, see
+	// access.go.
+	ProtectedRegistries []string
 	// TLS supplies the client certificate and CA for SIC-to-SIC traffic and is
 	// re-checked for changes. Nil means plain HTTP between peers.
 	TLS        *tlsutil.Reloader
@@ -110,6 +115,8 @@ type Proxy struct {
 	metrics         *metrics.Metrics
 	upstream        bool
 	registries      map[string]bool
+	protected       map[string]bool // registries whose clients are checked, see access.go
+	access          accessCache
 	idle            time.Duration
 	manifestTimeout time.Duration             // bound on one manifest request, see maxManifestFetch
 	flights         flight.Group[fetchResult] // manifests
@@ -138,6 +145,14 @@ type Proxy struct {
 	skipped map[string]int
 }
 
+func lowered(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		out = append(out, strings.ToLower(strings.TrimSpace(v)))
+	}
+	return out
+}
+
 func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, error) {
 	if o.Timeout <= 0 {
 		o.Timeout = 30 * time.Second
@@ -147,6 +162,19 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 	}
 	if o.CoordWait <= 0 {
 		o.CoordWait = 20 * time.Second
+	}
+	prot := map[string]bool{}
+	for _, r := range o.ProtectedRegistries {
+		r = strings.ToLower(strings.TrimSpace(r))
+		if r == "" {
+			continue
+		}
+		if !o.Upstream || !slices.Contains(lowered(o.UpstreamRegistries), r) {
+			// Without the registry there is nobody to ask, and a check that
+			// cannot be made would either lock everyone out or let everyone in.
+			return nil, fmt.Errorf("SIC_PROTECTED_REGISTRIES names %s, which is not in SIC_UPSTREAM_REGISTRIES with SIC_UPSTREAM_ENABLED=true", r)
+		}
+		prot[r] = true
 	}
 	regs := map[string]bool{}
 	for _, r := range o.UpstreamRegistries {
@@ -171,6 +199,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		metrics:         m,
 		upstream:        o.Upstream,
 		registries:      regs,
+		protected:       prot,
 		idle:            o.Timeout,
 		manifestTimeout: maxManifestFetch,
 		peerTimeout:     o.PeerTimeout,
@@ -298,11 +327,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		if repo, d, ok := blobPath(r.URL.Path); ok {
-			p.blob(w, r, repo, d)
+			if p.admit(w, r, repo) {
+				p.blob(w, r, repo, d)
+			}
 			return
 		}
 		if repo, ref, ok := manifestPath(r.URL.Path); ok {
-			p.manifest(w, r, repo, ref)
+			if p.admit(w, r, repo) {
+				p.manifest(w, r, repo, ref)
+			}
 			return
 		}
 	}
