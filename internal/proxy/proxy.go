@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -63,6 +64,9 @@ type Options struct {
 	// peer or upstream may stay silent while sending. It is not a limit on the
 	// total transfer time, so large layers on slow links still complete.
 	Timeout time.Duration
+	// WriteIdle is how long a response may make no progress before the
+	// connection is dropped; zero means two minutes.
+	WriteIdle time.Duration
 	// PeerTimeout is how long a peer may take to accept a connection and start
 	// answering. A peer that exceeds it is skipped for PeerBackoff, so a dead
 	// node costs one slow request rather than one per miss. Peers answer from
@@ -116,6 +120,7 @@ type Proxy struct {
 	maxTries             int
 	self                 string
 	coordWait            time.Duration
+	writeIdle            time.Duration // see writeIdle; zero means no limit
 	coordClient          *http.Client
 	tagTTL               time.Duration
 	tls                  *tlsutil.Reloader
@@ -172,6 +177,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		backoff:         o.PeerBackoff,
 		maxTries:        o.PeerMaxTries,
 		coordWait:       o.CoordWait,
+		writeIdle:       cmp.Or(o.WriteIdle, writeIdle),
 		tagTTL:          o.TagTTL,
 		tls:             o.TLS,
 		serverName:      o.ServerName,
@@ -391,7 +397,8 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	// ServeContent implements GET/HEAD, RFC 7233 byte ranges, If-Modified-Since and 416 responses.
-	cw := &countingWriter{ResponseWriter: w, n: p.servedCounter(r)}
+	cw := &countingWriter{ResponseWriter: w, n: p.servedCounter(r), idle: p.writeIdle}
+	defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) }() // the connection is reused
 	http.ServeContent(cw, r, "", st.ModTime(), f)
 	return true
 }
@@ -1303,13 +1310,37 @@ func (c *countedBody) Read(b []byte) (int, error) {
 	return m, err
 }
 
-// countingWriter adds the bytes written to n.
+// writeIdle is how long a response write may make no progress before the
+// connection is dropped. A client that takes a blob and then stops reading holds
+// a file descriptor, a goroutine and, once the blob has been evicted, the disk
+// blocks of a file that is already gone, for as long as the connection stays up.
+// The limit is on progress, not on the whole transfer: a layer of any size may
+// take as long as it likes while it keeps moving. A file is sent in copyChunk
+// pieces with the deadline renewed for each, so a client must take at least
+// copyChunk per writeIdle (about 9 KiB/s) to be kept; the streamed path renews it
+// for every 64 KiB.
+const writeIdle = 2 * time.Minute
+
+// copyChunk is how much of a file is handed to the kernel between two renewals
+// of the write deadline.
+const copyChunk = 1 << 20
+
+// countingWriter adds the bytes written to n and, when idle is set, keeps a
+// write deadline of idle from the last write that made progress.
 type countingWriter struct {
 	http.ResponseWriter
-	n *atomic.Uint64
+	n    *atomic.Uint64
+	idle time.Duration
+}
+
+func (c *countingWriter) renew() {
+	if c.idle > 0 {
+		_ = http.NewResponseController(c.ResponseWriter).SetWriteDeadline(time.Now().Add(c.idle))
+	}
 }
 
 func (c *countingWriter) Write(b []byte) (int, error) {
+	c.renew()
 	m, err := c.ResponseWriter.Write(b)
 	if m > 0 {
 		c.n.Add(uint64(m))
@@ -1321,17 +1352,42 @@ func (c *countingWriter) Write(b []byte) (int, error) {
 // straight from the kernel (sendfile) when it is handed one; hiding the method
 // would make every cached layer go through a buffer in user space.
 func (c *countingWriter) ReadFrom(r io.Reader) (int64, error) {
-	var n int64
-	var err error
-	if rf, ok := c.ResponseWriter.(io.ReaderFrom); ok {
-		n, err = rf.ReadFrom(r)
-	} else {
-		n, err = io.Copy(struct{ io.Writer }{c.ResponseWriter}, r)
+	var total int64
+	for {
+		c.renew()
+		var n int64
+		var err error
+		src := r
+		var outer *io.LimitedReader
+		if c.idle > 0 {
+			// The kernel copy is only used for a file inside a LimitedReader, so
+			// the chunk is cut from that one, not wrapped around it.
+			if lr, ok := r.(*io.LimitedReader); ok {
+				outer = lr
+				src = &io.LimitedReader{R: lr.R, N: min(lr.N, copyChunk)}
+			} else {
+				src = io.LimitReader(r, copyChunk)
+			}
+		}
+		if rf, ok := c.ResponseWriter.(io.ReaderFrom); ok {
+			n, err = rf.ReadFrom(src)
+		} else {
+			n, err = io.Copy(struct{ io.Writer }{c.ResponseWriter}, src)
+		}
+		if n > 0 {
+			c.n.Add(uint64(n))
+		}
+		total += n
+		if outer != nil {
+			outer.N -= n
+			if outer.N <= 0 {
+				return total, err
+			}
+		}
+		if err != nil || c.idle <= 0 || n < copyChunk {
+			return total, err
+		}
 	}
-	if n > 0 {
-		c.n.Add(uint64(n))
-	}
-	return n, err
 }
 
 func (c *countingWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
