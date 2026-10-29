@@ -125,7 +125,7 @@ An evicted tag still resolves; the manifest is fetched again from a peer when so
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes). The image carries the public roots of its build image, so Docker Hub, GHCR and the like work as they are.
 
-**A registry with a private CA** (the usual case in an air-gapped cluster) needs that CA to be trusted too. SIC is a Go program, so it honours `SSL_CERT_FILE` and `SSL_CERT_DIR`. Put a bundle that holds your CA **and** any public roots you still need in a ConfigMap or Secret, mount it in the pod and point `SSL_CERT_FILE` at it; the variable replaces the built-in roots, it does not add to them. For example, for a bundle mounted at `/etc/sic-roots/ca-bundle.crt`:
+**A registry with a private CA** (the usual case in an air-gapped cluster) needs that CA to be trusted too. SIC honours `SSL_CERT_FILE` and `SSL_CERT_DIR` for its upstream connections, and when either is set it trusts **only** what they name: the image's own public bundle is no longer loaded alongside. Put a bundle that holds your CA **and** any public roots you still need in a ConfigMap or Secret, mount it in the pod and point `SSL_CERT_FILE` at it. A setting that names no certificate stops SIC at startup instead of widening the trust. For example, for a bundle mounted at `/etc/sic-roots/ca-bundle.crt`:
 
 ```yaml
 env:
@@ -178,7 +178,7 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | `SIC_INSECURE` | `false` | Run without TLS or client authentication. Development only. |
 | `SIC_KUBERNETES_DISCOVERY` | `true` | Find peers through the Kubernetes API. Needs `POD_NAMESPACE`, `POD_NAME` and `NODE_NAME`. |
 | `SIC_POD_LABEL_SELECTOR` | `app=steady-image-cache` | Which pods are peers. |
-| `SIC_PEERS` | unset | Fixed peer URLs, comma separated, instead of or in addition to discovery. |
+| `SIC_PEERS` | unset | Fixed peer URLs, comma separated, instead of or in addition to discovery. They must be `https://` unless `SIC_INSECURE=true`; startup fails otherwise. |
 | `SIC_PEER_PORT` | `5000` | Port on which discovered peers listen. |
 | `SIC_PEER_TIMEOUT`, `SIC_PEER_BACKOFF`, `SIC_PEER_MAX_TRIES` | `5s`, `30s`, `4` | See "Peer requests". |
 | `SIC_PEER_WATCH` | `true` | Follow pods with a watch instead of listing every 30s. See "Health and metrics". |
