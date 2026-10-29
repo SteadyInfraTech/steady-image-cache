@@ -55,6 +55,10 @@ func TestValidate(t *testing.T) {
 		{"cert without key", func(c *Config) { c.TLSKey = "" }, "must be set together"},
 		{"key without cert", func(c *Config) { c.TLSCert = "" }, "must be set together"},
 		{"no client certificate for peer calls", func(c *Config) { c.ClientCert, c.ClientKey = "", "" }, "SIC_TLS_CLIENT_CERT, SIC_TLS_CLIENT_KEY are not set"},
+		{"a peer over plain http", func(c *Config) { c.Peers = []string{"https://10.0.0.1:5000", "http://10.0.0.2:5000"} }, "not an https:// URL"},
+		{"a peer without a scheme", func(c *Config) { c.Peers = []string{"10.0.0.2:5000"} }, "not an https:// URL"},
+		{"https peers", func(c *Config) { c.Peers = []string{"https://10.0.0.1:5000", "HTTPS://b:5000"} }, ""},
+		{"plain http peers are fine when insecure", func(c *Config) { *c = Config{Insecure: true, Peers: []string{"http://10.0.0.2:5000"}} }, ""},
 		{"explicitly insecure", func(c *Config) { *c = Config{Insecure: true} }, ""},
 	}
 	for _, tc := range cases {
