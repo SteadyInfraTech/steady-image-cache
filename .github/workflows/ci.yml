@@ -54,14 +54,17 @@ jobs:
         run: go test -race ./...
 
       # A short run of each fuzz target: it replays the seed corpus and tries new
-      # inputs for a few seconds. Longer runs are for a developer's machine.
+      # inputs for a few seconds. Longer runs are for a developer's machine. A
+      # new interesting input is minimised for at most 5s (the default is 60s,
+      # during which the run shows no progress), and each step is given a
+      # time limit, so that a stall is a failure with a name, not a long wait.
       - name: Fuzz
         run: |
           set -e
           for t in FuzzSplitPath FuzzValidRepoAndRef FuzzRetryAfterOf FuzzManifestType; do
-            go test ./internal/proxy -run '^$' -fuzz "^${t}\$" -fuzztime 20s
+            timeout 120 go test ./internal/proxy -run '^$' -fuzz "^${t}\$" -fuzztime 20s -fuzzminimizetime 5s
           done
-          go test ./internal/peer -run '^$' -fuzz '^FuzzParsePeers$' -fuzztime 20s
+          timeout 120 go test ./internal/peer -run '^$' -fuzz '^FuzzParsePeers$' -fuzztime 20s -fuzzminimizetime 5s
 
   vulncheck:
     runs-on: ubuntu-latest
