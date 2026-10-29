@@ -59,3 +59,33 @@ func TestHostDerivedNamespaceIsLowerCased(t *testing.T) {
 		t.Fatal("an alias exists under the Host's own spelling")
 	}
 }
+
+// A namespace that is not a host name is refused whether it came from ?ns= or
+// from the Host header.
+func TestInvalidNamespaceIsRefusedFromEitherSource(t *testing.T) {
+	n := newNode(t, Options{})
+	for _, host := range []string{"bad_host", "a b", "x/y"} {
+		req, err := http.NewRequest("GET", n.srv.URL+"/v2/lib/app/manifests/v1", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			continue // the server refused the Host header itself
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("Host %q: status %d, want 400", host, resp.StatusCode)
+		}
+	}
+	resp, _ := get(t, n.srv.URL+"/v2/lib/app/manifests/v1?ns=bad_host")
+	if resp.StatusCode != 400 {
+		t.Errorf("?ns=bad_host: status %d", resp.StatusCode)
+	}
+	for _, ok := range []string{"[::1]:5000", "127.0.0.1:5000", "localhost", "reg.example:443"} {
+		if !validNamespace(ok) {
+			t.Errorf("%q should be valid", ok)
+		}
+	}
+}
