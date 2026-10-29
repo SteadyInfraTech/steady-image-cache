@@ -828,6 +828,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
 	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.serveDigest(w, r, d, manifestType) {
+		p.markProtected(namespace, d)
 		p.metrics.LocalHits.Add(1)
 		return
 	}
@@ -850,6 +851,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	}
 	if res.ok {
 		if d, found := p.store.Resolve(namespace, repo, ref); found && p.serveDigest(w, r, d, manifestType) {
+			p.markProtected(namespace, d)
 			return
 		}
 	}

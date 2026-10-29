@@ -99,6 +99,7 @@ func (s *Store) markUsed(d string) {
 
 // forget drops what is recorded about blob d, which was removed from disk.
 func (s *Store) forget(d string) {
+	s.unmark(d)
 	s.verifiedMu.Lock()
 	if _, ok := s.verified[d]; ok {
 		delete(s.verified, d)

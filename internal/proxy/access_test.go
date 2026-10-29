@@ -186,6 +186,46 @@ func TestProtectedRegistryGrantIsForThePath(t *testing.T) {
 	}
 }
 
+// The namespace is the client's word, and the cache is kept by digest: content
+// that came from a protected registry is not given out under another namespace
+// on the cache's say-so either.
+func TestProtectedBlobIsNotGivenOutUnderAnotherNamespace(t *testing.T) {
+	blob := []byte("a layer of a private image")
+	reg := newTokenRegistry(t, blob, testManifest)
+	other := httptest.NewTLSServer(http.NotFoundHandler()) // an upstream that has nothing
+	t.Cleanup(other.Close)
+	host, otherHost := reg.Listener.Addr().String(), other.Listener.Addr().String()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{Upstream: true, UpstreamRegistries: []string{host, otherHost}, ProtectedRegistries: []string{host}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = reg.Client() // the test servers share one certificate
+	d := digestOf(blob)
+	if rec := request(p, "GET", "/v2/lib/app/blobs/"+d+"?ns="+host, "Authorization", "Bearer tok"); rec.Code != 200 {
+		t.Fatalf("the entitled client: status %d", rec.Code)
+	}
+	for name, ns := range map[string]string{"an upstream that does not have it": otherHost, "a host that is no upstream": "evil.example"} {
+		for _, m := range []string{"GET", "HEAD"} {
+			rec := request(p, m, "/v2/lib/app/blobs/"+d+"?ns="+ns, "Authorization", "Bearer tok")
+			if rec.Code == 200 || rec.Body.String() == string(blob) {
+				t.Fatalf("%s %s: status %d, the cache gave out a protected blob", m, name, rec.Code)
+			}
+		}
+	}
+	// Content that never came from a protected registry is as before.
+	plain := []byte("a public layer")
+	if _, err := st.PutVerified(digestOf(plain), bytes.NewReader(plain)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := request(p, "GET", "/v2/lib/app/blobs/"+digestOf(plain)+"?ns="+otherHost); rec.Code != 200 {
+		t.Fatalf("a blob that is not protected: status %d", rec.Code)
+	}
+}
+
 // Nothing changes for a registry that is not listed.
 func TestUnprotectedRegistryIsAsBefore(t *testing.T) {
 	blob := []byte("layer")

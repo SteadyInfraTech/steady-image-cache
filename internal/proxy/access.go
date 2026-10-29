@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
 
 // Protected registries.
@@ -71,13 +73,22 @@ func (c *accessCache) grant(key string, now time.Time) {
 // answered the client already.
 func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool {
 	namespace := ns(r)
-	if len(p.protected) == 0 || !p.protected[namespace] {
+	if len(p.protected) == 0 {
+		return true
+	}
+	d := pathDigest(r.URL.Path)
+	// The namespace is the client's word (?ns=, Host), and the cache is kept by
+	// digest, so a protected blob would come out under any other namespace.
+	// Content that came from a protected registry is therefore guarded wherever
+	// it is asked for: the registry it is asked of is the one to say.
+	guarded := p.protected[namespace]
+	if !guarded && (d == "" || !p.store.IsProtected(d)) {
 		return true
 	}
 	if !validRepo(repo) || !validNamespace(namespace) {
 		return true // the handler refuses it
 	}
-	if isPeer(r) {
+	if guarded && isPeer(r) {
 		// The header is set by the sender, so it proves nothing: any holder of a
 		// client certificate could set it. Protected content is not shared
 		// between nodes at all (askablePeers), so there is nothing to serve.
@@ -88,6 +99,7 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 	sum := sha256.Sum256([]byte(in.auth))
 	key := namespace + "|" + r.URL.Path + "|" + hex.EncodeToString(sum[:])
 	if p.access.ok(key, p.now()) {
+		p.markProtected(namespace, d)
 		return true
 	}
 	p.metrics.AccessChecks.Add(1)
@@ -98,6 +110,7 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 		return false // the client gave up
 	}
 	if res.ok {
+		p.markProtected(namespace, d)
 		return true
 	}
 	p.metrics.AccessDenied.Add(1)
@@ -152,4 +165,23 @@ func (p *Proxy) probe(in info, path, key string) fetchResult {
 		p.upstreamAnswered(host, resp)
 		return fetchResult{status: http.StatusBadGateway}
 	}
+}
+
+// markProtected notes that d is being given out under a protected registry.
+func (p *Proxy) markProtected(namespace, d string) {
+	if d == "" || !p.protected[namespace] {
+		return
+	}
+	if err := p.store.MarkProtected(d); err != nil {
+		p.warn("mark", "cannot mark %s as protected: %v", d, err)
+	}
+}
+
+// pathDigest is the digest a blob or manifest path names, or "".
+func pathDigest(path string) string {
+	d := path[strings.LastIndex(path, "/")+1:]
+	if store.ValidDigest(d) {
+		return d
+	}
+	return ""
 }
