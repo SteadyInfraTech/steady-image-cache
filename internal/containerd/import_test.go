@@ -507,6 +507,26 @@ func TestAliasImportContinuesPastAFailure(t *testing.T) {
 	}
 }
 
+// The proxy looks registries up in lower case, so an image that containerd
+// knows under another spelling is imported under the lower-case one.
+func TestAliasImportLowerCasesTheRegistry(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := testDigest([]byte("one"))
+	imgs := []namedImage{fakeImage{"REG.Example:5000/lib/app:v1", d}}
+	if err := (&Importer{Store: s, Metrics: &metrics.Metrics{}}).importAliases(imgs); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.Resolve("reg.example:5000", "lib/app", "v1"); !ok || got != d {
+		t.Fatalf("not found under the lower-case registry: %q %v", got, ok)
+	}
+	if _, ok := s.Resolve("REG.Example:5000", "lib/app", "v1"); ok {
+		t.Fatal("an alias exists under the mixed-case spelling")
+	}
+}
+
 // containerd remembers what a tag pointed at when it was pulled. The cache may
 // have learned since, from the registry, that it points somewhere else, and the
 // periodic import must not put the old answer back.
