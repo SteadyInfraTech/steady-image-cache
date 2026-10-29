@@ -67,3 +67,23 @@ func TestProtectedFailsClosed(t *testing.T) {
 		t.Fatal("an unreadable mark counted as absent")
 	}
 }
+
+// A directory that cannot be listed is no proof that no blob is there.
+func TestPruneKeepsMarksWhenBlobsCannotBeListed(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := digestOf([]byte("y"))
+	if err := s.MarkProtected(d); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "blobs")); err != nil {
+		t.Fatal(err)
+	}
+	s.pruneMarks()
+	if !s.IsProtected(d) {
+		t.Fatal("marks were removed because the blobs could not be listed")
+	}
+}

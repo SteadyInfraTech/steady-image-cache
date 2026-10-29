@@ -419,7 +419,9 @@ func newInfo(r *http.Request) info {
 // protected: a client that knows the digest must not be able to read it as a
 // blob of another namespace while this one is still being sent.
 func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, namespace, d string) bool {
-	p.markProtected(namespace, d)
+	if p.markProtected(namespace, d) != nil {
+		return false
+	}
 	return p.serveDigest(w, r, d, manifestType)
 }
 
@@ -1276,7 +1278,9 @@ func (p *Proxy) storeManifest(resp *http.Response, namespace, ref string, receiv
 	}
 	// Marked before it is stored: from the moment it can be read by digest, it is
 	// known to come from a protected registry.
-	p.markProtected(namespace, d)
+	if e := p.markProtected(namespace, d); e != nil {
+		return d, int64(len(b)), e
+	}
 	_, e = p.store.PutVerified(d, bytes.NewReader(b))
 	return d, int64(len(b)), e
 }

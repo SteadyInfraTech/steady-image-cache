@@ -99,8 +99,7 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 	sum := sha256.Sum256([]byte(in.auth))
 	key := namespace + "|" + r.URL.Path + "|" + hex.EncodeToString(sum[:])
 	if p.access.ok(key, p.now()) {
-		p.markProtected(namespace, d)
-		return true
+		return p.markedOrRefuse(w, namespace, d)
 	}
 	p.metrics.AccessChecks.Add(1)
 	res, err := p.flights.DoContext(r.Context(), "access:"+key, func() fetchResult {
@@ -110,8 +109,7 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 		return false // the client gave up
 	}
 	if res.ok {
-		p.markProtected(namespace, d)
-		return true
+		return p.markedOrRefuse(w, namespace, d)
 	}
 	p.metrics.AccessDenied.Add(1)
 	switch {
@@ -167,14 +165,28 @@ func (p *Proxy) probe(in info, path, key string) fetchResult {
 	}
 }
 
-// markProtected notes that d is being given out under a protected registry.
-func (p *Proxy) markProtected(namespace, d string) {
+// markProtected notes that d is being given out under a protected registry. An
+// error means it could not be noted, and then d must not be given out.
+func (p *Proxy) markProtected(namespace, d string) error {
 	if d == "" || !p.protected[namespace] {
-		return
+		return nil
 	}
 	if err := p.store.MarkProtected(d); err != nil {
 		p.warn("mark", "cannot mark %s as protected: %v", d, err)
+		return err
 	}
+	return nil
+}
+
+// markedOrRefuse is markProtected for a request that was just admitted: when
+// the mark cannot be made the request is refused, since the content could then
+// be read through another namespace.
+func (p *Proxy) markedOrRefuse(w http.ResponseWriter, namespace, d string) bool {
+	if p.markProtected(namespace, d) != nil {
+		http.Error(w, "cannot record where this content came from", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
 }
 
 // pathDigest is the digest a blob or manifest path names, or "".

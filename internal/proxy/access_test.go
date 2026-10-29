@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +242,36 @@ func TestProtectedManifestByTagIsMarked(t *testing.T) {
 	}
 	if rec := request(p, "GET", "/v2/lib/app/blobs/"+d+"?ns=evil.example"); rec.Code == 200 {
 		t.Fatal("the manifest was read as a blob under another namespace")
+	}
+}
+
+// Content that cannot be marked is not given out, or stored.
+func TestProtectedContentIsRefusedWhenItCannotBeMarked(t *testing.T) {
+	blob := []byte("layer")
+	reg := newTokenRegistry(t, blob, testManifest)
+	host := reg.Listener.Addr().String()
+	root := t.TempDir()
+	st, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{Upstream: true, UpstreamRegistries: []string{host}, ProtectedRegistries: []string{host}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = reg.Client()
+	// A file where the marks' directory should be.
+	if err := os.WriteFile(filepath.Join(root, "protected"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/v2/lib/app/blobs/" + digestOf(blob), "/v2/lib/app/manifests/v1"} {
+		rec := request(p, "GET", path+"?ns="+host, "Authorization", "Bearer tok")
+		if rec.Code == 200 || rec.Body.String() == string(blob) {
+			t.Fatalf("%s: status %d, given out without a mark", path, rec.Code)
+		}
+	}
+	if _, err := p.store.Stat(digestOf(testManifest)); err == nil {
+		t.Fatal("the manifest was stored without a mark")
 	}
 }
 

@@ -63,12 +63,15 @@ func (s *Store) pruneMarks() {
 	if err != nil || len(marks) == 0 {
 		return
 	}
+	// A listing that fails proves nothing about which blobs exist: keep every mark.
+	blobs, err := os.ReadDir(filepath.Join(s.root, "blobs", "sha256"))
+	if err != nil {
+		return
+	}
 	have := map[string]bool{}
-	if blobs, err := os.ReadDir(filepath.Join(s.root, "blobs", "sha256")); err == nil {
-		for _, b := range blobs {
-			sum := sha256.Sum256([]byte("sha256:" + b.Name()))
-			have[hex.EncodeToString(sum[:])] = true
-		}
+	for _, b := range blobs {
+		sum := sha256.Sum256([]byte("sha256:" + b.Name()))
+		have[hex.EncodeToString(sum[:])] = true
 	}
 	for _, m := range marks {
 		if !have[m.Name()] {
