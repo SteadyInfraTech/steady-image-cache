@@ -695,7 +695,7 @@ func (p *Proxy) missFetch(in info, path, d string, viaCoordinator bool) func(*do
 		if _, err := p.store.Stat(d); err == nil {
 			return fetched
 		}
-		if viaCoordinator {
+		if viaCoordinator && !p.protected[in.ns] {
 			if c, ok := p.otherCoordinator(d); ok {
 				cr := p.fetchCoordinator(in, c, path, d)
 				if cr.ok {
@@ -756,7 +756,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	size, ok := int64(-1), false
 	var challenge []string
 	var throttle *fetchResult
-	for _, base := range p.askablePeers() {
+	for _, base := range p.askablePeers(in.ns) {
 		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
 		if e != nil {
 			p.peerFailed(base, e)
@@ -962,7 +962,10 @@ func (p *Proxy) livePeers() []string {
 
 // askablePeers is shuffledPeers cut to the number one miss may ask. The peers
 // are in random order, so the ones left out differ from miss to miss.
-func (p *Proxy) askablePeers() []string {
+func (p *Proxy) askablePeers(ns string) []string {
+	if p.protected[ns] {
+		return nil // protected content is not shared between nodes
+	}
 	peers := p.shuffledPeers()
 	if p.maxTries > 0 && len(peers) > p.maxTries {
 		p.metrics.PeerCapped.Add(1)
@@ -1165,7 +1168,7 @@ func refused(e error) bool {
 
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	var noSpace fetchResult
-	for _, base := range p.askablePeers() {
+	for _, base := range p.askablePeers(in.ns) {
 		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, map[string]string{PeerHeader: "1"}, false)
 		if done {
 			return res
@@ -1269,7 +1272,7 @@ func (p *Proxy) storeManifest(resp *http.Response, ref string, received *atomic.
 
 // fetchManifestPeers returns the digest of the manifest it stored.
 func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
-	for _, base := range p.askablePeers() {
+	for _, base := range p.askablePeers(in.ns) {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1", "Accept": in.accept})
 		if e != nil {
 			p.peerFailed(base, e)

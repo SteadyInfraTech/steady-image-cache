@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,9 +124,65 @@ func TestProtectedRegistryFailsClosed(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || rec.Body.String() == string(blob) {
 		t.Fatalf("status %d with the registry down", rec.Code)
 	}
-	// A peer is another matter: nodes trust each other over mutual TLS.
-	if rec := request(p, "GET", path, PeerHeader, "1"); rec.Code != 200 {
-		t.Fatalf("peer request: status %d", rec.Code)
+}
+
+// The peer header is set by whoever sends it, so it opens nothing: a client
+// that sets it is refused, and the cache is not read for it.
+func TestProtectedRegistryIgnoresThePeerHeader(t *testing.T) {
+	blob := []byte("layer")
+	reg := newTokenRegistry(t, blob, testManifest)
+	p, _, host := protectedProxy(t, reg, true)
+	path := "/v2/lib/app/blobs/" + digestOf(blob) + "?ns=" + host
+	if rec := request(p, "GET", path, "Authorization", "Bearer tok"); rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	for _, m := range []string{"GET", "HEAD"} {
+		rec := request(p, m, path, PeerHeader, "1")
+		if rec.Code != http.StatusForbidden || rec.Body.String() == string(blob) {
+			t.Fatalf("%s with the peer header and no credentials: status %d", m, rec.Code)
+		}
+	}
+	// No peer is asked for it, and none is believed.
+	if got := p.askablePeers(host); len(got) != 0 {
+		t.Fatalf("askablePeers for a protected registry = %v", got)
+	}
+}
+
+// A yes is for the path that was asked, not for the repository: a digest that
+// the registry would not give from this repository is not given from the cache
+// either, even to a client that was just confirmed for another blob of it.
+func TestProtectedRegistryGrantIsForThePath(t *testing.T) {
+	blob := []byte("layer of lib/app")
+	secret := []byte("layer of lib/secret, cached for someone else")
+	reg := newTokenRegistry(t, blob, testManifest)
+	// A registry that has only the first blob, in lib/app.
+	only := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/lib/app/blobs/"+digestOf(blob)) {
+			http.NotFound(w, r)
+			return
+		}
+		reg.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(only.Close)
+	host := only.Listener.Addr().String()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutVerified(digestOf(secret), bytes.NewReader(secret)); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{Upstream: true, UpstreamRegistries: []string{host}, ProtectedRegistries: []string{host}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = only.Client()
+	if rec := request(p, "GET", "/v2/lib/app/blobs/"+digestOf(blob)+"?ns="+host, "Authorization", "Bearer tok"); rec.Code != 200 {
+		t.Fatalf("the blob the registry has: status %d", rec.Code)
+	}
+	rec := request(p, "GET", "/v2/lib/app/blobs/"+digestOf(secret)+"?ns="+host, "Authorization", "Bearer tok")
+	if rec.Code != http.StatusNotFound || rec.Body.String() == string(secret) {
+		t.Fatalf("a cached digest asked for in a repository that does not have it: status %d", rec.Code)
 	}
 }
 

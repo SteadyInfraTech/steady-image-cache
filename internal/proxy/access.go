@@ -71,15 +71,22 @@ func (c *accessCache) grant(key string, now time.Time) {
 // answered the client already.
 func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool {
 	namespace := ns(r)
-	if len(p.protected) == 0 || !p.protected[namespace] || isPeer(r) {
+	if len(p.protected) == 0 || !p.protected[namespace] {
 		return true
 	}
 	if !validRepo(repo) || !validNamespace(namespace) {
 		return true // the handler refuses it
 	}
+	if isPeer(r) {
+		// The header is set by the sender, so it proves nothing: any holder of a
+		// client certificate could set it. Protected content is not shared
+		// between nodes at all (askablePeers), so there is nothing to serve.
+		http.Error(w, "this registry's content is not shared between nodes", http.StatusForbidden)
+		return false
+	}
 	in := newInfo(r)
 	sum := sha256.Sum256([]byte(in.auth))
-	key := namespace + "|" + repo + "|" + hex.EncodeToString(sum[:])
+	key := namespace + "|" + r.URL.Path + "|" + hex.EncodeToString(sum[:])
 	if p.access.ok(key, p.now()) {
 		return true
 	}
