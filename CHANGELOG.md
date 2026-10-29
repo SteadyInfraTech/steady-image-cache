@@ -4,6 +4,10 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+## 1.1.1 - 2026-10-29
+
+A fix release: six findings of a security scan (a media type that a publisher could choose, plain HTTP peers, trust that `SSL_CERT_FILE` did not narrow, case variants of a registry name, a client that stops reading, and eviction for a size a source only declared), and a read that could miss a blob while the same content was stored again. No setting or metric changes, except that `SIC_PEERS` must now hold `https://` URLs when mutual TLS is on (see below). Upgrading from 1.1.0 needs only the new image.
+
 - Security: the registry name of a request (`?ns=`, or the Host header) is lower-cased once on arrival. Upstream selection already ignored case but tag records and download keys did not, so a client could make the cache keep a record of one tag for every spelling of one registry name. (Records written under other spellings by an earlier version are ignored.)
 - Security: a client that stops reading a blob is dropped after two minutes without progress. The limit is on progress, not on the transfer, so a layer of any size may take as long as it keeps moving (the file is sent in 1 MiB pieces, still by `sendfile`, with the write deadline renewed for each, so a client has to take at least about 9 KiB/s to be kept). Before, such a client held the file open, and with it the disk blocks of a blob the cache had already evicted and counted as free, for as long as the connection lasted.
 - Security: a cached JSON document is served under a registry media type (OCI or Docker, `+json`/`+prettyjws`) or the default manifest type, never under the `mediaType` its publisher wrote. Before, an image config asked for by its digest with `"mediaType": "text/html"` was served as a page on the cache's origin. Responses also carry `X-Content-Type-Options: nosniff`, and stored documents a restrictive `Content-Security-Policy`.
