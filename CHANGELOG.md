@@ -4,7 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
-- Security: a client that stops reading a blob is dropped after two minutes without progress. The limit is on progress, not on the transfer, so a layer of any size may take as long as it keeps moving (the file is sent in 4 MiB pieces, still by `sendfile`, with the write deadline renewed for each). Before, such a client held the file open, and with it the disk blocks of a blob the cache had already evicted and counted as free, for as long as the connection lasted.
+- Security: a client that stops reading a blob is dropped after two minutes without progress. The limit is on progress, not on the transfer, so a layer of any size may take as long as it keeps moving (the file is sent in 1 MiB pieces, still by `sendfile`, with the write deadline renewed for each, so a client has to take at least about 9 KiB/s to be kept). Before, such a client held the file open, and with it the disk blocks of a blob the cache had already evicted and counted as free, for as long as the connection lasted.
 - A request for a blob or manifest that had just been stored could be answered with a `404` (a miss, nothing in the log) if the same content arrived a second time at that moment, as when two clients ask for one manifest with different `Accept` headers: the store refused to open a blob while any writer held it, including one only re-checking a complete file. A blob that is complete, verified and unchanged is now served regardless.
 ## 1.1.0 - 2026-10-28
 

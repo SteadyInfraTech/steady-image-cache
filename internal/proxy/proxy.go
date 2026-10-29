@@ -1275,12 +1275,15 @@ func (c *countedBody) Read(b []byte) (int, error) {
 // a file descriptor, a goroutine and, once the blob has been evicted, the disk
 // blocks of a file that is already gone, for as long as the connection stays up.
 // The limit is on progress, not on the whole transfer: a layer of any size may
-// take as long as it likes while it keeps moving.
+// take as long as it likes while it keeps moving. A file is sent in copyChunk
+// pieces with the deadline renewed for each, so a client must take at least
+// copyChunk per writeIdle (about 9 KiB/s) to be kept; the streamed path renews it
+// for every 64 KiB.
 const writeIdle = 2 * time.Minute
 
 // copyChunk is how much of a file is handed to the kernel between two renewals
 // of the write deadline.
-const copyChunk = 4 << 20
+const copyChunk = 1 << 20
 
 // countingWriter adds the bytes written to n and, when idle is set, keeps a
 // write deadline of idle from the last write that made progress.
