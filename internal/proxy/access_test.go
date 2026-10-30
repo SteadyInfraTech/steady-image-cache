@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +15,8 @@ import (
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil/tlstest"
 )
 
 func protectedProxy(t *testing.T, reg *tokenRegistry, protect bool) (*Proxy, *metrics.Metrics, string) {
@@ -272,6 +277,64 @@ func TestProtectedContentIsRefusedWhenItCannotBeMarked(t *testing.T) {
 	}
 	if _, err := p.store.Stat(digestOf(testManifest)); err == nil {
 		t.Fatal("the manifest was stored without a mark")
+	}
+}
+
+// With certificates a peer is told by its certificate: the header from a client
+// whose certificate does not carry SIC's name opens nothing, and a node that does
+// is served, protected content included.
+func TestPeerIsIdentifiedByItsCertificate(t *testing.T) {
+	blob := []byte("a layer of a private image")
+	reg := newTokenRegistry(t, blob, testManifest)
+	host := reg.Listener.Addr().String()
+	pki := tlstest.New(t, "nodes")
+	f := tlstest.NewFiles(t)
+	f.Write(t, pki, time.Now().Add(-time.Minute))
+	rl, err := tlsutil.New(f.Cert, f.Key, f.CA, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{Upstream: true, UpstreamRegistries: []string{host}, ProtectedRegistries: []string{host}, TLS: rl, ServerName: tlstest.ServerName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = reg.Client()
+	path := "/v2/lib/app/blobs/" + digestOf(blob) + "?ns=" + host
+	if rec := request(p, "GET", path, "Authorization", "Bearer tok"); rec.Code != 200 {
+		t.Fatalf("the entitled client: status %d", rec.Code)
+	}
+	withCert := func(certPEM []byte, hdr ...string) *httptest.ResponseRecorder {
+		blk, _ := pem.Decode(certPEM)
+		c, err := x509.ParseCertificate(blk.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("GET", path, nil)
+		for i := 0; i+1 < len(hdr); i += 2 {
+			req.Header.Set(hdr[i], hdr[i+1])
+		}
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{c}}
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+	clientOnly, _ := pki.IssueClient(t, nil) // containerd's kind of certificate
+	if rec := withCert(clientOnly, PeerHeader, "1"); rec.Code != http.StatusUnauthorized || rec.Body.String() == string(blob) {
+		t.Fatalf("a client that sends the peer header: status %d, want 401", rec.Code)
+	}
+	if rec := withCert(pki.CertPEM, PeerHeader, "1"); rec.Code != 200 || rec.Body.String() != string(blob) {
+		t.Fatalf("a node: status %d", rec.Code)
+	}
+	// The certificate alone, without the header, is a client like any other.
+	if rec := withCert(pki.CertPEM); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a node's certificate without the header: status %d, want 401", rec.Code)
+	}
+	if !p.peersVerified() {
+		t.Fatal("peers are not verified with TLS configured")
 	}
 }
 

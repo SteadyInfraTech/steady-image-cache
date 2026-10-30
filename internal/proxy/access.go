@@ -78,6 +78,12 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 	if len(p.protected) == 0 {
 		return true
 	}
+	if p.peersVerified() && p.isPeer(r) {
+		// Another node, identified by its certificate: the node that has the
+		// client in front of it has asked the registry already, and nodes trust
+		// each other with what they hold.
+		return true
+	}
 	d := pathDigest(r.URL.Path)
 	// The namespace is the client's word (?ns=, Host), and the cache is kept by
 	// digest, so a protected blob would come out under any other namespace.
@@ -90,10 +96,10 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 	if !validRepo(repo) || !validNamespace(namespace) {
 		return true // the handler refuses it
 	}
-	if guarded && isPeer(r) {
-		// The header is set by the sender, so it proves nothing: any holder of a
-		// client certificate could set it. Protected content is not shared
-		// between nodes at all (askablePeers), so there is nothing to serve.
+	if guarded && p.isPeer(r) {
+		// Here the header is all there is (no TLS), and the sender sets it, so
+		// it proves nothing. Protected content is not shared between such
+		// nodes at all (askablePeers), so there is nothing to serve.
 		http.Error(w, "this registry's content is not shared between nodes", http.StatusForbidden)
 		return false
 	}

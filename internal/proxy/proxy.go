@@ -377,7 +377,24 @@ func ns(r *http.Request) string {
 	return strings.ToLower(r.Host)
 }
 
-func isPeer(r *http.Request) bool { return r.Header.Get(PeerHeader) != "" }
+// isPeer reports whether r comes from another SIC instance. The header is the
+// sender's word, so with TLS it counts only if the verified client certificate
+// also carries SIC's name (SIC_TLS_SERVER_NAME), which a client such as
+// containerd, whose certificate is for a client only, does not have. Without
+// TLS (development) the header is all there is.
+func (p *Proxy) isPeer(r *http.Request) bool {
+	if r.Header.Get(PeerHeader) == "" {
+		return false
+	}
+	if p.tls == nil {
+		return true
+	}
+	return r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && r.TLS.PeerCertificates[0].VerifyHostname(p.serverName) == nil
+}
+
+// peersVerified reports whether a peer is told from a client by its
+// certificate rather than by a header that anyone can send.
+func (p *Proxy) peersVerified() bool { return p.tls != nil }
 
 // repoRE is the repository name grammar of the OCI distribution spec, with
 // upper case letters also allowed because some registries do. Anything else,
@@ -633,7 +650,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
-	if isPeer(r) {
+	if p.isPeer(r) {
 		// A peer never starts a download here, but it may share one that is
 		// under way: with a rollout the first node's pull is then passed down
 		// the line while it runs, instead of every other node waiting for it
@@ -706,7 +723,7 @@ func (p *Proxy) missFetch(in info, path, d string, viaCoordinator bool) func(*do
 		if _, err := p.store.Stat(d); err == nil {
 			return fetched
 		}
-		if viaCoordinator && !p.protected[in.ns] {
+		if viaCoordinator && (!p.protected[in.ns] || p.peersVerified()) {
 			if c, ok := p.otherCoordinator(d); ok {
 				cr := p.fetchCoordinator(in, c, path, d)
 				if cr.ok {
@@ -838,11 +855,11 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	// A node that asks us for a tag is answered with what we have, however old:
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
-	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
+	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (p.isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
-	if isPeer(r) {
+	if p.isPeer(r) {
 		http.Error(w, "manifest unavailable", 404)
 		return
 	}
@@ -974,8 +991,8 @@ func (p *Proxy) livePeers() []string {
 // askablePeers is shuffledPeers cut to the number one miss may ask. The peers
 // are in random order, so the ones left out differ from miss to miss.
 func (p *Proxy) askablePeers(ns string) []string {
-	if p.protected[ns] {
-		return nil // protected content is not shared between nodes
+	if p.protected[ns] && !p.peersVerified() {
+		return nil // without certificates a peer cannot be told from a client
 	}
 	peers := p.shuffledPeers()
 	if p.maxTries > 0 && len(peers) > p.maxTries {
@@ -1450,7 +1467,7 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 // servedCounter is the byte counter for what a response to r sends: another
 // node's pull of a blob is counted apart from a client's.
 func (p *Proxy) servedCounter(r *http.Request) *atomic.Uint64 {
-	if isPeer(r) {
+	if p.isPeer(r) {
 		return &p.metrics.BytesToPeers
 	}
 	return &p.metrics.BytesToClients

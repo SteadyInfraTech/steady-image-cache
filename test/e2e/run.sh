@@ -600,19 +600,26 @@ refused "no credentials on $C, by digest, protected" docker exec "$C" crictl pul
 # The right credentials: a node that has the content answers from its cache.
 docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 [ "$(blob_gets)" = "$GETS_BASE" ] || fail "the registry served blobs to a client that was confirmed on a node that had them ($GETS_BASE -> $(blob_gets)): they should come from the cache"
-# Protected content is not passed between nodes. (The counters began at zero
-# when the pods were restarted for this phase.)
 docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
-for n in "$A" "$B" "$C"; do
-  [ "$(metric "$n" sic_peer_hits_total)" = 0 ] || fail "$n took protected content from a peer"
-  [ "$(metric "$n" sic_bytes_to_peers_total)" = 0 ] || fail "$n gave protected content to a peer"
-done
+# A node is told from a client by its certificate, not by the header: containerd's
+# client-only certificate with X-SIC-Peer opens nothing, and a node's does.
+docker cp "$WORK/tls.crt" "$A:/tmp/node.crt"
+docker cp "$WORK/tls.key" "$A:/tmp/node.key"
+priv_manifest() { # CERT KEY [HEADER...]: the HTTP status of the private manifest, asked of $A
+  local cert=$1 key=$2; shift 2
+  docker exec "$A" curl -sS -o /dev/null -w '%{http_code}' --cacert /etc/steady-image-cache/ca.crt \
+    --cert "$cert" --key "$key" "$@" "https://127.0.0.1:5000/v2/e2e/priv/manifests/$DP?ns=$PRIVATE_HOST"
+}
+[ "$(priv_manifest /etc/steady-image-cache/tls.crt /etc/steady-image-cache/tls.key -H 'X-SIC-Peer: 1')" = 401 ] || fail "a client that sends the peer header was not asked for credentials"
+[ "$(priv_manifest /tmp/node.crt /tmp/node.key)" = 401 ] || fail "a node's certificate without the peer header was not treated as a client"
+[ "$(priv_manifest /tmp/node.crt /tmp/node.key -H 'X-SIC-Peer: 1')" = 200 ] || fail "a node was not served"
+docker exec "$A" rm -f /tmp/node.crt /tmp/node.key
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES-
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 wait_for "all three nodes to see all their peers" 90 all_see_peers
-log "phase 3b passed: a protected registry's content is only served to clients the registry confirms"
+log "phase 3b passed: a protected registry's content is only served to clients the registry confirms, and a peer is known by its certificate"
 
 # ---------------------------------------------------------------------------
 # Phase 4: SIC as a mirror (deploy/containerd/mirror-hosts.toml).
