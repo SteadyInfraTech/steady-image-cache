@@ -610,9 +610,15 @@ priv_manifest() { # CERT KEY [HEADER...]: the HTTP status of the private manifes
   docker exec "$A" curl -sS -o /dev/null -w '%{http_code}' --cacert /etc/steady-image-cache/ca.crt \
     --cert "$cert" --key "$key" "$@" "https://127.0.0.1:5000/v2/e2e/priv/manifests/$DP?ns=$PRIVATE_HOST"
 }
-[ "$(priv_manifest /etc/steady-image-cache/tls.crt /etc/steady-image-cache/tls.key -H 'X-SIC-Peer: 1')" = 401 ] || fail "a client that sends the peer header was not asked for credentials"
-[ "$(priv_manifest /tmp/node.crt /tmp/node.key)" = 401 ] || fail "a node's certificate without the peer header was not treated as a client"
-[ "$(priv_manifest /tmp/node.crt /tmp/node.key -H 'X-SIC-Peer: 1')" = 200 ] || fail "a node was not served"
+# The status, or what curl said when it got none.
+expect_manifest() { # WANT WHAT CERT KEY [HEADER...]
+  local want=$1 what=$2 got; shift 2
+  got=$(priv_manifest "$@" 2>&1) || true
+  [ "$got" = "$want" ] || fail "$what: got '$got', want $want"
+}
+expect_manifest 401 "a client that sends the peer header" /etc/steady-image-cache/tls.crt /etc/steady-image-cache/tls.key -H 'X-SIC-Peer: 1'
+expect_manifest 401 "a node's certificate without the peer header" /tmp/node.crt /tmp/node.key
+expect_manifest 200 "a node's certificate with the peer header" /tmp/node.crt /tmp/node.key -H 'X-SIC-Peer: 1'
 docker exec "$A" rm -f /tmp/node.crt /tmp/node.key
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
