@@ -373,3 +373,29 @@ func TestProtectedRegistryMustBeUpstream(t *testing.T) {
 		t.Errorf("same registry in another case: %v", err)
 	}
 }
+
+// Only the name itself makes a node: a wildcard that would match it does not.
+func TestWildcardCertificateIsNotANode(t *testing.T) {
+	p := &Proxy{tls: &tlsutil.Reloader{}, serverName: "sic.example.com"}
+	mk := func(names ...string) *http.Request {
+		r := httptest.NewRequest("GET", "/v2/a/blobs/x", nil)
+		r.Header.Set(PeerHeader, "1")
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{DNSNames: names}}}
+		return r
+	}
+	for name, c := range map[string]struct {
+		names []string
+		want  bool
+	}{
+		"the name":        {[]string{"sic.example.com"}, true},
+		"the name, cased": {[]string{"SIC.example.com"}, true},
+		"among others":    {[]string{"other", "sic.example.com"}, true},
+		"a wildcard":      {[]string{"*.example.com"}, false},
+		"another name":    {[]string{"containerd"}, false},
+		"no names at all": {nil, false},
+	} {
+		if got := p.isPeer(mk(c.names...)); got != c.want {
+			t.Errorf("%s: isPeer = %v, want %v", name, got, c.want)
+		}
+	}
+}

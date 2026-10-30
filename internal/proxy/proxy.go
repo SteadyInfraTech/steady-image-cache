@@ -389,7 +389,12 @@ func (p *Proxy) isPeer(r *http.Request) bool {
 	if p.tls == nil {
 		return true
 	}
-	return r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && r.TLS.PeerCertificates[0].VerifyHostname(p.serverName) == nil
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return false
+	}
+	// The name itself, not VerifyHostname: that also accepts a wildcard, and the
+	// holder of *.example.com is not one of ours.
+	return slices.ContainsFunc(r.TLS.PeerCertificates[0].DNSNames, func(n string) bool { return strings.EqualFold(n, p.serverName) })
 }
 
 // peersVerified reports whether a peer is told from a client by its
