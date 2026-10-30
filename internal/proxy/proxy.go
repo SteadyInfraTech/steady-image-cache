@@ -37,6 +37,12 @@ const (
 	// requests are answered from the local cache only, which stops two nodes
 	// that both miss from asking each other (and waiting on themselves).
 	PeerHeader = "X-SIC-Peer"
+	// ProtectsHeader is sent with a peer request for a protected registry's
+	// content: it says that the asking node enforces the protection too (that is
+	// listed in its SIC_PROTECTED_REGISTRIES), so that what it is given is not
+	// passed on unchecked. A node without the setting, as during a rolling
+	// update that switches it on, does not send it and is refused.
+	ProtectsHeader = "X-SIC-Protects"
 
 	// CoordHeader marks a peer request that asks the receiver to fetch the
 	// blob, if it does not have it and it is the blob's coordinator, and to
@@ -377,7 +383,29 @@ func ns(r *http.Request) string {
 	return strings.ToLower(r.Host)
 }
 
-func isPeer(r *http.Request) bool { return r.Header.Get(PeerHeader) != "" }
+// isPeer reports whether r comes from another SIC instance. The header is the
+// sender's word, so with TLS it counts only if the verified client certificate
+// also carries SIC's name (SIC_TLS_SERVER_NAME), which a client such as
+// containerd, whose certificate is for a client only, does not have. Without
+// TLS (development) the header is all there is.
+func (p *Proxy) isPeer(r *http.Request) bool {
+	if r.Header.Get(PeerHeader) == "" {
+		return false
+	}
+	if p.tls == nil {
+		return true
+	}
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return false
+	}
+	// The name itself, not VerifyHostname: that also accepts a wildcard, and the
+	// holder of *.example.com is not one of ours.
+	return slices.ContainsFunc(r.TLS.PeerCertificates[0].DNSNames, func(n string) bool { return strings.EqualFold(n, p.serverName) })
+}
+
+// peersVerified reports whether a peer is told from a client by its
+// certificate rather than by a header that anyone can send.
+func (p *Proxy) peersVerified() bool { return p.tls != nil }
 
 // repoRE is the repository name grammar of the OCI distribution spec, with
 // upper case letters also allowed because some registries do. Anything else,
@@ -633,7 +661,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
-	if isPeer(r) {
+	if p.isPeer(r) {
 		// A peer never starts a download here, but it may share one that is
 		// under way: with a rollout the first node's pull is then passed down
 		// the line while it runs, instead of every other node waiting for it
@@ -706,7 +734,7 @@ func (p *Proxy) missFetch(in info, path, d string, viaCoordinator bool) func(*do
 		if _, err := p.store.Stat(d); err == nil {
 			return fetched
 		}
-		if viaCoordinator && !p.protected[in.ns] {
+		if viaCoordinator && (!p.protected[in.ns] || p.peersVerified()) {
 			if c, ok := p.otherCoordinator(d); ok {
 				cr := p.fetchCoordinator(in, c, path, d)
 				if cr.ok {
@@ -768,7 +796,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	var challenge []string
 	var throttle *fetchResult
 	for _, base := range p.askablePeers(in.ns) {
-		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
+		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), p.peerHdr(in.ns))
 		if e != nil {
 			p.peerFailed(base, e)
 			continue
@@ -838,11 +866,11 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	// A node that asks us for a tag is answered with what we have, however old:
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
-	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
+	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (p.isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
-	if isPeer(r) {
+	if p.isPeer(r) {
 		http.Error(w, "manifest unavailable", 404)
 		return
 	}
@@ -974,8 +1002,8 @@ func (p *Proxy) livePeers() []string {
 // askablePeers is shuffledPeers cut to the number one miss may ask. The peers
 // are in random order, so the ones left out differ from miss to miss.
 func (p *Proxy) askablePeers(ns string) []string {
-	if p.protected[ns] {
-		return nil // protected content is not shared between nodes
+	if p.protected[ns] && !p.peersVerified() {
+		return nil // without certificates a peer cannot be told from a client
 	}
 	peers := p.shuffledPeers()
 	if p.maxTries > 0 && len(peers) > p.maxTries {
@@ -1182,7 +1210,7 @@ func refused(e error) bool {
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	var noSpace fetchResult
 	for _, base := range p.askablePeers(in.ns) {
-		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, map[string]string{PeerHeader: "1"}, false)
+		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, p.peerHdr(in.ns), false)
 		if done {
 			return res
 		}
@@ -1291,7 +1319,7 @@ func (p *Proxy) storeManifest(resp *http.Response, namespace, ref string, receiv
 // fetchManifestPeers returns the digest of the manifest it stored.
 func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
 	for _, base := range p.askablePeers(in.ns) {
-		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1", "Accept": in.accept})
+		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), p.peerHdr(in.ns, "Accept", in.accept))
 		if e != nil {
 			p.peerFailed(base, e)
 			continue
@@ -1450,7 +1478,7 @@ func (p *Proxy) fetchManifestUpstream(in info, path, ref string) (string, fetchR
 // servedCounter is the byte counter for what a response to r sends: another
 // node's pull of a blob is counted apart from a client's.
 func (p *Proxy) servedCounter(r *http.Request) *atomic.Uint64 {
-	if isPeer(r) {
+	if p.isPeer(r) {
 		return &p.metrics.BytesToPeers
 	}
 	return &p.metrics.BytesToClients
@@ -1565,3 +1593,16 @@ func (c *countingWriter) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (c *countingWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+// peerHdr is the headers of a request to a peer for content of namespace:
+// the peer marker, whether this node protects the namespace, and kv pairs.
+func (p *Proxy) peerHdr(namespace string, kv ...string) map[string]string {
+	h := map[string]string{PeerHeader: "1"}
+	if p.protected[namespace] {
+		h[ProtectsHeader] = "1"
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		h[kv[i]] = kv[i+1]
+	}
+	return h
+}

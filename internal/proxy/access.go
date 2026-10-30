@@ -79,6 +79,26 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 		return true
 	}
 	d := pathDigest(r.URL.Path)
+	if p.peersVerified() && p.isPeer(r) {
+		// Another node, identified by its certificate: the node that has the
+		// client in front of it has asked the registry already, and nodes trust
+		// each other with what they hold. For a protected registry, that is: a
+		// node asking under another namespace has asked nobody, and what this
+		// node holds from a protected registry is not for that namespace's
+		// clients (the asker would store it unmarked and hand it on).
+		if !p.protected[namespace] && d != "" && p.store.IsProtected(d) {
+			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
+			return false
+		}
+		// A node that does not itself protect the registry (not yet updated, in a
+		// rolling update that switches protection on) would serve what it is
+		// given to anyone.
+		if p.protected[namespace] && r.Header.Get(ProtectsHeader) == "" {
+			http.Error(w, "this registry's content is shared only with nodes that protect it", http.StatusForbidden)
+			return false
+		}
+		return true
+	}
 	// The namespace is the client's word (?ns=, Host), and the cache is kept by
 	// digest, so a protected blob would come out under any other namespace.
 	// Content that came from a protected registry is therefore guarded wherever
@@ -90,10 +110,10 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 	if !validRepo(repo) || !validNamespace(namespace) {
 		return true // the handler refuses it
 	}
-	if guarded && isPeer(r) {
-		// The header is set by the sender, so it proves nothing: any holder of a
-		// client certificate could set it. Protected content is not shared
-		// between nodes at all (askablePeers), so there is nothing to serve.
+	if guarded && p.isPeer(r) {
+		// Here the header is all there is (no TLS), and the sender sets it, so
+		// it proves nothing. Protected content is not shared between such
+		// nodes at all (askablePeers), so there is nothing to serve.
 		http.Error(w, "this registry's content is not shared between nodes", http.StatusForbidden)
 		return false
 	}

@@ -600,19 +600,47 @@ refused "no credentials on $C, by digest, protected" docker exec "$C" crictl pul
 # The right credentials: a node that has the content answers from its cache.
 docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 [ "$(blob_gets)" = "$GETS_BASE" ] || fail "the registry served blobs to a client that was confirmed on a node that had them ($GETS_BASE -> $(blob_gets)): they should come from the cache"
-# Protected content is not passed between nodes. (The counters began at zero
-# when the pods were restarted for this phase.)
 docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
-for n in "$A" "$B" "$C"; do
-  [ "$(metric "$n" sic_peer_hits_total)" = 0 ] || fail "$n took protected content from a peer"
-  [ "$(metric "$n" sic_bytes_to_peers_total)" = 0 ] || fail "$n gave protected content to a peer"
-done
+# A node is told from a client by its certificate, not by the header: containerd's
+# client-only certificate with X-SIC-Peer opens nothing, and a node's does.
+# (Not /tmp: it is a tmpfs in a kind node, and docker cp cannot write into one.)
+docker cp "$WORK/tls.crt" "$A:/etc/steady-image-cache/node.crt"
+docker cp "$WORK/tls.key" "$A:/etc/steady-image-cache/node.key"
+priv_manifest() { # CERT KEY [HEADER...]: the HTTP status of the private manifest, asked of $A
+  local cert=$1 key=$2; shift 2
+  docker exec "$A" curl -sS -o /dev/null -w '%{http_code}' --cacert /etc/steady-image-cache/ca.crt \
+    --cert "$cert" --key "$key" "$@" "https://127.0.0.1:5000/v2/e2e/priv/manifests/$DP?ns=$PRIVATE_HOST"
+}
+# The status, or what curl said when it got none.
+expect_manifest() { # WANT WHAT CERT KEY [HEADER...]
+  local want=$1 what=$2 got; shift 2
+  got=$(priv_manifest "$@" 2>&1) || true
+  [ "$got" = "$want" ] || fail "$what: got '$got', want $want"
+}
+expect_manifest 401 "a client that sends the peer header" /etc/steady-image-cache/tls.crt /etc/steady-image-cache/tls.key -H 'X-SIC-Peer: 1'
+expect_manifest 401 "a node's certificate without the peer header" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
+expect_manifest 403 "a node that does not say it protects the registry" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key -H 'X-SIC-Peer: 1'
+expect_manifest 200 "a node that protects it" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key -H 'X-SIC-Peer: 1' -H 'X-SIC-Protects: 1'
+docker exec "$A" rm -f /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
+# Protected content does pass between nodes that can be told from clients. $C
+# has the first image already (containerd and its own cache), so a new one that
+# only $A pulls: $C gets it from $A, and from nowhere else it could.
+export DOCKER_CONFIG=$WORK/dockercfg
+head -c 1500000 /dev/urandom > "$WORK/auth/three"
+printf 'FROM scratch\nCOPY three /three\n' > "$WORK/auth/Dockerfile.v2"
+docker build --provenance=false --sbom=false -q -f "$WORK/auth/Dockerfile.v2" -t "$PRIV_LOCAL:v2" "$WORK/auth" >/dev/null
+docker push "$PRIV_LOCAL:v2" >/dev/null || fail "could not push $PRIV_LOCAL:v2"
+unset DOCKER_CONFIG
+docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v2"
+peer_hits_c=$(metric "$C" sic_peer_hits_total)
+docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v2"
+[ "$(metric "$C" sic_peer_hits_total)" -gt "$peer_hits_c" ] || fail "$C took no protected blob from a peer ($peer_hits_c -> $(metric "$C" sic_peer_hits_total))"
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES-
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 wait_for "all three nodes to see all their peers" 90 all_see_peers
-log "phase 3b passed: a protected registry's content is only served to clients the registry confirms"
+log "phase 3b passed: a protected registry's content is only served to clients the registry confirms, and a peer is known by its certificate"
 
 # ---------------------------------------------------------------------------
 # Phase 4: SIC as a mirror (deploy/containerd/mirror-hosts.toml).
