@@ -37,6 +37,12 @@ const (
 	// requests are answered from the local cache only, which stops two nodes
 	// that both miss from asking each other (and waiting on themselves).
 	PeerHeader = "X-SIC-Peer"
+	// ProtectsHeader is sent with a peer request for a protected registry's
+	// content: it says that the asking node enforces the protection too (that is
+	// listed in its SIC_PROTECTED_REGISTRIES), so that what it is given is not
+	// passed on unchecked. A node without the setting, as during a rolling
+	// update that switches it on, does not send it and is refused.
+	ProtectsHeader = "X-SIC-Protects"
 
 	// CoordHeader marks a peer request that asks the receiver to fetch the
 	// blob, if it does not have it and it is the blob's coordinator, and to
@@ -790,7 +796,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	var challenge []string
 	var throttle *fetchResult
 	for _, base := range p.askablePeers(in.ns) {
-		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1"})
+		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), p.peerHdr(in.ns))
 		if e != nil {
 			p.peerFailed(base, e)
 			continue
@@ -1204,7 +1210,7 @@ func refused(e error) bool {
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	var noSpace fetchResult
 	for _, base := range p.askablePeers(in.ns) {
-		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, map[string]string{PeerHeader: "1"}, false)
+		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, p.peerHdr(in.ns), false)
 		if done {
 			return res
 		}
@@ -1313,7 +1319,7 @@ func (p *Proxy) storeManifest(resp *http.Response, namespace, ref string, receiv
 // fetchManifestPeers returns the digest of the manifest it stored.
 func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
 	for _, base := range p.askablePeers(in.ns) {
-		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), map[string]string{PeerHeader: "1", "Accept": in.accept})
+		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), p.peerHdr(in.ns, "Accept", in.accept))
 		if e != nil {
 			p.peerFailed(base, e)
 			continue
@@ -1587,3 +1593,16 @@ func (c *countingWriter) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (c *countingWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+// peerHdr is the headers of a request to a peer for content of namespace:
+// the peer marker, whether this node protects the namespace, and kv pairs.
+func (p *Proxy) peerHdr(namespace string, kv ...string) map[string]string {
+	h := map[string]string{PeerHeader: "1"}
+	if p.protected[namespace] {
+		h[ProtectsHeader] = "1"
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		h[kv[i]] = kv[i+1]
+	}
+	return h
+}

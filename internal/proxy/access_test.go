@@ -326,8 +326,13 @@ func TestPeerIsIdentifiedByItsCertificate(t *testing.T) {
 	if rec := withCert(clientOnly, PeerHeader, "1"); rec.Code != http.StatusUnauthorized || rec.Body.String() == string(blob) {
 		t.Fatalf("a client that sends the peer header: status %d, want 401", rec.Code)
 	}
-	if rec := withCert(pki.CertPEM, PeerHeader, "1"); rec.Code != 200 || rec.Body.String() != string(blob) {
+	if rec := withCert(pki.CertPEM, PeerHeader, "1", ProtectsHeader, "1"); rec.Code != 200 || rec.Body.String() != string(blob) {
 		t.Fatalf("a node: status %d", rec.Code)
+	}
+	// A node that does not say it protects the registry (not updated yet, in a
+	// rolling update that switches protection on) is not given its content.
+	if rec := withCert(pki.CertPEM, PeerHeader, "1"); rec.Code != http.StatusForbidden || rec.Body.String() == string(blob) {
+		t.Fatalf("a node that does not protect the registry: status %d, want 403", rec.Code)
 	}
 	// The certificate alone, without the header, is a client like any other.
 	if rec := withCert(pki.CertPEM); rec.Code != http.StatusUnauthorized {
@@ -432,6 +437,7 @@ func TestVerifiedPeerIsNotGivenProtectedContentUnderAnotherNamespace(t *testing.
 	peer := func(ns string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d+"?ns="+ns, nil)
 		req.Header.Set(PeerHeader, "1")
+		req.Header.Set(ProtectsHeader, "1")
 		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{DNSNames: []string{tlstest.ServerName}}}}
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)

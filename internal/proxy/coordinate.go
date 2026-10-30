@@ -62,7 +62,7 @@ func (p *Proxy) otherCoordinator(d string) (string, bool) {
 func (p *Proxy) fetchCoordinator(in info, base, path, d string) fetchResult {
 	// Not done means nothing was stored; res is then at most "insufficient
 	// storage", which the caller treats like an empty answer.
-	res, _ := p.tryPeer(in, p.coordHTTP(), base, path, d, map[string]string{PeerHeader: "1", CoordHeader: "1"}, true)
+	res, _ := p.tryPeer(in, p.coordHTTP(), base, path, d, p.peerHdr(in.ns, CoordHeader, "1"), true)
 	return res
 }
 

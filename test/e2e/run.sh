@@ -619,7 +619,8 @@ expect_manifest() { # WANT WHAT CERT KEY [HEADER...]
 }
 expect_manifest 401 "a client that sends the peer header" /etc/steady-image-cache/tls.crt /etc/steady-image-cache/tls.key -H 'X-SIC-Peer: 1'
 expect_manifest 401 "a node's certificate without the peer header" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
-expect_manifest 200 "a node's certificate with the peer header" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key -H 'X-SIC-Peer: 1'
+expect_manifest 403 "a node that does not say it protects the registry" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key -H 'X-SIC-Peer: 1'
+expect_manifest 200 "a node that protects it" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key -H 'X-SIC-Peer: 1' -H 'X-SIC-Protects: 1'
 docker exec "$A" rm -f /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
