@@ -62,8 +62,10 @@ jobs:
         run: |
           set -e
           for t in FuzzSplitPath FuzzValidRepoAndRef FuzzRetryAfterOf FuzzManifestType; do
+            printf 'Fuzz target: %s\n' "$t"
             timeout 120 go test ./internal/proxy -run '^$' -fuzz "^${t}\$" -fuzztime 20s -fuzzminimizetime 5s
           done
+          printf 'Fuzz target: FuzzParsePeers\n'
           timeout 120 go test ./internal/peer -run '^$' -fuzz '^FuzzParsePeers$' -fuzztime 20s -fuzzminimizetime 5s
 
   vulncheck:
