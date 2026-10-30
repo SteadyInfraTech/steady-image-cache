@@ -603,8 +603,9 @@ docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v1"
 # A node is told from a client by its certificate, not by the header: containerd's
 # client-only certificate with X-SIC-Peer opens nothing, and a node's does.
-docker cp "$WORK/tls.crt" "$A:/tmp/node.crt"
-docker cp "$WORK/tls.key" "$A:/tmp/node.key"
+# (Not /tmp: it is a tmpfs in a kind node, and docker cp cannot write into one.)
+docker cp "$WORK/tls.crt" "$A:/etc/steady-image-cache/node.crt"
+docker cp "$WORK/tls.key" "$A:/etc/steady-image-cache/node.key"
 priv_manifest() { # CERT KEY [HEADER...]: the HTTP status of the private manifest, asked of $A
   local cert=$1 key=$2; shift 2
   docker exec "$A" curl -sS -o /dev/null -w '%{http_code}' --cacert /etc/steady-image-cache/ca.crt \
@@ -617,9 +618,9 @@ expect_manifest() { # WANT WHAT CERT KEY [HEADER...]
   [ "$got" = "$want" ] || fail "$what: got '$got', want $want"
 }
 expect_manifest 401 "a client that sends the peer header" /etc/steady-image-cache/tls.crt /etc/steady-image-cache/tls.key -H 'X-SIC-Peer: 1'
-expect_manifest 401 "a node's certificate without the peer header" /tmp/node.crt /tmp/node.key
-expect_manifest 200 "a node's certificate with the peer header" /tmp/node.crt /tmp/node.key -H 'X-SIC-Peer: 1'
-docker exec "$A" rm -f /tmp/node.crt /tmp/node.key
+expect_manifest 401 "a node's certificate without the peer header" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
+expect_manifest 200 "a node's certificate with the peer header" /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key -H 'X-SIC-Peer: 1'
+docker exec "$A" rm -f /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES-
