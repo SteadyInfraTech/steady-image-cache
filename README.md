@@ -10,7 +10,7 @@ SIC is a young project: the first release was on 2026-10-24. What is covered so 
 
 Things to know before deploying, each described in the section named:
 
-* Unless a registry is listed in `SIC_PROTECTED_REGISTRIES`, every client can read the whole cache, private images included, and every node can read all of it whatever the setting; the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
+* Unless a registry is listed in `SIC_PROTECTED_REGISTRIES` (and then only for what is cached after it was listed: start with an empty cache), every client can read the whole cache, private images included, and every node can read all of it whatever the setting; the sample shares one certificate between all nodes ("Upstream fallback", "TLS").
 * Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and a node can share a download only once it has received its first bytes, so nodes that all miss in the same instant mostly go to the registry ("Peer requests", "Streaming a miss").
 * Peer discovery asks the Kubernetes API from every node: one list (answered from the API server's cache) and then a watch, so a steady cluster costs the API server almost nothing, but every node still receives an event for every pod change, so a rolling restart of a very large DaemonSet costs the square of the node count in events. It is not tested beyond a few hundred nodes ("Health and metrics" describes it).
 * The containerd import keeps a second copy of every blob on the node ("Production notes").

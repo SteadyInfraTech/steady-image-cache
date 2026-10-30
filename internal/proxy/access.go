@@ -78,13 +78,20 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 	if len(p.protected) == 0 {
 		return true
 	}
+	d := pathDigest(r.URL.Path)
 	if p.peersVerified() && p.isPeer(r) {
 		// Another node, identified by its certificate: the node that has the
 		// client in front of it has asked the registry already, and nodes trust
-		// each other with what they hold.
+		// each other with what they hold. For a protected registry, that is: a
+		// node asking under another namespace has asked nobody, and what this
+		// node holds from a protected registry is not for that namespace's
+		// clients (the asker would store it unmarked and hand it on).
+		if !p.protected[namespace] && d != "" && p.store.IsProtected(d) {
+			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
+			return false
+		}
 		return true
 	}
-	d := pathDigest(r.URL.Path)
 	// The namespace is the client's word (?ns=, Host), and the cache is kept by
 	// digest, so a protected blob would come out under any other namespace.
 	// Content that came from a protected registry is therefore guarded wherever

@@ -399,3 +399,50 @@ func TestWildcardCertificateIsNotANode(t *testing.T) {
 		}
 	}
 }
+
+// A node that holds content of a protected registry gives it to another node
+// only under that registry's own namespace: a client asking under another one
+// has been confirmed by nobody, and the asking node would store it unmarked.
+func TestVerifiedPeerIsNotGivenProtectedContentUnderAnotherNamespace(t *testing.T) {
+	blob := []byte("a layer of a private image")
+	reg := newTokenRegistry(t, blob, testManifest)
+	other := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(other.Close)
+	host, otherHost := reg.Listener.Addr().String(), other.Listener.Addr().String()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pki := tlstest.New(t, "nodes")
+	f := tlstest.NewFiles(t)
+	f.Write(t, pki, time.Now().Add(-time.Minute))
+	rl, err := tlsutil.New(f.Cert, f.Key, f.CA, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(st, &swapFinder{}, &metrics.Metrics{}, Options{Upstream: true, UpstreamRegistries: []string{host, otherHost}, ProtectedRegistries: []string{host}, TLS: rl, ServerName: tlstest.ServerName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.upstreamClient = reg.Client()
+	d := digestOf(blob)
+	if rec := request(p, "GET", "/v2/lib/app/blobs/"+d+"?ns="+host, "Authorization", "Bearer tok"); rec.Code != 200 {
+		t.Fatalf("the entitled client: status %d", rec.Code)
+	}
+	peer := func(ns string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d+"?ns="+ns, nil)
+		req.Header.Set(PeerHeader, "1")
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{DNSNames: []string{tlstest.ServerName}}}}
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := peer(host); rec.Code != 200 || rec.Body.String() != string(blob) {
+		t.Fatalf("a node, under the protected namespace: status %d", rec.Code)
+	}
+	for _, ns := range []string{otherHost, "evil.example"} {
+		if rec := peer(ns); rec.Code != http.StatusForbidden || rec.Body.String() == string(blob) {
+			t.Fatalf("a node, under %s: status %d, want 403", ns, rec.Code)
+		}
+	}
+}

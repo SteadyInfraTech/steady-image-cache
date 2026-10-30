@@ -623,6 +623,19 @@ expect_manifest 200 "a node's certificate with the peer header" /etc/steady-imag
 docker exec "$A" rm -f /etc/steady-image-cache/node.crt /etc/steady-image-cache/node.key
 [ "$(metric "$A" sic_access_checks_total)" -ge 1 ] || fail "$A made no access check"
 [ "$(priv_digest "$C")" = "$DP" ] || fail "$C has '$(priv_digest "$C")' for the tag, want $DP"
+# Protected content does pass between nodes that can be told from clients. $C
+# has the first image already (containerd and its own cache), so a new one that
+# only $A pulls: $C gets it from $A, and from nowhere else it could.
+export DOCKER_CONFIG=$WORK/dockercfg
+head -c 1500000 /dev/urandom > "$WORK/auth/three"
+printf 'FROM scratch\nCOPY three /three\n' > "$WORK/auth/Dockerfile.v2"
+docker build --provenance=false --sbom=false -q -f "$WORK/auth/Dockerfile.v2" -t "$PRIV_LOCAL:v2" "$WORK/auth" >/dev/null
+docker push "$PRIV_LOCAL:v2" >/dev/null || fail "could not push $PRIV_LOCAL:v2"
+unset DOCKER_CONFIG
+docker exec "$A" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v2"
+peer_hits_c=$(metric "$C" sic_peer_hits_total)
+docker exec "$C" crictl pull --creds "$USER_NAME:$PASS" "$PRIV:v2"
+[ "$(metric "$C" sic_peer_hits_total)" -gt "$peer_hits_c" ] || fail "$C took no protected blob from a peer ($peer_hits_c -> $(metric "$C" sic_peer_hits_total))"
 kubectl -n kube-system set env daemonset/steady-image-cache SIC_PROTECTED_REGISTRIES-
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 wait_for "all three nodes to see all their peers" 90 all_see_peers
