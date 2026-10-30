@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The request path, the Retry-After header and manifests are all text that comes
@@ -66,7 +67,14 @@ func FuzzManifestType(f *testing.F) {
 	f.Add([]byte(`null`))
 	f.Add([]byte(strings.Repeat("[", 20000)))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		if got := manifestType(bytes.NewReader(data)); got == "" {
+		// A document that takes long to read would hold up every request for it;
+		// say so, with its size, instead of leaving the fuzzer to stall.
+		start := time.Now()
+		got := manifestType(bytes.NewReader(data))
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("manifestType took %v for %d bytes", d, len(data))
+		}
+		if got == "" {
 			t.Fatal("manifestType returned an empty media type")
 		}
 	})
