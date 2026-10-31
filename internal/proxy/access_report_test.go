@@ -132,20 +132,57 @@ func TestDownloadMarkedAfterAdmissionIsNotJoinedUnchecked(t *testing.T) {
 	if err := p.store.MarkProtected(d); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan *httptest.ResponseRecorder)
+	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d+"?ns="+otherHost, nil)
 		rec := httptest.NewRecorder()
 		p.blob(rec, req, "lib/app", d)
 		done <- rec
 	}()
-	time.Sleep(100 * time.Millisecond) // let it join
-	if _, err := p.store.PutVerified(d, bytes.NewReader(blob)); err != nil {
-		t.Fatal(err)
+	// With the check the request is answered without waiting for the download.
+	// Without it, it waits for it: then the download is completed, so that what
+	// it would have been given is seen.
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(5 * time.Second):
+		if _, err := p.store.PutVerified(d, bytes.NewReader(blob)); err != nil {
+			t.Fatal(err)
+		}
+		dl.finish(fetched)
+		rec = <-done
 	}
-	dl.finish(fetched)
-	rec := <-done
 	if rec.Code == 200 || bytes.Equal(rec.Body.Bytes(), blob) {
 		t.Fatalf("status %d: the client got a protected blob it was never confirmed for", rec.Code)
+	}
+}
+
+// The same for a node that is asked to share a download: marked after it was
+// admitted, it is not for another namespace's asker.
+func TestNodeIsNotGivenADownloadMarkedAfterAdmission(t *testing.T) {
+	blob := []byte("a layer of a private image")
+	p, _, otherHost := twoUpstreams(t, blob)
+	d := digestOf(blob)
+	dl := newDownload("")
+	p.dlmu.Lock()
+	p.downloads[d] = dl
+	p.dlmu.Unlock()
+	if err := p.store.MarkProtected(d); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d+"?ns="+otherHost, nil)
+	req.Header.Set(PeerHeader, "1")
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{DNSNames: []string{tlstest.ServerName}}}}
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { p.blob(rec, req, "lib/app", d); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		dl.finish(fetched)
+		<-done
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", rec.Code)
 	}
 }

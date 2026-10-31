@@ -276,3 +276,31 @@ func TestUpstreamRedirectKeepsCredentialsOnlyForTheSameOrigin(t *testing.T) {
 		}
 	}
 }
+
+// net/http compares host names as they are spelled, so a redirect to the same
+// host in another case loses the header before the callback runs; it is the
+// same origin, and the registry may want its credentials there.
+func TestUpstreamRedirectToTheSameHostInAnotherCaseKeepsCredentials(t *testing.T) {
+	var final atomic.Value
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			_, port, _ := strings.Cut(srv.Listener.Addr().String(), ":")
+			http.Redirect(w, r, "https://LOCALHOST:"+port+"/final", http.StatusFound)
+			return
+		}
+		final.Store(r.Header.Get("Authorization"))
+	}))
+	t.Cleanup(srv.Close)
+	_, port, _ := strings.Cut(srv.Listener.Addr().String(), ":")
+	req, _ := http.NewRequest("GET", "https://localhost:"+port+"/start", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := upstreamClientFor(srv).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got, _ := final.Load().(string); got != "Bearer tok" {
+		t.Fatalf("Authorization at the redirected request = %q", got)
+	}
+}

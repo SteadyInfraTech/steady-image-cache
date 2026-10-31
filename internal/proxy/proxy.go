@@ -278,6 +278,10 @@ func upstreamRedirect(req *http.Request, via []*http.Request) error {
 	}
 	if len(via) == 0 || !sameOrigin(via[0].URL, req.URL) {
 		req.Header.Del("Authorization")
+	} else if auth := via[0].Header.Get("Authorization"); auth != "" {
+		// net/http compares host names case-sensitively and has dropped the
+		// header for the same host spelled otherwise; it is the same origin.
+		req.Header.Set("Authorization", auth)
 	}
 	return nil
 }
@@ -700,6 +704,11 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		return
 	}
 	if p.isPeer(r) {
+		// Marked since admission: not for another namespace's asker (see admit).
+		if len(p.protected) > 0 && !p.protected[ns(r)] && p.store.IsProtected(d) {
+			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
+			return
+		}
 		// A peer never starts a download here, but it may share one that is
 		// under way: with a rollout the first node's pull is then passed down
 		// the line while it runs, instead of every other node waiting for it
