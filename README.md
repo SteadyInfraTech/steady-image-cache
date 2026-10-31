@@ -13,7 +13,7 @@ Things to know before deploying, each described in the section named:
 * Unless a registry is listed in `SIC_PROTECTED_REGISTRIES` (and then only for what is cached after it was listed: start with an empty cache), every client can read the whole cache, private images included. Whoever holds a node's certificate and key can read what the nodes hold, protected content too; but a protected registry's content is given only to a node that protects that registry itself, so set `SIC_PROTECTED_REGISTRIES` the same on every node. The sample shares one certificate between all nodes ("Upstream fallback", "TLS").
 * Peers are asked one after another, a few per miss, so on a large cluster a blob held by few nodes is often fetched from the registry instead, and a node can share a download only once it has received its first bytes, so nodes that all miss in the same instant mostly go to the registry ("Peer requests", "Streaming a miss").
 * Peer discovery asks the Kubernetes API from every node: one list (answered from the API server's cache) and then a watch, so a steady cluster costs the API server almost nothing, but every node still receives an event for every pod change, so a rolling restart of a very large DaemonSet costs the square of the node count in events. It is not tested beyond a few hundred nodes ("Health and metrics" describes it).
-* The containerd import keeps a second copy of every blob on the node ("Production notes").
+* The containerd import keeps a second copy of every blob on the node unless containerd's content directory is mounted into the pod, which the sample does ("The import without a second copy").
 * With SIC as the only registry host, an upgrade needs the new image on the node first ("Upgrading").
 
 The settings, the metric names and the HTTP paths are the public interface and follow semantic versioning (see `CHANGELOG.md`); anything not listed there may change in a minor release.
@@ -42,7 +42,7 @@ containerd -> local SIC -> local cache
                          -> optional upstream
 ```
 
-On startup and periodically, SIC connects to the node's containerd socket. Existing content is copied into SIC's content-addressed cache and image references are imported as aliases. This means a newly joined air-gapped node can obtain content that existed on older nodes before SIC was deployed.
+On startup and periodically, SIC connects to the node's containerd socket. Existing content is copied into SIC's content-addressed cache (or linked to, when containerd's content directory is mounted: "The import without a second copy") and image references are imported as aliases. This means a newly joined air-gapped node can obtain content that existed on older nodes before SIC was deployed.
 
 ## Containerd integration
 
@@ -61,6 +61,7 @@ Relevant environment variables:
 SIC_CONTAINERD_IMPORT=true
 SIC_CONTAINERD_ADDRESS=/run/containerd/containerd.sock
 SIC_CONTAINERD_NAMESPACE=k8s.io
+SIC_CONTAINERD_CONTENT_DIR=/var/lib/containerd/io.containerd.content.v1.content
 SIC_IMPORT_INTERVAL=5m
 ```
 
@@ -195,6 +196,7 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | `SIC_MIN_FREE_BYTES`, `SIC_MIN_FREE_PERCENT`, `SIC_MAX_CACHE_BYTES` | `1073741824`, `20`, unset | See "Cache size and eviction". |
 | `SIC_SCRUB_INTERVAL`, `SIC_SCRUB_RATE` | `24h`, `33554432` | See "Integrity" (the rate is bytes per second). |
 | `SIC_CONTAINERD_IMPORT` | `true` | Import containerd's content and image names. |
+| `SIC_CONTAINERD_CONTENT_DIR` | unset | containerd's content directory as the pod sees it (it holds `blobs/sha256/`). A blob that is a file there is linked into the cache instead of copied. See "The import without a second copy". |
 | `SIC_CONTAINERD_ADDRESS`, `SIC_CONTAINERD_NAMESPACE` | `/run/containerd/containerd.sock`, `k8s.io` | Where to find containerd. |
 | `SIC_IMPORT_INTERVAL` | `5m` | How often the import runs. |
 
@@ -204,7 +206,7 @@ With mTLS enabled the main listener requires a client certificate on every path,
 
 `/healthz` answers 200 while the HTTP server can answer at all; it is the liveness probe, and only a hung process should fail it. `/readyz` answers 503, with the reason, when the cache directory cannot be written (read-only, unmounted, permissions) and 200 otherwise; it is the readiness probe from the first release that has it; the sample manifest switches to it with that release, because a probe for a path the pinned image lacks would mark every pod NotReady. Other nodes list peers by pod readiness, so a node whose cache is broken leaves their lists at their next listing instead of failing their requests. The node keeps serving containerd while unready. A full disk is not a failure here: a node that cannot store more can still serve what it holds, and the disk-full counters and `507` answers report it.
 
-Metrics on the admin (or main) listener, all counters unless noted: `sic_local_hits_total`, `sic_peer_hits_total`, `sic_upstream_hits_total` and `sic_misses_total` count how each blob request ended; `sic_peer_errors_total` peers that failed or were slow; `sic_verify_errors_total` content refused because it did not match its digest or its declared length; `sic_containerd_imported_blobs_total` and `sic_containerd_imported_bytes_total` what the import copied. **Bytes.** The hit counters count requests; four counters count the traffic itself, for blobs and manifests: `sic_bytes_to_clients_total` (sent to containerd on this node, for a range request only the range; a layer streamed while it downloaded and then failed verification counts what was sent before it was cut off), `sic_bytes_to_peers_total` (sent to other SIC nodes), `sic_bytes_from_peers_total` and `sic_bytes_from_upstream_total` (read from peers and from registries). The two "from" counters count what was read, so content that was then refused or cut short is included: that is the traffic it cost. Bytes the containerd import copied are in `sic_containerd_imported_bytes_total`. Two sums over all nodes answer the question the cache exists for: `sum(rate(sic_bytes_to_clients_total[1h]))` is what the cluster's pulls asked for, `sum(rate(sic_bytes_from_upstream_total[1h]))` is what the registries had to send, and the first minus the second is the traffic SIC kept away from them (it excludes blobs that containerd already had, which never reach SIC). The share served inside the cluster is `sum(rate(sic_bytes_to_peers_total[1h]))` against the first.
+Metrics on the admin (or main) listener, all counters unless noted: `sic_local_hits_total`, `sic_peer_hits_total`, `sic_upstream_hits_total` and `sic_misses_total` count how each blob request ended; `sic_peer_errors_total` peers that failed or were slow; `sic_verify_errors_total` content refused because it did not match its digest or its declared length; `sic_containerd_imported_blobs_total` and `sic_containerd_imported_bytes_total` what the import copied, `sic_containerd_linked_blobs_total` what it linked instead. **Bytes.** The hit counters count requests; four counters count the traffic itself, for blobs and manifests: `sic_bytes_to_clients_total` (sent to containerd on this node, for a range request only the range; a layer streamed while it downloaded and then failed verification counts what was sent before it was cut off), `sic_bytes_to_peers_total` (sent to other SIC nodes), `sic_bytes_from_peers_total` and `sic_bytes_from_upstream_total` (read from peers and from registries). The two "from" counters count what was read, so content that was then refused or cut short is included: that is the traffic it cost. Bytes the containerd import copied are in `sic_containerd_imported_bytes_total`. Two sums over all nodes answer the question the cache exists for: `sum(rate(sic_bytes_to_clients_total[1h]))` is what the cluster's pulls asked for, `sum(rate(sic_bytes_from_upstream_total[1h]))` is what the registries had to send, and the first minus the second is the traffic SIC kept away from them (it excludes blobs that containerd already had, which never reach SIC). The share served inside the cluster is `sum(rate(sic_bytes_to_peers_total[1h]))` against the first.
 
 The others are named where their behaviour is described above.
 
@@ -216,6 +218,18 @@ Two sample configurations, to be installed on each node with the certificate pat
 
 * `deploy/containerd/mirror-hosts.toml` is the one to start from when the nodes can reach the registries (or an internal registry). Install it as `/etc/containerd/certs.d/<registry>/hosts.toml`, once per registry you want cached. SIC is a mirror: containerd asks it first and goes on to the registry when SIC does not answer or does not have the content. A node whose SIC pod is down, restarting or being upgraded still pulls, and SIC's own image is never held hostage by SIC. The sample advertises only the `pull` capability, not `resolve`: containerd asks the registry which digest a tag names, then fetches the manifest and layers by digest from SIC. A tag that has moved is therefore never answered from an old cached or imported alias, which SIC cannot rule out when it has no way to ask the registry itself. Add `resolve` only when upstream fallback is enabled for that registry (`SIC_UPSTREAM_ENABLED=true` and the registry in `SIC_UPSTREAM_REGISTRIES`); SIC then confirms tags against it after `SIC_TAG_TTL`. A registry with a private CA also needs a root-level `ca` entry in its `hosts.toml` (commented in the sample): the `ca` under the SIC host trusts SIC only, so without one the fallback to the registry fails TLS verification. To have SIC fetch and cache what no node has yet, enable upstream fallback for that registry; without it a miss is a `404` and containerd takes the content from the registry directly, uncached.
 * `deploy/containerd/hosts.toml` makes SIC the only host for every registry (`_default`). Use it only when nothing but the peers can supply images, as in an air-gapped cluster without an internal registry. containerd cannot fall through to anything else then, so read "Upgrading" below first.
+
+### The import without a second copy
+
+The import reads containerd's content through its API, which hands over bytes, not files, so by default it copies every blob into SIC's cache and an image lies on the disk twice. With `SIC_CONTAINERD_CONTENT_DIR` set to containerd's content directory, mounted read-only into the pod (the sample does this; the path is containerd's root, `/var/lib/containerd` by default, plus `io.containerd.content.v1.content`, and differs on k3s and others), SIC makes the blob's place in its cache a symbolic link to containerd's file. Nothing is copied, `sic_containerd_linked_blobs_total` counts it, and it does not count against `SIC_MAX_CACHE_BYTES` or the free-space limits, because it is not the cache's space.
+
+What that means in use:
+
+* A linked blob is read, and verified against its digest, like any other, once and again whenever the file changes. A file that does not match costs the link, never containerd's file, which SIC cannot write to.
+* The blob lives as long as containerd keeps it. When containerd's garbage collector removes it (the image was deleted), the link is removed the next time it is looked at, and the blob is a miss like any other: fetched from a peer or the registry when somebody asks. Deleting an image therefore also takes it out of what this node offers its peers.
+* A linked blob is never evicted, since evicting it would free nothing. A cache of linked blobs can be bigger than its limit; its own blobs are still evicted to stay within it.
+* The import is unchanged when the directory is not set, is not mounted, or does not hold the blob (a different root, say): it copies, and `sic_containerd_imported_blobs_total` counts. If `sic_containerd_linked_blobs_total` stays at zero on a node that has images, the path is wrong.
+* The link is by name, so the cache directory and the mount path must be the same on every start of the pod; with a changed path the old links dangle and are removed, and the content is copied or linked again.
 
 ## TLS
 
@@ -340,6 +354,6 @@ Either way, change the image tag (or digest) in the DaemonSet and nothing else i
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.
 
-Known limits: the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node. A blob's declared length (from a peer or registry) is used to make room before the bytes arrive, so a peer that holds a valid certificate and lies about the length of a blob can make a node evict older blobs; the blob itself is refused at the digest check, and the evicted content is fetched again when needed.
+Known limits: without `SIC_CONTAINERD_CONTENT_DIR` the containerd import copies every blob into SIC's own cache, so each image occupies disk space twice on a node. A blob's declared length (from a peer or registry) is used to make room before the bytes arrive, so a peer that holds a valid certificate and lies about the length of a blob can make a node evict older blobs; the blob itself is refused at the digest check, and the evicted content is fetched again when needed.
 
 For a large cluster, the next scalability step would be peer indexing (Bloom filters or a digest advertisement protocol) so a miss does not probe peers sequentially. The current implementation intentionally keeps discovery simple and deterministic.

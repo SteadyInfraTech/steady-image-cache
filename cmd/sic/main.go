@@ -117,7 +117,7 @@ func main() {
 	// time on a busy node. It runs in the background so the registry is already
 	// serving while it works.
 	if cfg.ContainerdImport {
-		imp := &cd.Importer{Address: cfg.ContainerdAddress, Namespace: cfg.ContainerdNamespace, Store: st, Metrics: m}
+		imp := &cd.Importer{Address: cfg.ContainerdAddress, Namespace: cfg.ContainerdNamespace, Store: st, Metrics: m, ContentDir: cfg.ContainerdContentDir}
 		go func() {
 			if err := imp.Import(ctx); err != nil {
 				log.Printf("initial %s import: %v", imp, err)

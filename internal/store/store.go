@@ -461,6 +461,9 @@ func (s *Store) Open(d string) (*os.File, error) {
 	defer unlock()
 	f, err := os.Open(p)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			dropDanglingLink(p)
+		}
 		return nil, err
 	}
 	before, err := f.Stat()

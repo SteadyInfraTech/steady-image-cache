@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
@@ -21,6 +22,11 @@ type Importer struct {
 	Address, Namespace string
 	Store              *store.Store
 	Metrics            *metrics.Metrics
+	// ContentDir is containerd's content directory as this process sees it (the
+	// one that holds blobs/sha256/), when it is mounted here. A blob that is a
+	// file in it is linked into the cache instead of copied, so it takes no
+	// second place on the disk. Empty, or a blob that is not there: copied.
+	ContentDir string
 }
 
 // maxKeptErrors bounds how many individual import errors are remembered; the
@@ -172,6 +178,9 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		if cached {
 			return nil
 		}
+		if i.link(d, info) {
+			return nil
+		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
 		if err != nil {
 			if errdefs.IsNotFound(err) {
@@ -201,6 +210,24 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		failed.add(err)
 	}
 	return failed.err()
+}
+
+// link makes containerd's own file for the blob the cache's, and reports
+// whether it did. It declines, and the blob is copied, when there is no content
+// directory, no such file in it (not mounted, or already collected) or the
+// link cannot be made.
+func (i *Importer) link(d string, info content.Info) bool {
+	if i.ContentDir == "" || !store.ValidDigest(d) {
+		return false
+	}
+	target := filepath.Join(i.ContentDir, "blobs", "sha256", info.Digest.Encoded())
+	if err := i.Store.LinkExternal(d, target, info.Size); err != nil {
+		return false
+	}
+	if i.Metrics != nil {
+		i.Metrics.LinkedBlobs.Add(1)
+	}
+	return true
 }
 
 func (i *Importer) countFailure() {

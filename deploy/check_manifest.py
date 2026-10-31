@@ -115,6 +115,11 @@ for n, m in mounts.items():
 tls = {k: env.get(k) for k in ("SIC_TLS_CERT", "SIC_TLS_KEY", "SIC_TLS_CA", "SIC_TLS_CLIENT_CERT", "SIC_TLS_CLIENT_KEY")}
 check(all(v and v.startswith(mounts["tls"]["mountPath"] + "/") for v in tls.values()), "TLS paths must be under the tls mount")
 check(env.get("SIC_CONTAINERD_ADDRESS") == mounts["containerd-socket"]["mountPath"], "SIC_CONTAINERD_ADDRESS must be the mounted socket")
+# The content directory is read where it is mounted: the setting and the mount must name the same place.
+check(("SIC_CONTAINERD_CONTENT_DIR" in env) == ("containerd-content" in mounts), "SIC_CONTAINERD_CONTENT_DIR and the containerd-content volume go together")
+if "containerd-content" in mounts:
+    check(env.get("SIC_CONTAINERD_CONTENT_DIR") == mounts["containerd-content"]["mountPath"], "SIC_CONTAINERD_CONTENT_DIR must be where containerd-content is mounted")
+    check(mounts["containerd-content"].get("readOnly") is True, "containerd-content must be mounted read-only")
 check(env.get("SIC_CACHE_DIR", "/var/lib/steady-image-cache") == mounts["cache"]["mountPath"], "the cache volume must be mounted at SIC_CACHE_DIR")
 check(env.get("SIC_INSECURE") in (None, "false"), "the sample must not turn TLS off")
 

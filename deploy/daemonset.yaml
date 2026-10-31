@@ -86,6 +86,12 @@ spec:
         - {name: SIC_CONTAINERD_IMPORT, value: "true"}
         - {name: SIC_CONTAINERD_ADDRESS, value: "/run/containerd/containerd.sock"}
         - {name: SIC_CONTAINERD_NAMESPACE, value: "k8s.io"}
+        # containerd's content directory, mounted below: a blob in it is linked
+        # into the cache instead of copied, so an image is on the disk once. The
+        # path is containerd's root (default /var/lib/containerd) plus
+        # io.containerd.content.v1.content; k3s and others differ. Delete this
+        # line and the two entries for containerd-content to copy instead.
+        - {name: SIC_CONTAINERD_CONTENT_DIR, value: "/var/lib/containerd/io.containerd.content.v1.content"}
         - {name: SIC_TLS_CERT, value: "/tls/tls.crt"}
         - {name: SIC_TLS_KEY, value: "/tls/tls.key"}
         - {name: SIC_TLS_CA, value: "/tls/ca.crt"}
@@ -103,6 +109,7 @@ spec:
         volumeMounts:
         - {name: cache, mountPath: /var/lib/steady-image-cache}
         - {name: containerd-socket, mountPath: /run/containerd/containerd.sock, readOnly: true}
+        - {name: containerd-content, mountPath: /var/lib/containerd/io.containerd.content.v1.content, readOnly: true}
         - {name: tls, mountPath: /tls, readOnly: true}
         # The probes use the plain-HTTP admin port; the main listener wants a
         # client certificate that kubelet does not have. /healthz answers from
@@ -119,5 +126,7 @@ spec:
         hostPath: {path: /var/lib/steady-image-cache, type: DirectoryOrCreate}
       - name: containerd-socket
         hostPath: {path: /run/containerd/containerd.sock, type: Socket}
+      - name: containerd-content
+        hostPath: {path: /var/lib/containerd/io.containerd.content.v1.content, type: Directory}
       - name: tls
         secret: {secretName: steady-image-cache-tls, defaultMode: 0400}
