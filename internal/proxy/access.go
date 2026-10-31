@@ -97,7 +97,11 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 			http.Error(w, "this registry's content is shared only with nodes that protect it", http.StatusForbidden)
 			return false
 		}
-		return true
+		// What a node is asked for under a protected registry (a coordinator is
+		// asked to fetch it, and stores it) is marked before anything is done
+		// about it, as for a client: the copy made here must not be readable
+		// through another namespace.
+		return p.markedOrRefuse(w, namespace, d)
 	}
 	// The namespace is the client's word (?ns=, Host), and the cache is kept by
 	// digest, so a protected blob would come out under any other namespace.
@@ -108,7 +112,11 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 		return true
 	}
 	if !validRepo(repo) || !validNamespace(namespace) {
-		return true // the handler refuses it
+		// Refused here, not left to the handler: a namespace that is not one
+		// names no registry to ask, and the blob handler serves from the digest
+		// alone.
+		http.Error(w, "invalid repository or namespace", http.StatusBadRequest)
+		return false
 	}
 	if guarded && p.isPeer(r) {
 		// Here the header is all there is (no TLS), and the sender sets it, so
@@ -117,15 +125,23 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 		http.Error(w, "this registry's content is not shared between nodes", http.StatusForbidden)
 		return false
 	}
+	return p.confirm(w, r, namespace, r.URL.Path, d)
+}
+
+// confirm asks the registry of namespace whether this client may read what path
+// names, as admit does for the path of the request itself. It answers the
+// client when it may not. d is the digest the path names, marked when
+// namespace is protected.
+func (p *Proxy) confirm(w http.ResponseWriter, r *http.Request, namespace, path, d string) bool {
 	in := newInfo(r)
 	sum := sha256.Sum256([]byte(in.auth))
-	key := namespace + "|" + r.URL.Path + "|" + hex.EncodeToString(sum[:])
+	key := namespace + "|" + path + "|" + hex.EncodeToString(sum[:])
 	if p.access.ok(key, p.now()) {
 		return p.markedOrRefuse(w, namespace, d)
 	}
 	p.metrics.AccessChecks.Add(1)
 	res, err := p.flights.DoContext(r.Context(), "access:"+key, func() fetchResult {
-		return p.probe(in, r.URL.Path, key)
+		return p.probe(in, path, key)
 	})
 	if err != nil {
 		return false // the client gave up

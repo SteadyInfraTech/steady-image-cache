@@ -7,7 +7,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,13 +27,34 @@ type Snapshot struct {
 // ClientConfig returns a TLS config that presents this certificate and verifies
 // the server against the CA. serverName is checked instead of the dialled
 // address, because peers are reached by IP.
+//
+// The certificate must also list serverName itself as a DNS name. The standard
+// check accepts a wildcard that matches it, but the name is what makes a node
+// (a node's own server checks for it the same way), and a certificate for
+// *.example.com, which others may hold, is not one.
 func (s Snapshot) ClientConfig(serverName string) *tls.Config {
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		RootCAs:      s.Pool,
 		ServerName:   serverName,
 		Certificates: []tls.Certificate{s.Cert},
+		// Called after the chain has been verified, also for a resumed session.
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if serverName == "" {
+				return nil
+			}
+			if len(cs.PeerCertificates) > 0 && ListsName(cs.PeerCertificates[0], serverName) {
+				return nil
+			}
+			return fmt.Errorf("the peer's certificate does not list %q as a DNS name (a wildcard does not count)", serverName)
+		},
 	}
+}
+
+// ListsName reports whether cert has name itself among its DNS names, ignoring
+// case. A wildcard that would match name does not count.
+func ListsName(cert *x509.Certificate, name string) bool {
+	return slices.ContainsFunc(cert.DNSNames, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 type stamp struct{ mod, size int64 }

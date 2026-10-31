@@ -250,3 +250,29 @@ func mustURL(t *testing.T, s string) *url.URL {
 	}
 	return u
 }
+
+// net/http keeps Authorization for a subdomain of the registry, which may be run
+// by somebody else; the credentials stay with the origin they were sent to.
+func TestUpstreamRedirectKeepsCredentialsOnlyForTheSameOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		to   string
+		keep bool
+	}{
+		{"https://registry.example.com/v2/blob", true},
+		{"https://Registry.Example.COM:443/v2/blob", true}, // case and the default port
+		{"https://cdn.registry.example.com/blob", false},   // a subdomain
+		{"https://example.com/blob", false},                // the parent
+		{"https://registry.example.com:8443/blob", false},  // another port
+		{"https://other.example.net/blob", false},
+	} {
+		first, _ := http.NewRequest("GET", "https://registry.example.com/v2/lib/app/blobs/x", nil)
+		next, _ := http.NewRequest("GET", tc.to, nil)
+		next.Header.Set("Authorization", "Bearer secret")
+		if err := upstreamRedirect(next, []*http.Request{first}); err != nil {
+			t.Fatalf("%s: %v", tc.to, err)
+		}
+		if got := next.Header.Get("Authorization") != ""; got != tc.keep {
+			t.Errorf("%s: credentials kept = %v, want %v", tc.to, got, tc.keep)
+		}
+	}
+}

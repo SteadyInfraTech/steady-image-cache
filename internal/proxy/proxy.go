@@ -265,8 +265,10 @@ func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastRe
 const maxRedirects = 5
 
 // upstreamRedirect follows a registry's redirects, over https only, so that a
-// registry cannot move the transfer to plain HTTP. (net/http does not send the
-// Authorization header to a different host, which is what a CDN needs.)
+// registry cannot move the transfer to plain HTTP. The client's credentials go
+// only where they were sent first: net/http would also pass them on to a
+// subdomain of the registry, which another party may run, and a CDN or object
+// store does not need them (they would even be refused).
 func upstreamRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) > maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
@@ -274,7 +276,25 @@ func upstreamRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" {
 		return fmt.Errorf("refusing a redirect to %s: only https is followed", req.URL.Scheme)
 	}
+	if len(via) == 0 || !sameOrigin(via[0].URL, req.URL) {
+		req.Header.Del("Authorization")
+	}
 	return nil
+}
+
+// sameOrigin reports whether a and b have the same scheme, host name (any case)
+// and port, a missing port being the scheme's own.
+func sameOrigin(a, b *url.URL) bool {
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if u.Scheme == "http" {
+			return "80"
+		}
+		return "443"
+	}
+	return a.Scheme == b.Scheme && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }
 
 // peerAnswered notes a peer's reply that is neither success nor "not here". A
@@ -400,7 +420,7 @@ func (p *Proxy) isPeer(r *http.Request) bool {
 	}
 	// The name itself, not VerifyHostname: that also accepts a wildcard, and the
 	// holder of *.example.com is not one of ours.
-	return slices.ContainsFunc(r.TLS.PeerCertificates[0].DNSNames, func(n string) bool { return strings.EqualFold(n, p.serverName) })
+	return tlsutil.ListsName(r.TLS.PeerCertificates[0], p.serverName)
 }
 
 // peersVerified reports whether a peer is told from a client by its
@@ -446,7 +466,21 @@ func newInfo(r *http.Request) info {
 // markedServe serves manifest d, having marked it first when namespace is
 // protected: a client that knows the digest must not be able to read it as a
 // blob of another namespace while this one is still being sent.
-func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, namespace, d string) bool {
+//
+// A tag is looked up before anything is known about the digest it leads to, so
+// admission could not judge it: a digest that came from a protected registry,
+// reached through a tag of another namespace, is for that namespace's registry
+// to release (and not at all for another node).
+func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, repo, namespace, d string) bool {
+	if len(p.protected) > 0 && !p.protected[namespace] && p.store.IsProtected(d) {
+		if p.peersVerified() && p.isPeer(r) {
+			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
+			return true
+		}
+		if !p.confirm(w, r, namespace, "/v2/"+repo+"/manifests/"+d, d) {
+			return true // answered
+		}
+	}
 	if p.markProtected(namespace, d) != nil {
 		http.Error(w, "cannot record where this content came from", http.StatusServiceUnavailable)
 		return true // answered
@@ -657,6 +691,10 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		http.Error(w, "invalid blob reference", 400)
 		return
 	}
+	if !validNamespace(ns(r)) {
+		http.Error(w, "invalid namespace", 400)
+		return
+	}
 	if p.serveDigest(w, r, d, nil) {
 		p.metrics.LocalHits.Add(1)
 		return
@@ -696,6 +734,13 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	var res fetchResult
 	for attempt := 0; ; attempt++ {
 		dl := p.join(d, in.auth, p.missFetch(in, path, d, true))
+		// Admission looked at the digest before the download was chosen, and a
+		// download is shared by digest: this one may be a protected registry's,
+		// started and marked since. What it brings is not this client's unless
+		// the registry says so.
+		if len(p.protected) > 0 && !p.protected[in.ns] && p.store.IsProtected(d) && !p.confirm(w, r, in.ns, r.URL.Path, d) {
+			return
+		}
 		// A plain GET is answered while the blob is still arriving. Anything
 		// else (a byte range) needs the whole blob, so it waits for it.
 		if streamable(r) && p.stream(w, r, d, dl, false, false) {
@@ -866,7 +911,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 	// A node that asks us for a tag is answered with what we have, however old:
 	// it cannot be sent anywhere better. A client is answered from the cache
 	// only while the tag is known to be current (see tagFresh).
-	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (p.isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, namespace, d) {
+	if d, ok := p.store.Resolve(namespace, repo, ref); ok && (p.isPeer(r) || p.tagFresh(namespace, repo, ref)) && p.markedServe(w, r, repo, namespace, d) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
@@ -888,7 +933,7 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, repo, ref strin
 		return // the client gave up
 	}
 	if res.ok {
-		if d, found := p.store.Resolve(namespace, repo, ref); found && p.markedServe(w, r, namespace, d) {
+		if d, found := p.store.Resolve(namespace, repo, ref); found && p.markedServe(w, r, repo, namespace, d) {
 			return
 		}
 	}

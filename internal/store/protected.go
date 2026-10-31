@@ -10,9 +10,13 @@ import (
 
 // A blob that came from a protected registry carries a mark: an empty file named
 // after the hash of its digest (a name made here, not one taken from a
-// request). The mark outlives a restart, goes when the blob is evicted, and is
-// all the cache knows about where a blob came from; the proxy uses it to ask
-// the registry before it gives such a blob to a client of another namespace.
+// request). It is all the cache knows about where a blob came from, and the
+// proxy uses it to ask the registry before it gives such a blob to a client of
+// another namespace. A mark is never removed, not when the blob is evicted and
+// not at a restart: the same bytes can come back from elsewhere (another node,
+// containerd's content store) and must not pass for content from anywhere else.
+// A mark is an empty file, one per digest ever given out under a protected
+// registry.
 
 func (s *Store) markPath(d string) (string, error) {
 	if !ValidDigest(d) {
@@ -51,31 +55,4 @@ func (s *Store) IsProtected(d string) bool {
 	}
 	_, err = os.Stat(p)
 	return err == nil || !errors.Is(err, os.ErrNotExist)
-}
-
-// pruneMarks removes the marks of blobs that are no longer stored. It runs at
-// start, before anything is served: a mark is never removed while the cache is
-// in use, because a blob that is evicted and fetched again must not pass,
-// however briefly, for one that came from anywhere else.
-func (s *Store) pruneMarks() {
-	dir := filepath.Join(s.root, "protected")
-	marks, err := os.ReadDir(dir)
-	if err != nil || len(marks) == 0 {
-		return
-	}
-	// A listing that fails proves nothing about which blobs exist: keep every mark.
-	blobs, err := os.ReadDir(filepath.Join(s.root, "blobs", "sha256"))
-	if err != nil {
-		return
-	}
-	have := map[string]bool{}
-	for _, b := range blobs {
-		sum := sha256.Sum256([]byte("sha256:" + b.Name()))
-		have[hex.EncodeToString(sum[:])] = true
-	}
-	for _, m := range marks {
-		if !have[m.Name()] {
-			_ = os.Remove(filepath.Join(dir, m.Name()))
-		}
-	}
 }

@@ -220,3 +220,44 @@ func TestConcurrentUse(t *testing.T) {
 	f.Write(t, newPKI(t, "two"), t0.Add(time.Second))
 	wg.Wait()
 }
+
+// A certificate for a wildcard that matches the peer's name passes the standard
+// check, but it is not the node's: whoever holds *.example.com is not one of
+// ours, and must not be taken for one when this node asks it for a tag.
+func TestClientRefusesAWildcardForThePeerName(t *testing.T) {
+	const name = "node.example.com"
+	for _, tc := range []struct {
+		what string
+		dns  []string
+		ok   bool
+	}{
+		{"the name itself", []string{name}, true},
+		{"the name in another case", []string{"Node.Example.COM"}, true},
+		{"the name among others", []string{"other.example.com", name}, true},
+		{"a wildcard that matches it", []string{"*.example.com"}, false},
+		{"another name", []string{"other.example.com"}, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			f := newFiles(t)
+			f.Write(t, tlstest.NewWith(t, "wild", tlstest.Opts{DNSNames: tc.dns}), time.Now().Add(-time.Minute))
+			r := newReloader(t, f)
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }))
+			srv.TLS = r.ServerConfig()
+			srv.StartTLS()
+			defer srv.Close()
+			snap := r.Current()
+			tr := &http.Transport{TLSClientConfig: snap.ClientConfig(name)}
+			defer tr.CloseIdleConnections()
+			resp, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get(srv.URL)
+			if err == nil {
+				resp.Body.Close()
+			}
+			if tc.ok && err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}
