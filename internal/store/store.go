@@ -295,7 +295,18 @@ func (w reservingWriter) Write(p []byte) (int, error) {
 			r.unreserved += int64(n)
 			return n, err
 		}
-		r.proof = 0 // the source has delivered: from here on room is made as it arrives
+		// The source has delivered: room is made for what it sent under the
+		// allowance too (it counts against the size limit), but those bytes are
+		// on the disk already, so free space has seen them and they are not
+		// outstanding.
+		n := r.unreserved
+		r.proof, r.unreserved = 0, 0
+		if n > 0 {
+			if err := r.grow(n); err != nil {
+				return 0, err
+			}
+			r.consume(n)
+		}
 	}
 	if int64(len(p)) > w.reservation.remaining {
 		if err := w.reservation.grow(int64(len(p)) - w.reservation.remaining); err != nil {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -170,4 +171,57 @@ func TestSmallBlobWithinTheAllowanceStillMakesRoom(t *testing.T) {
 	if s.pending != 0 || s.reserved != 0 {
 		t.Fatalf("reservation left behind: pending %d reserved %d", s.pending, s.reserved)
 	}
+}
+
+// Bytes that arrived under the allowance are on the disk already: once it is
+// crossed they are not outstanding, and what is reserved shrinks with every
+// byte that follows.
+func TestCrossingTheAllowanceDoesNotReserveTheEarlierBytesTwice(t *testing.T) {
+	smallChunks(t, 200)
+	withProof(t, 100)
+	s := evictable(t)
+	s.SetMaxBytes(1000)
+	for i := 0; i < 3; i++ {
+		usedAgo(s, mustPut(t, s, string(rune('a'+i)), 300), time.Duration(10-i)*time.Hour)
+	}
+	body := []byte("big" + strings.Repeat("y", 797))
+	d := digestOf(body)
+	var seen int64
+	checked := false
+	src := &hookReader{r: iotest.OneByteReader(bytes.NewReader(body)), before: func(n int) {
+		if n != 150 {
+			return
+		}
+		checked = true
+		s.capacityMu.Lock()
+		seen = s.reserved
+		s.capacityMu.Unlock()
+	}}
+	if _, err := s.PutVerifiedLimit(d, src, int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if !checked {
+		t.Fatal("the check did not run")
+	}
+	// 150 bytes have been written of the 200 reserved: 50 are outstanding.
+	if seen > 50 {
+		t.Fatalf("%d bytes outstanding after 150 of the first 200 were written, want at most 50", seen)
+	}
+	if s.pending != 0 || s.reserved != 0 {
+		t.Fatalf("reservation left behind: pending %d reserved %d", s.pending, s.reserved)
+	}
+}
+
+// hookReader calls before with the number of bytes read so far, before each read.
+type hookReader struct {
+	r      io.Reader
+	n      int
+	before func(n int)
+}
+
+func (h *hookReader) Read(p []byte) (int, error) {
+	h.before(h.n)
+	n, err := h.r.Read(p)
+	h.n += n
+	return n, err
 }
