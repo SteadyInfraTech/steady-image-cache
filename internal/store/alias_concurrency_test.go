@@ -165,3 +165,41 @@ func TestAliasRecordIsBounded(t *testing.T) {
 		t.Fatal("a dropped tag came back after a restart")
 	}
 }
+
+// A tag is recorded as confirmed while its writer still holds the save lock:
+// otherwise another writer can trim it in between (it has no time yet, so it
+// counts as the oldest), and its time is then recorded for a tag that is gone.
+func TestConfirmationTimesAreOnlyKeptForTagsThatExist(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.maxAliases = 20
+	d := digestOf([]byte("m"))
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 60; i++ {
+				if err := s.SetAliasAt("r", "a", fmt.Sprintf("g%d-t%03d", g, i), d, time.Now()); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.verifiedMu.Lock()
+	defer s.verifiedMu.Unlock()
+	for k := range s.aliasChecked {
+		if _, ok := s.aliases[k]; !ok {
+			t.Fatalf("a time is kept for %q, which is not a tag any more", k)
+		}
+	}
+	if len(s.aliases) > 20 {
+		t.Fatalf("%d tags, limit 20", len(s.aliases))
+	}
+}

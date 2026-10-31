@@ -931,11 +931,9 @@ func (s *Store) SetAliasAt(ns, repo, ref, d string, at time.Time) error {
 		return errors.New("unsupported digest")
 	}
 	k := key(ns, repo, ref)
-	if err := s.setAlias(k, d, false); err != nil {
-		return err
-	}
-	s.noteAliasChecked(k, at)
-	return nil
+	// The confirmation is recorded inside, before another writer can trim: a
+	// tag without a time counts as the oldest.
+	return s.setAlias(k, d, false, at)
 }
 
 // SetAliasIfAbsent records an alias that was learned from somewhere that is
@@ -953,7 +951,7 @@ func (s *Store) SetAliasIfAbsent(ns, repo, ref, d string) (bool, error) {
 	if exists {
 		return false, nil
 	}
-	if err := s.setAlias(k, d, true); err != nil {
+	if err := s.setAlias(k, d, true, time.Time{}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -965,13 +963,16 @@ func (s *Store) SetAliasIfAbsent(ns, repo, ref, d string) (bool, error) {
 // and would otherwise wait for the disk. Writers are serialized by aliasSaveMu,
 // so nothing changes the map between taking a copy of it and publishing the
 // result, and an alias becomes visible only after it has been saved.
-func (s *Store) setAlias(k, d string, onlyIfAbsent bool) error {
+func (s *Store) setAlias(k, d string, onlyIfAbsent bool, confirmed time.Time) error {
 	s.aliasSaveMu.Lock()
 	defer s.aliasSaveMu.Unlock()
 	s.mu.RLock()
 	previous, existed := s.aliases[k]
 	if existed && (previous == d || onlyIfAbsent) {
 		s.mu.RUnlock()
+		if !confirmed.IsZero() {
+			s.noteAliasChecked(k, confirmed)
+		}
 		return nil
 	}
 	root := s.root
@@ -984,6 +985,9 @@ func (s *Store) setAlias(k, d string, onlyIfAbsent bool) error {
 	dropped := s.trimAliases(next, k)
 	if err := s.saveAliases(root, next); err != nil {
 		return err // nothing was published
+	}
+	if !confirmed.IsZero() {
+		s.noteAliasChecked(k, confirmed)
 	}
 	s.mu.Lock()
 	s.aliases[k] = d
