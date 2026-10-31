@@ -149,9 +149,6 @@ func (i *Importer) importAliases(imgs []namedImage) error {
 	return failed.err()
 }
 
-// errStop ends the walk early; it is never reported.
-var errStop = errors.New("stop walking")
-
 // contentWalker is the narrow portion of containerd's content store needed by
 // the importer. Keeping it narrow lets tests exercise the import orchestration
 // without a running containerd daemon.
@@ -162,11 +159,13 @@ type contentWalker interface {
 
 // importContent imports missing or corrupt content and leaves already-verified
 // cache entries untouched. A blob that fails is recorded and the walk goes on,
-// except when the cache has no room left: then every further blob would fail
-// the same way, so it stops there. Blobs that containerd deleted in the
-// meantime are not an error. The returned error describes what failed.
+// except when the cache has no room left: then no further blob can be copied,
+// so copying stops there, while links, which need no room, are still made.
+// Blobs that containerd deleted in the meantime are not an error. The returned
+// error describes what failed.
 func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 	var failed importFailures
+	full := false // a copy found no room: none is tried again, links still are
 	err := cs.Walk(ctx, func(info content.Info) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -196,7 +195,7 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		}
 		// Content the cache just evicted would only be copied back and evicted
 		// again; leave it to be fetched when somebody asks for it.
-		if i.Store.WasEvicted(d) {
+		if full || i.Store.WasEvicted(d) {
 			return nil
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
@@ -216,7 +215,7 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 			failed.add(fmt.Errorf("import containerd content %s: %w", d, err))
 			i.countFailure()
 			if errors.Is(err, store.ErrNoSpace) {
-				return errStop
+				full = true
 			}
 			return nil
 		}
@@ -224,7 +223,7 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		i.Metrics.ImportedBytes.Add(uint64(n))
 		return nil
 	})
-	if err != nil && !errors.Is(err, errStop) {
+	if err != nil {
 		failed.add(err)
 	}
 	return failed.err()

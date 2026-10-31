@@ -3,6 +3,7 @@ package containerd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -276,5 +277,36 @@ func TestImportSkipsContentThatCannotBeMarked(t *testing.T) {
 	}
 	if _, err := s.Stat(d); err == nil {
 		t.Fatal("content that could not be marked was imported")
+	}
+}
+
+// A full cache stops the copying, not the links: they need no room.
+func TestImportKeepsLinkingWhenTheCacheIsFull(t *testing.T) {
+	big := bytes.Repeat([]byte("b"), 4000) // copied: not in containerd's directory
+	small := []byte("a blob that is linked")
+	dir := containerdDir(t, small)
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetMaxBytes(1000)
+	bd, sd := testDigest(big), testDigest(small)
+	w := &fakeContentWalker{
+		infos: []content.Info{
+			{Digest: digest.Digest(bd), Size: int64(len(big))},
+			{Digest: digest.Digest(sd), Size: int64(len(small))},
+		},
+		readers: map[string]content.ReaderAt{bd: newTestReaderAt(big), sd: newTestReaderAt(small)},
+	}
+	m := &metrics.Metrics{}
+	err = (&Importer{Store: s, Metrics: m, ContentDir: dir}).importContent(context.Background(), w)
+	if !errors.Is(err, store.ErrNoSpace) {
+		t.Fatalf("err = %v, want ErrNoSpace", err)
+	}
+	if _, err := s.Stat(sd); err != nil {
+		t.Fatalf("the blob after the one that did not fit was not linked: %v", err)
+	}
+	if m.LinkedBlobs.Load() != 1 {
+		t.Fatalf("LinkedBlobs = %d, want 1", m.LinkedBlobs.Load())
 	}
 }
