@@ -179,3 +179,30 @@ func TestLinkRefusesAFileOfTheWrongSize(t *testing.T) {
 		t.Fatal("linked a relative path")
 	}
 }
+
+// What the cache evicted is linked again: a link costs it nothing. Without a
+// directory it is still left alone, as before.
+func TestEvictedBlobIsLinkedAgain(t *testing.T) {
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetMaxBytes(100)
+	s.SetEvictMinAge(0)
+	x := bytes.Repeat([]byte("x"), 100)
+	for _, b := range [][]byte{x, bytes.Repeat([]byte("y"), 100)} { // the second evicts the first
+		if _, err := s.PutVerifiedLimit(testDigest(b), bytes.NewReader(b), int64(len(b))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !s.WasEvicted(testDigest(x)) {
+		t.Fatal("test setup: x should have been evicted")
+	}
+	m := &metrics.Metrics{}
+	if err := importOne(t, s, m, "", x, true); err != nil || m.ImportedBlobs.Load() != 0 {
+		t.Fatalf("without a directory an evicted blob is left alone: %v, copied %d", err, m.ImportedBlobs.Load())
+	}
+	if err := importOne(t, s, m, containerdDir(t, x), x, false); err != nil || m.LinkedBlobs.Load() != 1 {
+		t.Fatalf("with a directory it is linked: %v, linked %d", err, m.LinkedBlobs.Load())
+	}
+}

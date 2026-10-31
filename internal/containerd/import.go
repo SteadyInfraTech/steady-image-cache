@@ -164,11 +164,6 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 			return err
 		}
 		d := info.Digest.String()
-		// Content the cache just evicted would only be copied back and evicted
-		// again; leave it to be fetched when somebody asks for it.
-		if i.Store.WasEvicted(d) {
-			return nil
-		}
 		cached, err := cachedContentValid(i.Store, d)
 		if err != nil {
 			failed.add(fmt.Errorf("verify cached containerd content %s: %w", d, err))
@@ -178,7 +173,13 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		if cached {
 			return nil
 		}
+		// A link costs the cache nothing, so what it evicted is linked again too.
 		if i.link(d, info) {
+			return nil
+		}
+		// Content the cache just evicted would only be copied back and evicted
+		// again; leave it to be fetched when somebody asks for it.
+		if i.Store.WasEvicted(d) {
 			return nil
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
