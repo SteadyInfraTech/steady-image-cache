@@ -120,3 +120,48 @@ func TestFailedAliasSaveIsNotRememberedAndDoesNotWedgeWriters(t *testing.T) {
 		t.Fatalf("a later write must not be blocked by the failed one: %v", err)
 	}
 }
+
+// The tag record has a size of its own: a client that has many distinct tags
+// learned must not make every later tag cost a rewrite of an ever bigger file.
+func TestAliasRecordIsBounded(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.maxAliases = 100
+	d := digestOf([]byte("m"))
+	base := time.Unix(1_700_000_000, 0)
+	for i := 0; i < 500; i++ {
+		if err := s.SetAliasAt("r", "a", fmt.Sprintf("t%03d", i), d, base.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		s.mu.RLock()
+		n := len(s.aliases)
+		s.mu.RUnlock()
+		if n > 100 {
+			t.Fatalf("%d tags after %d were learned, limit 100", n, i+1)
+		}
+	}
+	// The newest are kept, the oldest are gone, and so are their times.
+	if _, ok := s.Resolve("r", "a", "t499"); !ok {
+		t.Fatal("the newest tag was dropped")
+	}
+	if _, ok := s.Resolve("r", "a", "t000"); ok {
+		t.Fatal("the oldest tag was kept")
+	}
+	if _, ok := s.AliasChecked("r", "a", "t000"); ok {
+		t.Fatal("the time of a dropped tag was kept")
+	}
+	// What was saved is what is held.
+	s2, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.Resolve("r", "a", "t499"); !ok {
+		t.Fatal("the newest tag is missing after a restart")
+	}
+	if _, ok := s2.Resolve("r", "a", "t000"); ok {
+		t.Fatal("a dropped tag came back after a restart")
+	}
+}

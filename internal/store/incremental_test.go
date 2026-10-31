@@ -11,9 +11,9 @@ import (
 
 func smallChunks(t *testing.T, n int64) {
 	t.Helper()
-	old := reserveChunk
-	reserveChunk = n
-	t.Cleanup(func() { reserveChunk = old })
+	old, oldProof := reserveChunk, proofBytes
+	reserveChunk, proofBytes = n, 0 // no allowance: room is made from the first byte
+	t.Cleanup(func() { reserveChunk, proofBytes = old, oldProof })
 }
 
 func cachedCount(s *Store, ds []string) int {
@@ -95,5 +95,79 @@ func TestImpossibleBlobEvictsNothing(t *testing.T) {
 	}
 	if got := cachedCount(s, held); got != 3 {
 		t.Fatalf("%d of 3 blobs left", got)
+	}
+}
+
+func withProof(t *testing.T, n int64) {
+	t.Helper()
+	old := proofBytes
+	proofBytes = n
+	t.Cleanup(func() { proofBytes = old })
+}
+
+// Eviction is paid for by the cache, so a source has to deliver something
+// before it can cause one: a registry that declares a size and fails at once
+// must not cost a blob.
+func TestSourceThatDeliversNothingEvictsNothing(t *testing.T) {
+	smallChunks(t, 200)
+	withProof(t, 100)
+	s := evictable(t)
+	s.SetMaxBytes(1000)
+	var held []string
+	for i := 0; i < 3; i++ {
+		held = append(held, mustPut(t, s, string(rune('a'+i)), 300))
+		usedAgo(s, held[i], time.Duration(10-i)*time.Hour)
+	}
+	body := []byte("big" + strings.Repeat("y", 797))
+	d := digestOf(body)
+	for name, r := range map[string]io.Reader{
+		"nothing":           errReader{io.ErrUnexpectedEOF},
+		"less than proof":   io.MultiReader(bytes.NewReader(body[:60]), errReader{io.ErrUnexpectedEOF}),
+		"exactly the proof": io.MultiReader(bytes.NewReader(body[:100]), errReader{io.ErrUnexpectedEOF}),
+	} {
+		if _, err := s.PutVerifiedLimit(d, r, int64(len(body))); err == nil {
+			t.Fatalf("%s: a cut transfer reported success", name)
+		}
+		if got := cachedCount(s, held); got != 3 {
+			t.Fatalf("%s: %d of 3 cached blobs are left, want 3", name, got)
+		}
+		if s.pending != 0 || s.reserved != 0 {
+			t.Fatalf("%s: reservation left behind: pending %d reserved %d", name, s.pending, s.reserved)
+		}
+	}
+	// Past the allowance room is made, as before.
+	if _, err := s.PutVerifiedLimit(d, io.MultiReader(bytes.NewReader(body[:101]), errReader{io.ErrUnexpectedEOF}), int64(len(body))); err == nil {
+		t.Fatal("a cut transfer reported success")
+	}
+	if got := cachedCount(s, held); got != 2 {
+		t.Fatalf("after the allowance: %d of 3 cached blobs are left, want 2", got)
+	}
+}
+
+// A blob that is complete within the allowance is stored, and the room for it
+// is made once it has been verified.
+func TestSmallBlobWithinTheAllowanceStillMakesRoom(t *testing.T) {
+	smallChunks(t, 200)
+	withProof(t, 100)
+	s := evictable(t)
+	s.SetMaxBytes(900)
+	var held []string
+	for i := 0; i < 3; i++ {
+		held = append(held, mustPut(t, s, string(rune('a'+i)), 300))
+		usedAgo(s, held[i], time.Duration(10-i)*time.Hour)
+	}
+	body := []byte(strings.Repeat("s", 80))
+	d := digestOf(body)
+	if _, err := s.PutVerifiedLimit(d, bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Stat(d); err != nil {
+		t.Fatal("the blob was not stored")
+	}
+	if got := cachedCount(s, held); got != 2 {
+		t.Fatalf("%d of 3 cached blobs are left, want 2 (one made room)", got)
+	}
+	if s.pending != 0 || s.reserved != 0 {
+		t.Fatalf("reservation left behind: pending %d reserved %d", s.pending, s.reserved)
 	}
 }
