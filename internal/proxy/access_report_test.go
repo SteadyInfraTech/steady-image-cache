@@ -186,3 +186,31 @@ func TestNodeIsNotGivenADownloadMarkedAfterAdmission(t *testing.T) {
 		t.Fatalf("status %d, want 403", rec.Code)
 	}
 }
+
+// Admission may have looked before a protected request marked a digest and
+// stored it: the local copy is then not handed over on that look.
+func TestLocalCopyMarkedAfterAdmissionIsNotServedUnchecked(t *testing.T) {
+	blob := []byte("a layer of a private image")
+	p, _, otherHost := twoUpstreams(t, blob)
+	d := digestOf(blob)
+	if _, err := p.store.PutVerified(d, bytes.NewReader(blob)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.store.MarkProtected(d); err != nil { // after the request was admitted
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d+"?ns="+otherHost, nil)
+	rec := httptest.NewRecorder()
+	p.blob(rec, req, "lib/app", d)
+	if rec.Code == 200 || bytes.Equal(rec.Body.Bytes(), blob) {
+		t.Fatalf("status %d: a protected blob was served unchecked", rec.Code)
+	}
+	peer := httptest.NewRequest("GET", "/v2/lib/app/blobs/"+d+"?ns="+otherHost, nil)
+	peer.Header.Set(PeerHeader, "1")
+	peer.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{DNSNames: []string{tlstest.ServerName}}}}
+	rec = httptest.NewRecorder()
+	p.blob(rec, peer, "lib/app", d)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a node: status %d, want 403", rec.Code)
+	}
+}

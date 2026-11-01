@@ -699,6 +699,17 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		http.Error(w, "invalid namespace", 400)
 		return
 	}
+	// Admission may have looked before this digest was marked: a protected
+	// request can mark it, and store it, in between.
+	if len(p.protected) > 0 && !p.protected[ns(r)] && p.store.IsProtected(d) {
+		if p.isPeer(r) {
+			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
+			return
+		}
+		if !p.confirm(w, r, ns(r), r.URL.Path, d) {
+			return
+		}
+	}
 	if p.serveDigest(w, r, d, nil) {
 		p.metrics.LocalHits.Add(1)
 		return
