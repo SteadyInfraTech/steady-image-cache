@@ -386,6 +386,12 @@ func splitPath(path, marker string) (string, string, bool) {
 func blobPath(path string) (string, string, bool)     { return splitPath(path, "/blobs/") }
 func manifestPath(path string) (string, string, bool) { return splitPath(path, "/manifests/") }
 
+// markedForOtherNamespace reports whether d is held for a protected registry
+// while namespace is not one: what is given out of it needs that registry's say.
+func (p *Proxy) markedForOtherNamespace(namespace, d string) bool {
+	return len(p.protected) > 0 && !p.protected[namespace] && p.store.IsProtected(d)
+}
+
 // validNamespace reports whether a registry name is fit to be part of a key: a
 // host name or address with an optional port. An IPv6 literal is allowed, since
 // a client may well reach the cache by one.
@@ -476,7 +482,7 @@ func newInfo(r *http.Request) info {
 // reached through a tag of another namespace, is for that namespace's registry
 // to release (and not at all for another node).
 func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, repo, namespace, d string) bool {
-	if len(p.protected) > 0 && !p.protected[namespace] && p.store.IsProtected(d) {
+	if p.markedForOtherNamespace(namespace, d) {
 		if p.peersVerified() && p.isPeer(r) {
 			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
 			return true
@@ -701,7 +707,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	// Admission may have looked before this digest was marked: a protected
 	// request can mark it, and store it, in between.
-	if len(p.protected) > 0 && !p.protected[ns(r)] && p.store.IsProtected(d) {
+	if p.markedForOtherNamespace(ns(r), d) {
 		if p.isPeer(r) {
 			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
 			return
@@ -716,7 +722,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 	}
 	if p.isPeer(r) {
 		// Marked since admission: not for another namespace's asker (see admit).
-		if len(p.protected) > 0 && !p.protected[ns(r)] && p.store.IsProtected(d) {
+		if p.markedForOtherNamespace(ns(r), d) {
 			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
 			return
 		}
@@ -758,7 +764,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		// download is shared by digest: this one may be a protected registry's,
 		// started and marked since. What it brings is not this client's unless
 		// the registry says so.
-		if len(p.protected) > 0 && !p.protected[in.ns] && p.store.IsProtected(d) && !p.confirm(w, r, in.ns, r.URL.Path, d) {
+		if p.markedForOtherNamespace(in.ns, d) && !p.confirm(w, r, in.ns, r.URL.Path, d) {
 			return
 		}
 		// A plain GET is answered while the blob is still arriving. Anything

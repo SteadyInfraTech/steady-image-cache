@@ -86,7 +86,7 @@ func (p *Proxy) admit(w http.ResponseWriter, r *http.Request, repo string) bool 
 		// node asking under another namespace has asked nobody, and what this
 		// node holds from a protected registry is not for that namespace's
 		// clients (the asker would store it unmarked and hand it on).
-		if !p.protected[namespace] && d != "" && p.store.IsProtected(d) {
+		if d != "" && p.markedForOtherNamespace(namespace, d) {
 			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
 			return false
 		}
