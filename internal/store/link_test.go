@@ -189,3 +189,67 @@ func TestLinkExternalReplacingAnEnlargedCopyKeepsTheCountRight(t *testing.T) {
 		t.Fatalf("Used = %d after an enlarged copy became a link, want 0", s.Used())
 	}
 }
+
+// A damaged copy that was cut to nothing still counted when it was stored: the
+// total is measured again whatever size the copy has now.
+func TestLinkExternalReplacingATruncatedCopyKeepsTheCountRight(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("a layer")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blobPath(root, d), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LinkExternal(d, extFile(t, body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if s.Used() != 0 {
+		t.Fatalf("Used = %d after an emptied copy became a link, want 0", s.Used())
+	}
+}
+
+// A scan of the blob directory that fails does not become the total: the count
+// stays what it was, and a scan that works replaces it.
+func TestFailedUsageScanKeepsTheCount(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("a layer")
+	if _, err := s.PutVerified(digestOf(body), bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "blobs", "sha256")
+	if _, err := usageChecked(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("usageChecked of a missing directory reported no error")
+	}
+	moved := dir + ".moved"
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, nil, 0o644); err != nil { // reading it fails: not a directory
+		t.Fatal(err)
+	}
+	s.remeasure()
+	if s.Used() != int64(len(body)) {
+		t.Fatalf("Used = %d after a failed scan, want %d", s.Used(), len(body))
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, dir); err != nil {
+		t.Fatal(err)
+	}
+	s.used.Store(1)
+	s.remeasure()
+	if s.Used() != int64(len(body)) {
+		t.Fatalf("Used = %d after a good scan, want %d", s.Used(), len(body))
+	}
+}

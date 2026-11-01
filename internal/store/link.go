@@ -40,7 +40,7 @@ func (s *Store) LinkExternal(d, target string, size int64) error {
 	}
 	unlock := s.lockBlob(d)
 	defer unlock()
-	var old int64
+	replaced := false // a regular file, counted when it was stored, is being replaced
 	if oi, err := os.Lstat(p); err == nil && oi.Mode().IsRegular() {
 		// A download may have stored the blob since the caller looked: a copy
 		// that verifies is kept, whatever the target is (it is only the size
@@ -52,7 +52,7 @@ func (s *Store) LinkExternal(d, target string, size int64) error {
 		case hashErr != nil && !errors.Is(hashErr, os.ErrNotExist):
 			return local(hashErr)
 		}
-		old = oi.Size()
+		replaced = true
 	}
 	tmp := p + ".part-link-" + strconv.FormatUint(linkSeq.Add(1), 10)
 	_ = os.Remove(tmp)
@@ -63,10 +63,10 @@ func (s *Store) LinkExternal(d, target string, size int64) error {
 		_ = os.Remove(tmp)
 		return local(err)
 	}
-	if old > 0 {
+	if replaced {
 		// The damaged copy may have another size than the one that was counted
 		// (see goneCorrupt): the total is measured again, not adjusted.
-		s.used.Store(usage(filepath.Join(s.root, "blobs", "sha256")))
+		s.remeasure()
 	}
 	return nil
 }
