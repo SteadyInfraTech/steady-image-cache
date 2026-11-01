@@ -309,6 +309,11 @@ wait_for "$A's SIC to serve the manifest" 90 serves
 sees_peer() { sees_all_peers "$B"; }
 wait_for "$B's SIC to see all its peers" 90 sees_peer
 echo "imported blobs on $A: $(metric "$A" sic_containerd_imported_blobs_total); peers seen by $B: $(metric "$B" sic_peers)"
+# The image on $A is in containerd's content directory, mounted into the pod:
+# its blobs are linked into the cache, not copied (a manifest, a config, two layers).
+[ "$(metric "$A" sic_containerd_linked_blobs_total)" -ge 4 ] || fail "$A linked $(metric "$A" sic_containerd_linked_blobs_total) blobs from containerd, want at least 4"
+# Not just any four (kind's own images are linked too): this image's manifest is a link.
+docker exec "$A" test -L "/var/lib/steady-image-cache/blobs/sha256/${DIGEST#sha256:}" || fail "$A holds the manifest $DIGEST as a copy, not a link to containerd's file"
 
 log "pull on $B by digest, through SIC"
 before_peer=$(metric "$B" sic_peer_hits_total)

@@ -75,6 +75,7 @@ type Config struct {
 
 	ContainerdAddress, ContainerdNamespace string
 	ContainerdImport                       bool
+	ContainerdContentDir                   string
 	ImportInterval                         time.Duration
 }
 
@@ -140,13 +141,14 @@ func FromEnv() Config {
 		TLSKey:              os.Getenv("SIC_TLS_KEY"),
 		TLSCA:               os.Getenv("SIC_TLS_CA"),
 		// Nodes normally use one certificate both to serve and to call peers.
-		ClientCert:          env("SIC_TLS_CLIENT_CERT", os.Getenv("SIC_TLS_CERT")),
-		ClientKey:           env("SIC_TLS_CLIENT_KEY", os.Getenv("SIC_TLS_KEY")),
-		TLSServerName:       env("SIC_TLS_SERVER_NAME", "steady-image-cache"),
-		ContainerdAddress:   env("SIC_CONTAINERD_ADDRESS", "/run/containerd/containerd.sock"),
-		ContainerdNamespace: env("SIC_CONTAINERD_NAMESPACE", "k8s.io"),
-		ContainerdImport:    boolenv("SIC_CONTAINERD_IMPORT", true),
-		ImportInterval:      5 * time.Minute,
+		ClientCert:           env("SIC_TLS_CLIENT_CERT", os.Getenv("SIC_TLS_CERT")),
+		ClientKey:            env("SIC_TLS_CLIENT_KEY", os.Getenv("SIC_TLS_KEY")),
+		TLSServerName:        env("SIC_TLS_SERVER_NAME", "steady-image-cache"),
+		ContainerdAddress:    env("SIC_CONTAINERD_ADDRESS", "/run/containerd/containerd.sock"),
+		ContainerdNamespace:  env("SIC_CONTAINERD_NAMESPACE", "k8s.io"),
+		ContainerdImport:     boolenv("SIC_CONTAINERD_IMPORT", true),
+		ContainerdContentDir: env("SIC_CONTAINERD_CONTENT_DIR", ""),
+		ImportInterval:       5 * time.Minute,
 	}
 	if v := os.Getenv("SIC_PEER_PORT"); v != "" {
 		if n, e := strconv.Atoi(v); e == nil {

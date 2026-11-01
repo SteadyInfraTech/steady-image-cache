@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
@@ -21,6 +22,19 @@ type Importer struct {
 	Address, Namespace string
 	Store              *store.Store
 	Metrics            *metrics.Metrics
+	// ContentDir is containerd's content directory as this process sees it (the
+	// one that holds blobs/sha256/), when it is mounted here. A blob that is a
+	// file in it is linked into the cache instead of copied, so it takes no
+	// second place on the disk. Empty, or a blob that is not there: copied.
+	ContentDir string
+	// Protect is set when the cache protects registries (SIC_PROTECTED_REGISTRIES).
+	// What containerd holds has no known origin: it may be a private image that
+	// was pulled with credentials, and the cache would give its blobs to any
+	// client that asks under an unprotected namespace. Everything imported is
+	// therefore marked as protected content, so it is handed over only where the
+	// registry of the request's namespace confirms the client. Content already
+	// in the cache is left as it is.
+	Protect bool
 }
 
 // maxKeptErrors bounds how many individual import errors are remembered; the
@@ -135,9 +149,6 @@ func (i *Importer) importAliases(imgs []namedImage) error {
 	return failed.err()
 }
 
-// errStop ends the walk early; it is never reported.
-var errStop = errors.New("stop walking")
-
 // contentWalker is the narrow portion of containerd's content store needed by
 // the importer. Keeping it narrow lets tests exercise the import orchestration
 // without a running containerd daemon.
@@ -146,23 +157,24 @@ type contentWalker interface {
 	ReaderAt(context.Context, ocispec.Descriptor) (content.ReaderAt, error)
 }
 
+// errStop ends the walk early; it is never reported.
+var errStop = errors.New("stop walking")
+
 // importContent imports missing or corrupt content and leaves already-verified
 // cache entries untouched. A blob that fails is recorded and the walk goes on,
-// except when the cache has no room left: then every further blob would fail
-// the same way, so it stops there. Blobs that containerd deleted in the
-// meantime are not an error. The returned error describes what failed.
+// except when the cache has no room left: then no further blob can be copied,
+// so copying stops there, while links, which need no room, are still made (and
+// without a content directory there are none, so the walk ends there).
+// Blobs that containerd deleted in the meantime are not an error. The returned
+// error describes what failed.
 func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 	var failed importFailures
+	full := false // a copy found no room: none is tried again, links still are
 	err := cs.Walk(ctx, func(info content.Info) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		d := info.Digest.String()
-		// Content the cache just evicted would only be copied back and evicted
-		// again; leave it to be fetched when somebody asks for it.
-		if i.Store.WasEvicted(d) {
-			return nil
-		}
 		cached, err := cachedContentValid(i.Store, d)
 		if err != nil {
 			failed.add(fmt.Errorf("verify cached containerd content %s: %w", d, err))
@@ -170,6 +182,24 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 			return nil
 		}
 		if cached {
+			return nil
+		}
+		// The mark comes first: bytes that could be read before it was made
+		// would be read unprotected. A blob that cannot be marked is left out.
+		if i.Protect {
+			if err := i.Store.MarkProtected(d); err != nil {
+				failed.add(fmt.Errorf("mark containerd content %s as protected: %w", d, err))
+				i.countFailure()
+				return nil
+			}
+		}
+		// A link costs the cache nothing, so what it evicted is linked again too.
+		if i.link(d, info) {
+			return nil
+		}
+		// Content the cache just evicted would only be copied back and evicted
+		// again; leave it to be fetched when somebody asks for it.
+		if full || i.Store.WasEvicted(d) {
 			return nil
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
@@ -189,7 +219,10 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 			failed.add(fmt.Errorf("import containerd content %s: %w", d, err))
 			i.countFailure()
 			if errors.Is(err, store.ErrNoSpace) {
-				return errStop
+				full = true
+				if i.ContentDir == "" {
+					return errStop // nothing can be linked either: the rest would only be scanned
+				}
 			}
 			return nil
 		}
@@ -201,6 +234,24 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		failed.add(err)
 	}
 	return failed.err()
+}
+
+// link makes containerd's own file for the blob the cache's, and reports
+// whether it did. It declines, and the blob is copied, when there is no content
+// directory, no such file in it (not mounted, or already collected) or the
+// link cannot be made.
+func (i *Importer) link(d string, info content.Info) bool {
+	if i.ContentDir == "" || !store.ValidDigest(d) {
+		return false
+	}
+	target := filepath.Join(i.ContentDir, "blobs", "sha256", info.Digest.Encoded())
+	if err := i.Store.LinkExternal(d, target, info.Size); err != nil {
+		return false
+	}
+	if i.Metrics != nil {
+		i.Metrics.LinkedBlobs.Add(1)
+	}
+	return true
 }
 
 func (i *Importer) countFailure() {
