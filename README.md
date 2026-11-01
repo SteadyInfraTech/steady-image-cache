@@ -121,7 +121,7 @@ The cache no longer grows until the disk is full. When a download would leave le
 * The containerd import never evicts: it copies content that containerd already holds, so when the cache is full it stops for that run instead of pushing out blobs fetched for a pull. It also does not copy back what was evicted.
 * Exposed as `sic_cache_bytes`, `sic_evicted_blobs_total` and `sic_evicted_bytes_total`.
 
-An evicted tag still resolves; the manifest is fetched again from a peer when somebody asks. Image names and their digests in `aliases.json` are not removed.
+An evicted tag still resolves; the manifest is fetched again from a peer when somebody asks. Image names and their digests in `aliases.json` are removed only to keep the record to 50,000 names: past that, the ones confirmed longest ago (and those only imported from containerd) go first, and a name that was dropped resolves again only once something supplies it: the registry (with upstream fallback on), a peer, or a later containerd import. Until then a pull by that tag fails, even if its manifest is still cached.
 
 ## Upstream fallback
 
