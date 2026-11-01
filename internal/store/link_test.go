@@ -165,3 +165,27 @@ func TestLinkExternalKeepsACopyThatVerifies(t *testing.T) {
 		t.Fatalf("Used = %d, want %d", s.Used(), len(body))
 	}
 }
+
+// A damaged copy may have grown since it was counted: replacing it must leave
+// the total right, not negative.
+func TestLinkExternalReplacingAnEnlargedCopyKeepsTheCountRight(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("a layer")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blobPath(root, d), bytes.Repeat([]byte("g"), 5000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LinkExternal(d, extFile(t, body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if s.Used() != 0 {
+		t.Fatalf("Used = %d after an enlarged copy became a link, want 0", s.Used())
+	}
+}

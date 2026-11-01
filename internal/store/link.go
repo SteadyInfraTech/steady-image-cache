@@ -64,7 +64,9 @@ func (s *Store) LinkExternal(d, target string, size int64) error {
 		return local(err)
 	}
 	if old > 0 {
-		s.used.Add(-old)
+		// The damaged copy may have another size than the one that was counted
+		// (see goneCorrupt): the total is measured again, not adjusted.
+		s.used.Store(usage(filepath.Join(s.root, "blobs", "sha256")))
 	}
 	return nil
 }
