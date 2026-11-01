@@ -1,7 +1,12 @@
 package store
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -249,4 +254,59 @@ func TestMovedTagNeverHasANewTimeWithTheOldDigest(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// A record that is over the limit when the cache starts (an older version had
+// none) is brought within it at once, and what is dropped stays dropped.
+func TestOversizedAliasRecordIsTrimmedAtStart(t *testing.T) {
+	root := t.TempDir()
+	d := digestOf([]byte("m"))
+	doc := make(map[string]string, defaultMaxAliases+100)
+	for i := 0; i < defaultMaxAliases+100; i++ {
+		doc[fmt.Sprintf("r/a@t%06d", i)] = d
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "aliases.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := defaultMaxAliases - defaultMaxAliases/10
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.aliases) != want {
+		t.Fatalf("%d tags after start, want %d", len(s.aliases), want)
+	}
+	s2, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s2.aliases) != want {
+		t.Fatalf("%d tags after another start, want %d (the trimmed record was not saved)", len(s2.aliases), want)
+	}
+}
+
+// What a complete small blob needs is what it is, not a chunk's worth.
+func TestSettleMakesRoomForTheBlobNotForAChunk(t *testing.T) {
+	smallChunks(t, 500)
+	withProof(t, 100)
+	s := evictable(t)
+	s.SetMaxBytes(900)
+	var held []string
+	for i := 0; i < 3; i++ {
+		held = append(held, mustPut(t, s, string(rune('a'+i)), 300))
+		usedAgo(s, held[i], time.Duration(10-i)*time.Hour)
+	}
+	// 900 held; an 80-byte blob needs one eviction (300), a chunk (500) would need two.
+	body := []byte(strings.Repeat("s", 80))
+	d := digestOf(body)
+	if _, err := s.PutVerifiedLimit(d, bytes.NewReader(body), 800); err != nil { // declared as an upper bound
+		t.Fatal(err)
+	}
+	if got := cachedCount(s, held); got != 2 {
+		t.Fatalf("%d of 3 cached blobs are left, want 2", got)
+	}
 }

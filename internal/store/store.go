@@ -235,7 +235,15 @@ func (r *capacityReservation) grow(n int64) error {
 	if r.later <= 0 {
 		return nil // past the declared size: the write is refused when it is checked
 	}
-	take := max(n, reserveChunk)
+	return r.reserve(max(n, reserveChunk))
+}
+
+// reserve reserves take bytes of what the source declared (fewer when less is
+// left of it), evicting if allowed.
+func (r *capacityReservation) reserve(take int64) error {
+	if r.later <= 0 {
+		return nil
+	}
 	if take > r.later {
 		take = r.later
 	}
@@ -328,7 +336,7 @@ func (r *capacityReservation) settle() error {
 	}
 	n := r.unreserved
 	r.proof, r.unreserved = 0, 0
-	return r.grow(n)
+	return r.reserve(n) // what arrived, not a chunk's worth: the blob is complete
 }
 
 // fitsAtAll reports ErrNoSpace when need more bytes (and held already on disk)
@@ -430,6 +438,15 @@ func New(root string) (*Store, error) {
 		}
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, err
+	}
+	// A record from before the limit (or from a bigger one) is brought within it
+	// now, not at the next tag.
+	if dropped := s.trimAliases(s.aliases, ""); len(dropped) > 0 {
+		for _, k := range dropped {
+			delete(s.aliasChecked, k)
+		}
+		s.usageDirty = true
+		_ = s.saveAliases(root, s.aliases) // if it cannot be saved now, the next tag saves it
 	}
 	return s, nil
 }
