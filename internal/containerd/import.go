@@ -157,10 +157,14 @@ type contentWalker interface {
 	ReaderAt(context.Context, ocispec.Descriptor) (content.ReaderAt, error)
 }
 
+// errStop ends the walk early; it is never reported.
+var errStop = errors.New("stop walking")
+
 // importContent imports missing or corrupt content and leaves already-verified
 // cache entries untouched. A blob that fails is recorded and the walk goes on,
 // except when the cache has no room left: then no further blob can be copied,
-// so copying stops there, while links, which need no room, are still made.
+// so copying stops there, while links, which need no room, are still made (and
+// without a content directory there are none, so the walk ends there).
 // Blobs that containerd deleted in the meantime are not an error. The returned
 // error describes what failed.
 func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
@@ -216,6 +220,9 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 			i.countFailure()
 			if errors.Is(err, store.ErrNoSpace) {
 				full = true
+				if i.ContentDir == "" {
+					return errStop // nothing can be linked either: the rest would only be scanned
+				}
 			}
 			return nil
 		}
@@ -223,7 +230,7 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		i.Metrics.ImportedBytes.Add(uint64(n))
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errStop) {
 		failed.add(err)
 	}
 	return failed.err()

@@ -310,3 +310,32 @@ func TestImportKeepsLinkingWhenTheCacheIsFull(t *testing.T) {
 		t.Fatalf("LinkedBlobs = %d, want 1", m.LinkedBlobs.Load())
 	}
 }
+
+// countingWalker counts the blobs the importer is shown.
+type countingWalker struct {
+	contentWalker
+	seen int
+}
+
+func (c *countingWalker) Walk(ctx context.Context, fn content.WalkFunc, filters ...string) error {
+	return c.contentWalker.Walk(ctx, func(i content.Info) error { c.seen++; return fn(i) }, filters...)
+}
+
+// Without a content directory nothing can be linked, so a full cache ends the
+// walk instead of having it scan the rest.
+func TestImportEndsTheWalkWhenFullAndNothingCanBeLinked(t *testing.T) {
+	cs, _ := threeBlobs()
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetMinFree(1 << 60)
+	w := &countingWalker{contentWalker: cs}
+	err = (&Importer{Store: s, Metrics: &metrics.Metrics{}}).importContent(context.Background(), w)
+	if !errors.Is(err, store.ErrNoSpace) {
+		t.Fatalf("err = %v, want ErrNoSpace", err)
+	}
+	if w.seen != 1 {
+		t.Fatalf("the walk showed %d blobs, want 1", w.seen)
+	}
+}
