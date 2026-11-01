@@ -310,10 +310,9 @@ func (w reservingWriter) Write(p []byte) (int, error) {
 		n := r.unreserved
 		r.proof, r.unreserved = 0, 0
 		if n > 0 {
-			if err := r.grow(n); err != nil {
+			if err := r.reserveWritten(n); err != nil {
 				return 0, err
 			}
-			r.consume(n)
 		}
 	}
 	if int64(len(p)) > w.reservation.remaining {
@@ -336,7 +335,31 @@ func (r *capacityReservation) settle() error {
 	}
 	n := r.unreserved
 	r.proof, r.unreserved = 0, 0
-	return r.reserve(n) // what arrived, not a chunk's worth: the blob is complete
+	return r.reserveWritten(n) // what arrived, not a chunk's worth: the blob is complete
+}
+
+// reserveWritten counts n bytes that are on the disk already against the size
+// limit, evicting if allowed, without asking the free space for them again: it
+// has seen them (as with held in shortfallLocked). They are part of what the
+// source declared, so less of it is left to reserve.
+func (r *capacityReservation) reserveWritten(n int64) error {
+	s := r.store
+	for attempt := 0; ; attempt++ {
+		s.capacityMu.Lock()
+		short := s.shortfallLocked(0, n)
+		if short <= 0 {
+			s.pending += n
+			r.total += n
+			r.later = max(r.later-n, 0)
+			s.capacityMu.Unlock()
+			return nil
+		}
+		s.capacityMu.Unlock()
+		if !r.evict || attempt >= 2 || short > s.used.Load() {
+			return ErrNoSpace
+		}
+		s.evict(short)
+	}
 }
 
 // fitsAtAll reports ErrNoSpace when need more bytes (and held already on disk)

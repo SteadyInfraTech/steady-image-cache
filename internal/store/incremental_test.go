@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -186,7 +187,7 @@ func TestCrossingTheAllowanceDoesNotReserveTheEarlierBytesTwice(t *testing.T) {
 	}
 	body := []byte("big" + strings.Repeat("y", 797))
 	d := digestOf(body)
-	var seen int64
+	var seen, seenPending int64
 	checked := false
 	src := &hookReader{r: iotest.OneByteReader(bytes.NewReader(body)), before: func(n int) {
 		if n != 150 {
@@ -194,7 +195,7 @@ func TestCrossingTheAllowanceDoesNotReserveTheEarlierBytesTwice(t *testing.T) {
 		}
 		checked = true
 		s.capacityMu.Lock()
-		seen = s.reserved
+		seen, seenPending = s.reserved, s.pending
 		s.capacityMu.Unlock()
 	}}
 	if _, err := s.PutVerifiedLimit(d, src, int64(len(body))); err != nil {
@@ -203,9 +204,13 @@ func TestCrossingTheAllowanceDoesNotReserveTheEarlierBytesTwice(t *testing.T) {
 	if !checked {
 		t.Fatal("the check did not run")
 	}
-	// 150 bytes have been written of the 200 reserved: 50 are outstanding.
-	if seen > 50 {
-		t.Fatalf("%d bytes outstanding after 150 of the first 200 were written, want at most 50", seen)
+	// 100 bytes are on the disk already and count against the size limit; the
+	// 200 reserved are for what follows, of which 50 have come: 150 outstanding.
+	if seen != 150 {
+		t.Fatalf("%d bytes outstanding after 150 bytes, want 150 (the first 100 are not asked of free space again)", seen)
+	}
+	if seenPending != 300 {
+		t.Fatalf("%d counted against the limit, want 300 (100 written and a chunk of 200)", seenPending)
 	}
 	if s.pending != 0 || s.reserved != 0 {
 		t.Fatalf("reservation left behind: pending %d reserved %d", s.pending, s.reserved)
@@ -224,4 +229,32 @@ func (h *hookReader) Read(p []byte) (int, error) {
 	n, err := h.r.Read(p)
 	h.n += n
 	return n, err
+}
+
+// Bytes that are on the disk when the blob is complete have been seen by free
+// space: only what is still lacking is made, not the blob's size on top of it.
+func TestSettleDoesNotAskFreeSpaceForBytesAlreadyWritten(t *testing.T) {
+	smallChunks(t, 500)
+	withProof(t, 100)
+	s := evictable(t)
+	var held []string
+	for i := 0; i < 90; i++ {
+		held = append(held, mustPut(t, s, fmt.Sprintf("h%02d", i), 10))
+		usedAgo(s, held[i], time.Duration(100-i)*time.Hour)
+	}
+	// A disk of 1000 bytes with 900 held: 100 free before the blob is written, 20
+	// after it, and the floor is 30, so 10 bytes have to be made, not 90.
+	s.free = func(string) (uint64, bool) { return uint64(1000 - onDisk(s)), true }
+	s.SetMinFree(30)
+	body := []byte(strings.Repeat("s", 80))
+	d := digestOf(body)
+	if _, err := s.PutVerifiedLimit(d, bytes.NewReader(body), 80); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Stat(d); err != nil {
+		t.Fatal("the blob was not stored")
+	}
+	if got := cachedCount(s, held); got != 89 {
+		t.Fatalf("%d of 90 cached blobs are left, want 89 (one makes the 10 bytes that were lacking)", got)
+	}
 }

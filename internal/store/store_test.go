@@ -266,8 +266,7 @@ func TestPutVerifiedLimitChecksFreeSpace(t *testing.T) {
 	s, _ := New(t.TempDir())
 	body := []byte("0123456789")
 	d := digestOf(body)
-	free := uint64(100)
-	s.free = func(string) (uint64, bool) { return free, true }
+	s.free = func(string) (uint64, bool) { return uint64(100 - onDisk(s)), true } // what is written is gone from it
 
 	// 10 bytes fit in 100 free bytes with a 50 byte reserve.
 	s.SetMinFree(50)
