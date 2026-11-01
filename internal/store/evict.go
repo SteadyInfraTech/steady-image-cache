@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -116,7 +117,16 @@ func (s *Store) forget(d string) {
 // is measured again instead of adjusted; corruption is rare enough for that.
 func (s *Store) goneCorrupt(d string) {
 	s.forget(d)
-	s.used.Store(usage(filepath.Join(s.root, "blobs", "sha256")))
+	s.remeasure()
+}
+
+// remeasure replaces the total with what the blob directory holds. A scan that
+// fails leaves the total as it was (which can only be too high, and then
+// eviction errs on the side of the limit) instead of publishing a partial sum.
+func (s *Store) remeasure() {
+	if n, err := usageChecked(filepath.Join(s.root, "blobs", "sha256")); err == nil {
+		s.used.Store(n)
+	}
 }
 
 // reserve is the free space that has to remain after a download.
@@ -231,18 +241,31 @@ func defaultSlack(used int64) int64 { return min(used/20, 1<<30) }
 
 // usage adds up the size of the blobs in dir.
 func usage(dir string) int64 {
+	n, _ := usageChecked(dir)
+	return n
+}
+
+// usageChecked is usage that says when the sum cannot be trusted: the directory
+// could not be read, or an entry could not be measured (one that vanished since
+// it was listed is no error).
+func usageChecked(dir string) (int64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	var n int64
 	for _, e := range entries {
 		if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".part-") {
 			continue
 		}
-		if fi, err := e.Info(); err == nil {
+		fi, err := e.Info()
+		switch {
+		case err == nil:
 			n += fi.Size()
+		case errors.Is(err, os.ErrNotExist):
+		default:
+			return 0, err
 		}
 	}
-	return n
+	return n, nil
 }
