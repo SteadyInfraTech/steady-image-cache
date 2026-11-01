@@ -250,3 +250,57 @@ func mustURL(t *testing.T, s string) *url.URL {
 	}
 	return u
 }
+
+// net/http keeps Authorization for a subdomain of the registry, which may be run
+// by somebody else; the credentials stay with the origin they were sent to.
+func TestUpstreamRedirectKeepsCredentialsOnlyForTheSameOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		to   string
+		keep bool
+	}{
+		{"https://registry.example.com/v2/blob", true},
+		{"https://Registry.Example.COM:443/v2/blob", true}, // case and the default port
+		{"https://cdn.registry.example.com/blob", false},   // a subdomain
+		{"https://example.com/blob", false},                // the parent
+		{"https://registry.example.com:8443/blob", false},  // another port
+		{"https://other.example.net/blob", false},
+	} {
+		first, _ := http.NewRequest("GET", "https://registry.example.com/v2/lib/app/blobs/x", nil)
+		next, _ := http.NewRequest("GET", tc.to, nil)
+		next.Header.Set("Authorization", "Bearer secret")
+		if err := upstreamRedirect(next, []*http.Request{first}); err != nil {
+			t.Fatalf("%s: %v", tc.to, err)
+		}
+		if got := next.Header.Get("Authorization") != ""; got != tc.keep {
+			t.Errorf("%s: credentials kept = %v, want %v", tc.to, got, tc.keep)
+		}
+	}
+}
+
+// net/http compares host names as they are spelled, so a redirect to the same
+// host in another case loses the header before the callback runs; it is the
+// same origin, and the registry may want its credentials there.
+func TestUpstreamRedirectToTheSameHostInAnotherCaseKeepsCredentials(t *testing.T) {
+	var final atomic.Value
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			_, port, _ := strings.Cut(srv.Listener.Addr().String(), ":")
+			http.Redirect(w, r, "https://LOCALHOST:"+port+"/final", http.StatusFound)
+			return
+		}
+		final.Store(r.Header.Get("Authorization"))
+	}))
+	t.Cleanup(srv.Close)
+	_, port, _ := strings.Cut(srv.Listener.Addr().String(), ":")
+	req, _ := http.NewRequest("GET", "https://localhost:"+port+"/start", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := upstreamClientFor(srv).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got, _ := final.Load().(string); got != "Bearer tok" {
+		t.Fatalf("Authorization at the redirected request = %q", got)
+	}
+}
