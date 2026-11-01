@@ -501,6 +501,15 @@ func (p *Proxy) markedServe(w http.ResponseWriter, r *http.Request, repo, namesp
 // serveDigest serves a stored object. ctype may inspect the content to choose a
 // Content-Type; nil means application/octet-stream.
 func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ctype func(io.ReadSeeker) string) bool {
+	return p.serveGuarded(w, r, d, ctype, nil)
+}
+
+// serveGuarded is serveDigest with a check made once the object has been opened
+// and before a byte of it is sent. When it fails it has answered, and the
+// request counts as served. The point of making it here: whatever marks a
+// digest does so before it publishes the object (a download, the importer), so
+// an object that could be opened is one whose mark can be seen.
+func (p *Proxy) serveGuarded(w http.ResponseWriter, r *http.Request, d string, ctype func(io.ReadSeeker) string, guard func() bool) bool {
 	f, e := p.store.Open(d)
 	if e != nil {
 		p.cacheReadFailed(d, e)
@@ -511,6 +520,9 @@ func (p *Proxy) serveDigest(w http.ResponseWriter, r *http.Request, d string, ct
 	if e != nil {
 		p.cacheReadFailed(d, e)
 		return false
+	}
+	if guard != nil && !guard() {
+		return true
 	}
 	p.store.Touch(d)
 	ct := "application/octet-stream"
@@ -706,17 +718,19 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		return
 	}
 	// Admission may have looked before this digest was marked: a protected
-	// request can mark it, and store it, in between.
-	if p.markedForOtherNamespace(ns(r), d) {
+	// request can mark it, and publish it, in between. What is served is
+	// checked once it is open (see serveGuarded).
+	guard := func() bool {
+		if !p.markedForOtherNamespace(ns(r), d) {
+			return true
+		}
 		if p.isPeer(r) {
 			http.Error(w, "content of a protected registry is shared only under its own namespace", http.StatusForbidden)
-			return
+			return false
 		}
-		if !p.confirm(w, r, ns(r), r.URL.Path, d) {
-			return
-		}
+		return p.confirm(w, r, ns(r), r.URL.Path, d)
 	}
-	if p.serveDigest(w, r, d, nil) {
+	if p.serveGuarded(w, r, d, nil, guard) {
 		p.metrics.LocalHits.Add(1)
 		return
 	}
@@ -741,7 +755,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 			p.metrics.PeerStreams.Add(1)
 			return
 		}
-		if p.serveDigest(w, r, d, nil) { // finished while we looked
+		if p.serveGuarded(w, r, d, nil, guard) { // finished while we looked
 			p.metrics.LocalHits.Add(1)
 			return
 		}
@@ -784,7 +798,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, repo, d string) {
 		}
 		break
 	}
-	if res.ok && p.serveDigest(w, r, d, nil) {
+	if res.ok && p.serveGuarded(w, r, d, nil, guard) {
 		return
 	}
 	if res.status != 0 {
