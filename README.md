@@ -230,6 +230,7 @@ What that means in use:
 * A linked blob is never evicted, since evicting it would free nothing. A cache of linked blobs can be bigger than its limit; its own blobs are still evicted to stay within it.
 * The import is unchanged when the directory is not set, is not mounted, or does not hold the blob (a different root, say): it copies, and `sic_containerd_imported_blobs_total` counts. If `sic_containerd_linked_blobs_total` stays at zero on a node that has images, the path is wrong.
 * The link is by name, so the cache directory and the mount path must be the same on every start of the pod; with a changed path the old links dangle and are removed, and the content is copied or linked again.
+* While `SIC_PROTECTED_REGISTRIES` is set, everything the import adds, linked or copied, is marked as protected content (see "Protected registries"): containerd's content has no origin the cache knows, and may be a private image. It is handed to a client only after the registry of the request's namespace confirms that client, which costs one extra `HEAD` per layer, and it is not shared between nodes under an unprotected namespace. A blob that cannot be marked is not imported; content the cache held before is left as it was.
 
 ## TLS
 

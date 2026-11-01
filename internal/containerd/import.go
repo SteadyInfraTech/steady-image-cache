@@ -27,6 +27,14 @@ type Importer struct {
 	// file in it is linked into the cache instead of copied, so it takes no
 	// second place on the disk. Empty, or a blob that is not there: copied.
 	ContentDir string
+	// Protect is set when the cache protects registries (SIC_PROTECTED_REGISTRIES).
+	// What containerd holds has no known origin: it may be a private image that
+	// was pulled with credentials, and the cache would give its blobs to any
+	// client that asks under an unprotected namespace. Everything imported is
+	// therefore marked as protected content, so it is handed over only where the
+	// registry of the request's namespace confirms the client. Content already
+	// in the cache is left as it is.
+	Protect bool
 }
 
 // maxKeptErrors bounds how many individual import errors are remembered; the
@@ -175,6 +183,15 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		}
 		if cached {
 			return nil
+		}
+		// The mark comes first: bytes that could be read before it was made
+		// would be read unprotected. A blob that cannot be marked is left out.
+		if i.Protect {
+			if err := i.Store.MarkProtected(d); err != nil {
+				failed.add(fmt.Errorf("mark containerd content %s as protected: %w", d, err))
+				i.countFailure()
+				return nil
+			}
 		}
 		// A link costs the cache nothing, so what it evicted is linked again too.
 		if i.link(d, info) {

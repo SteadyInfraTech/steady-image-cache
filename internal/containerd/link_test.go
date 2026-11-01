@@ -208,6 +208,78 @@ func TestEvictedBlobIsLinkedAgain(t *testing.T) {
 	}
 }
 
+// With protection on, what containerd holds is of unknown origin: it is marked
+// before the cache can serve it, so it does not come out under an unprotected
+// namespace on the cache's word.
+func TestImportMarksContentWhenRegistriesAreProtected(t *testing.T) {
+	for _, linked := range []bool{true, false} {
+		body := bytes.Repeat([]byte("a private layer "), 100)
+		d := testDigest(body)
+		dir := ""
+		if linked {
+			dir = containerdDir(t, body)
+		}
+		s, err := store.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := &fakeContentWalker{
+			infos:   []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
+			readers: map[string]content.ReaderAt{d: newTestReaderAt(body)},
+		}
+		imp := &Importer{Store: s, Metrics: &metrics.Metrics{}, ContentDir: dir, Protect: true}
+		if err := imp.importContent(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Stat(d); err != nil {
+			t.Fatalf("linked=%v: not imported: %v", linked, err)
+		}
+		if !s.IsProtected(d) {
+			t.Fatalf("linked=%v: imported content carries no mark", linked)
+		}
+	}
+}
+
+// Without protection nothing is marked: content is shared as before.
+func TestImportMarksNothingWithoutProtection(t *testing.T) {
+	body := []byte("a public layer")
+	s, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := importOne(t, s, &metrics.Metrics{}, containerdDir(t, body), body, false); err != nil {
+		t.Fatal(err)
+	}
+	if s.IsProtected(testDigest(body)) {
+		t.Fatal("marked although no registry is protected")
+	}
+}
+
+// A blob that cannot be marked is not imported at all.
+func TestImportSkipsContentThatCannotBeMarked(t *testing.T) {
+	body := []byte("a private layer")
+	d := testDigest(body)
+	root := t.TempDir()
+	s, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "protected"), nil, 0o600); err != nil { // a file where the directory belongs
+		t.Fatal(err)
+	}
+	w := &fakeContentWalker{
+		infos:   []content.Info{{Digest: digest.Digest(d), Size: int64(len(body))}},
+		readers: map[string]content.ReaderAt{d: newTestReaderAt(body)},
+	}
+	imp := &Importer{Store: s, Metrics: &metrics.Metrics{}, ContentDir: containerdDir(t, body), Protect: true}
+	if err := imp.importContent(context.Background(), w); err == nil {
+		t.Fatal("no error for content that could not be marked")
+	}
+	if _, err := s.Stat(d); err == nil {
+		t.Fatal("content that could not be marked was imported")
+	}
+}
+
 // A full cache stops the copying, not the links: they need no room.
 func TestImportKeepsLinkingWhenTheCacheIsFull(t *testing.T) {
 	big := bytes.Repeat([]byte("b"), 4000) // copied: not in containerd's directory
