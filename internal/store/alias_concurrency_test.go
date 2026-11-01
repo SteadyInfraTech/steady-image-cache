@@ -203,3 +203,50 @@ func TestConfirmationTimesAreOnlyKeptForTagsThatExist(t *testing.T) {
 		t.Fatalf("%d tags, limit 20", len(s.aliases))
 	}
 }
+
+// A tag that moves is published with its new digest before its new time: a
+// reader that sees the time must not find the old digest, which it would take
+// for just confirmed.
+func TestMovedTagNeverHasANewTimeWithTheOldDigest(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 400
+	digests := make([]string, n)
+	index := map[string]int{}
+	base := time.Unix(1_700_000_000, 0)
+	for i := range digests {
+		digests[i] = digestOf([]byte(fmt.Sprintf("m%d", i)))
+		index[digests[i]] = i
+	}
+	if err := s.SetAliasAt("r", "a", "v", digests[0], base); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			at, ok := s.AliasChecked("r", "a", "v") // the time first, then the digest
+			d, _ := s.Resolve("r", "a", "v")
+			if want := int(at.Sub(base) / time.Second); ok && index[d] < want {
+				t.Errorf("time of write %d with the digest of write %d", want, index[d])
+				return
+			}
+		}
+	}()
+	for i := 1; i < n; i++ {
+		if err := s.SetAliasAt("r", "a", "v", digests[i], base.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}

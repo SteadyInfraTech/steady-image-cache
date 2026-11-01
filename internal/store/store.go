@@ -986,15 +986,18 @@ func (s *Store) setAlias(k, d string, onlyIfAbsent bool, confirmed time.Time) er
 	if err := s.saveAliases(root, next); err != nil {
 		return err // nothing was published
 	}
-	if !confirmed.IsZero() {
-		s.noteAliasChecked(k, confirmed)
-	}
 	s.mu.Lock()
 	s.aliases[k] = d
 	for _, old := range dropped {
 		delete(s.aliases, old)
 	}
 	s.mu.Unlock()
+	// After the digest, not before: a reader that sees the new time must find the
+	// new digest, or it would take the old one for just confirmed. (Still under
+	// aliasSaveMu, so nobody trims the tag in between.)
+	if !confirmed.IsZero() {
+		s.noteAliasChecked(k, confirmed)
+	}
 	if len(dropped) > 0 {
 		s.verifiedMu.Lock()
 		for _, old := range dropped {
