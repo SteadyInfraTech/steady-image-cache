@@ -22,7 +22,7 @@ var linkSeq atomic.Uint64
 
 // LinkExternal makes target, a regular file of size bytes that holds blob d, the
 // blob's content. It replaces what was at the blob's place (nothing, or a blob
-// that did not verify). The target is not read here.
+// that did not verify); a blob that verifies is left as it is. The target is not read here.
 func (s *Store) LinkExternal(d, target string, size int64) error {
 	p, err := s.path(d)
 	if err != nil {
@@ -42,6 +42,16 @@ func (s *Store) LinkExternal(d, target string, size int64) error {
 	defer unlock()
 	var old int64
 	if oi, err := os.Lstat(p); err == nil && oi.Mode().IsRegular() {
+		// A download may have stored the blob since the caller looked: a copy
+		// that verifies is kept, whatever the target is (it is only the size
+		// that was checked here).
+		match, hashErr := fileHashes(p, d)
+		switch {
+		case hashErr == nil && match:
+			return nil
+		case hashErr != nil && !errors.Is(hashErr, os.ErrNotExist):
+			return local(hashErr)
+		}
 		old = oi.Size()
 	}
 	tmp := p + ".part-link-" + strconv.FormatUint(linkSeq.Add(1), 10)

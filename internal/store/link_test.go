@@ -67,6 +67,10 @@ func TestLinkExternalReplacesACorruptCopyAndFixesTheCount(t *testing.T) {
 	if s.Used() != int64(len(body)) {
 		t.Fatalf("Used = %d", s.Used())
 	}
+	// The copy is damaged, so it is the link's to replace.
+	if err := os.WriteFile(blobPath(root, d), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.LinkExternal(d, extFile(t, body), int64(len(body))); err != nil {
 		t.Fatal(err)
 	}
@@ -129,5 +133,35 @@ func TestLinkExternalRefusesWrongSizeAndRelativePath(t *testing.T) {
 	}
 	if err := s.LinkExternal("not a digest", extFile(t, body), 1); err == nil {
 		t.Fatal("bad digest accepted")
+	}
+}
+
+// A blob that was stored while the caller was deciding to link is not replaced:
+// the target was checked for its size only, and may be anything of that size.
+func TestLinkExternalKeepsACopyThatVerifies(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.Repeat([]byte("v"), 3000)
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	wrong := bytes.Repeat([]byte("w"), len(body)) // the size is right, the content is not
+	if err := s.LinkExternal(d, extFile(t, wrong), int64(len(wrong))); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(blobPath(root, d)); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("the verified copy was replaced: %v %v", fi, err)
+	}
+	f, err := s.Open(d)
+	if err != nil {
+		t.Fatalf("the verified copy is lost: %v", err)
+	}
+	f.Close()
+	if s.Used() != int64(len(body)) {
+		t.Fatalf("Used = %d, want %d", s.Used(), len(body))
 	}
 }
