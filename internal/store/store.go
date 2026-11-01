@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,7 @@ type Store struct {
 	verified       map[string]stamp
 	verifiedDirty  bool
 	lastUse        map[string]int64 // unix nanoseconds
+	maxAliases     int              // 0: defaultMaxAliases
 	aliasChecked   map[string]int64 // when each alias was last confirmed, unix seconds; guarded by verifiedMu
 	usageDirty     bool
 	lastUsageFlush time.Time
@@ -208,7 +210,17 @@ type capacityReservation struct {
 	// a great deal and sends little cannot have the cache emptied on its word.
 	later int64
 	evict bool
+	// proof is how much a source may deliver before room is made for it, when
+	// that takes eviction: a source that declares a size and then fails at once
+	// (or sends a few bytes) must not cost the cache a blob. unreserved is what
+	// it delivered under that allowance; it is settled when the blob is complete
+	// and verified, or when more arrives than the allowance.
+	proof, unreserved int64
 }
+
+// proofBytes is the allowance above: eviction for a download starts only once
+// this much of it has arrived.
+var proofBytes int64 = 1 << 20
 
 // reserveChunk is how much of a declared size is reserved at a time. Making room
 // for a blob takes eviction, and eviction is paid for by the cache: only the
@@ -223,7 +235,15 @@ func (r *capacityReservation) grow(n int64) error {
 	if r.later <= 0 {
 		return nil // past the declared size: the write is refused when it is checked
 	}
-	take := max(n, reserveChunk)
+	return r.reserve(max(n, reserveChunk))
+}
+
+// reserve reserves take bytes of what the source declared (fewer when less is
+// left of it), evicting if allowed.
+func (r *capacityReservation) reserve(take int64) error {
+	if r.later <= 0 {
+		return nil
+	}
 	if take > r.later {
 		take = r.later
 	}
@@ -277,6 +297,24 @@ type reservingWriter struct {
 }
 
 func (w reservingWriter) Write(p []byte) (int, error) {
+	if r := w.reservation; r.proof > 0 {
+		if r.unreserved+int64(len(p)) <= r.proof {
+			n, err := w.w.Write(p)
+			r.unreserved += int64(n)
+			return n, err
+		}
+		// The source has delivered: room is made for what it sent under the
+		// allowance too (it counts against the size limit), but those bytes are
+		// on the disk already, so free space has seen them and they are not
+		// outstanding.
+		n := r.unreserved
+		r.proof, r.unreserved = 0, 0
+		if n > 0 {
+			if err := r.reserveWritten(n); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if int64(len(p)) > w.reservation.remaining {
 		if err := w.reservation.grow(int64(len(p)) - w.reservation.remaining); err != nil {
 			return 0, err
@@ -287,6 +325,41 @@ func (w reservingWriter) Write(p []byte) (int, error) {
 		w.reservation.consume(int64(n))
 	}
 	return n, err
+}
+
+// settle makes room for what arrived under the allowance, once the blob is
+// complete and has been verified.
+func (r *capacityReservation) settle() error {
+	if r.proof <= 0 || r.unreserved <= 0 {
+		return nil
+	}
+	n := r.unreserved
+	r.proof, r.unreserved = 0, 0
+	return r.reserveWritten(n) // what arrived, not a chunk's worth: the blob is complete
+}
+
+// reserveWritten counts n bytes that are on the disk already against the size
+// limit, evicting if allowed, without asking the free space for them again: it
+// has seen them (as with held in shortfallLocked). They are part of what the
+// source declared, so less of it is left to reserve.
+func (r *capacityReservation) reserveWritten(n int64) error {
+	s := r.store
+	for attempt := 0; ; attempt++ {
+		s.capacityMu.Lock()
+		short := s.shortfallLocked(0, n)
+		if short <= 0 {
+			s.pending += n
+			r.total += n
+			r.later = max(r.later-n, 0)
+			s.capacityMu.Unlock()
+			return nil
+		}
+		s.capacityMu.Unlock()
+		if !r.evict || attempt >= 2 || short > s.used.Load() {
+			return ErrNoSpace
+		}
+		s.evict(short)
+	}
 }
 
 // fitsAtAll reports ErrNoSpace when need more bytes (and held already on disk)
@@ -388,6 +461,15 @@ func New(root string) (*Store, error) {
 		}
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, err
+	}
+	// A record from before the limit (or from a bigger one) is brought within it
+	// now, not at the next tag.
+	if dropped := s.trimAliases(s.aliases, ""); len(dropped) > 0 {
+		for _, k := range dropped {
+			delete(s.aliasChecked, k)
+		}
+		s.usageDirty = true
+		_ = s.saveAliases(root, s.aliases) // if it cannot be saved now, the next tag saves it
 	}
 	return s, nil
 }
@@ -711,12 +793,28 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 			return 0, err
 		}
 		first := min(max-offset, reserveChunk)
-		reservation, err = s.reserveSpace(first, offset, evict)
-		if err != nil {
+		reservation, err = s.reserveSpace(first, offset, false)
+		switch {
+		case err == nil:
+			reservation.later = max - offset - first
+		case errors.Is(err, ErrNoSpace) && evict && proofBytes > 0:
+			// Room takes eviction, and a source that has not delivered anything
+			// is not worth a blob: it is made once some of it has arrived.
+			s.capacityMu.Lock()
+			s.pending += offset
+			reservation = &capacityReservation{store: s, total: offset, later: max - offset, proof: proofBytes}
+			s.capacityMu.Unlock()
+		case errors.Is(err, ErrNoSpace) && evict:
+			reservation, err = s.reserveSpace(first, offset, true)
+			if err != nil {
+				s.DropResume(res)
+				return 0, err
+			}
+			reservation.later = max - offset - first
+		default:
 			s.DropResume(res)
 			return 0, err
 		}
-		reservation.later = max - offset - first
 		reservation.evict = evict
 		defer reservation.release()
 	}
@@ -801,6 +899,14 @@ func (s *Store) putLocked(d string, r io.Reader, max int64, evict bool, prog Pro
 		}
 		return n, e
 	}
+	if reservation != nil {
+		if e = reservation.settle(); e != nil {
+			if closeErr := tmp.Close(); closeErr != nil {
+				e = errors.Join(e, local(closeErr))
+			}
+			return n, e
+		}
+	}
 	if e = tmp.Sync(); e != nil {
 		e = local(e)
 		if closeErr := tmp.Close(); closeErr != nil {
@@ -865,11 +971,9 @@ func (s *Store) SetAliasAt(ns, repo, ref, d string, at time.Time) error {
 		return errors.New("unsupported digest")
 	}
 	k := key(ns, repo, ref)
-	if err := s.setAlias(k, d, false); err != nil {
-		return err
-	}
-	s.noteAliasChecked(k, at)
-	return nil
+	// The confirmation is recorded inside, before another writer can trim: a
+	// tag without a time counts as the oldest.
+	return s.setAlias(k, d, false, at)
 }
 
 // SetAliasIfAbsent records an alias that was learned from somewhere that is
@@ -887,7 +991,7 @@ func (s *Store) SetAliasIfAbsent(ns, repo, ref, d string) (bool, error) {
 	if exists {
 		return false, nil
 	}
-	if err := s.setAlias(k, d, true); err != nil {
+	if err := s.setAlias(k, d, true, time.Time{}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -899,13 +1003,16 @@ func (s *Store) SetAliasIfAbsent(ns, repo, ref, d string) (bool, error) {
 // and would otherwise wait for the disk. Writers are serialized by aliasSaveMu,
 // so nothing changes the map between taking a copy of it and publishing the
 // result, and an alias becomes visible only after it has been saved.
-func (s *Store) setAlias(k, d string, onlyIfAbsent bool) error {
+func (s *Store) setAlias(k, d string, onlyIfAbsent bool, confirmed time.Time) error {
 	s.aliasSaveMu.Lock()
 	defer s.aliasSaveMu.Unlock()
 	s.mu.RLock()
 	previous, existed := s.aliases[k]
 	if existed && (previous == d || onlyIfAbsent) {
 		s.mu.RUnlock()
+		if !confirmed.IsZero() {
+			s.noteAliasChecked(k, confirmed)
+		}
 		return nil
 	}
 	root := s.root
@@ -915,13 +1022,74 @@ func (s *Store) setAlias(k, d string, onlyIfAbsent bool) error {
 	}
 	s.mu.RUnlock()
 	next[k] = d
+	dropped := s.trimAliases(next, k)
 	if err := s.saveAliases(root, next); err != nil {
 		return err // nothing was published
 	}
 	s.mu.Lock()
 	s.aliases[k] = d
+	for _, old := range dropped {
+		delete(s.aliases, old)
+	}
 	s.mu.Unlock()
+	// After the digest, not before: a reader that sees the new time must find the
+	// new digest, or it would take the old one for just confirmed. (Still under
+	// aliasSaveMu, so nobody trims the tag in between.)
+	if !confirmed.IsZero() {
+		s.noteAliasChecked(k, confirmed)
+	}
+	if len(dropped) > 0 {
+		s.verifiedMu.Lock()
+		for _, old := range dropped {
+			delete(s.aliasChecked, old)
+		}
+		s.usageDirty = true
+		s.verifiedMu.Unlock()
+	}
 	return nil
+}
+
+// defaultMaxAliases bounds the tag records. A tag costs little, but each one
+// that is added rewrites the whole record, and a client can have as many
+// distinct tags learned as a registry will answer for; so the record has a
+// size of its own, not tied to the blob capacity. A tag that was dropped is
+// learned again from the registry when somebody asks for it.
+const defaultMaxAliases = 50000
+
+// trimAliases removes from next, until it is a tenth under the limit, the tags
+// that were confirmed longest ago (those never confirmed, such as ones imported
+// from containerd, first), and returns their keys. keep is never one of them.
+func (s *Store) trimAliases(next map[string]string, keep string) []string {
+	limit := s.maxAliases
+	if limit <= 0 {
+		limit = defaultMaxAliases
+	}
+	if len(next) <= limit {
+		return nil
+	}
+	target := limit - limit/10
+	type aged struct {
+		k  string
+		at int64
+	}
+	s.verifiedMu.Lock()
+	all := make([]aged, 0, len(next))
+	for key := range next {
+		if key != keep {
+			all = append(all, aged{key, s.aliasChecked[key]})
+		}
+	}
+	s.verifiedMu.Unlock()
+	sort.Slice(all, func(i, j int) bool { return all[i].at < all[j].at })
+	var dropped []string
+	for _, a := range all {
+		if len(next) <= target {
+			break
+		}
+		delete(next, a.k)
+		dropped = append(dropped, a.k)
+	}
+	return dropped
 }
 
 func (s *Store) noteAliasChecked(k string, at time.Time) {

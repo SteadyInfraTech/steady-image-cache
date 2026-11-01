@@ -17,6 +17,19 @@ import (
 // evictable returns a store whose free space is unknown (only the size limit
 // applies) and whose eviction takes exactly what is needed and spares nothing
 // because it is young.
+// onDisk is what the blob directory holds, a download in progress included: free
+// space has seen those bytes, while Used has not until the blob is stored.
+func onDisk(s *Store) int64 {
+	var n int64
+	entries, _ := os.ReadDir(filepath.Join(s.root, "blobs", "sha256"))
+	for _, e := range entries {
+		if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
+			n += fi.Size()
+		}
+	}
+	return n
+}
+
 func evictable(t *testing.T) *Store {
 	t.Helper()
 	s, err := New(t.TempDir())
@@ -94,7 +107,7 @@ func TestEvictsTheLeastRecentlyUsedWhenOverTheLimit(t *testing.T) {
 func TestMakesRoomToKeepTheFreeSpaceReserve(t *testing.T) {
 	s := evictable(t)
 	const disk = 1000
-	s.free = func(string) (uint64, bool) { return uint64(disk - s.Used()), true }
+	s.free = func(string) (uint64, bool) { return uint64(disk - onDisk(s)), true }
 	s.SetMinFree(200)
 	var ds []string
 	for i, tag := range []string{"a", "b", "c", "d"} {
