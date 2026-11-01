@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-func TestProtectedMarkSurvivesARestartAndGoesWithTheBlob(t *testing.T) {
+func TestProtectedMarkSurvivesARestartAndAnEviction(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
 	if err != nil {
@@ -37,17 +36,6 @@ func TestProtectedMarkSurvivesARestartAndGoesWithTheBlob(t *testing.T) {
 	if !s2.IsProtected(d) {
 		t.Fatal("the mark went with an eviction")
 	}
-	// It goes at the next start if the blob is gone.
-	if err := os.Remove(filepath.Join(root, "blobs", "sha256", strings.TrimPrefix(d, "sha256:"))); err != nil {
-		t.Fatal(err)
-	}
-	s3, err := New(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s3.IsProtected(d) {
-		t.Fatal("the mark of a blob that is gone was kept")
-	}
 	if s2.IsProtected("not a digest") || s2.MarkProtected("not a digest") == nil {
 		t.Fatal("a bad digest was accepted")
 	}
@@ -68,22 +56,31 @@ func TestProtectedFailsClosed(t *testing.T) {
 	}
 }
 
-// A directory that cannot be listed is no proof that no blob is there.
-func TestPruneKeepsMarksWhenBlobsCannotBeListed(t *testing.T) {
+// A mark outlives its blob and a restart: the bytes may come back from
+// elsewhere (containerd's content store, another node), and they are still the
+// content of a protected registry.
+func TestMarkOutlivesItsBlobAndARestart(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := digestOf([]byte("y"))
+	b := []byte("a private layer")
+	d := digestOf(b)
 	if err := s.MarkProtected(d); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.RemoveAll(filepath.Join(root, "blobs")); err != nil {
+	if _, err := s.PutVerified(d, bytes.NewReader(b)); err != nil {
 		t.Fatal(err)
 	}
-	s.pruneMarks()
+	if err := os.Remove(filepath.Join(root, "blobs", "sha256", d[len("sha256:"):])); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !s.IsProtected(d) {
-		t.Fatal("marks were removed because the blobs could not be listed")
+		t.Fatal("the mark of a blob that is gone was removed at start")
 	}
 }
