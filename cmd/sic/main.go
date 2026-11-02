@@ -22,7 +22,6 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/version"
 )
-
 func main() {
 	if version.Requested(os.Args[1:]) {
 		fmt.Println(version.String())
@@ -94,6 +93,13 @@ func main() {
 		scheme = "https"
 	}
 	var self string // this node as the others list it, for coordination
+
+	// Zone-aware routing: a ZoneResolver tracks which zone each peer lives in.
+	// It is populated by the EndpointSlice watcher (via the zone field on each
+	// endpoint). The pod watcher does not carry zone info directly, but the
+	// downward-API NODE_ZONE covers this node's own zone for coord ranking.
+	zoneResolver := peer.NewZoneResolver()
+
 	if cfg.KubernetesDiscovery {
 		if ip := os.Getenv("HOST_IP"); net.ParseIP(ip) != nil {
 			self = scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(cfg.PeerPort))
@@ -109,9 +115,64 @@ func main() {
 			go k.Run(ctx, 30*time.Second, log.Printf)
 		}
 	}
+
+	// EndpointSlice discovery: recommended for clusters >500 nodes.
+	// Runs alongside pod-based discovery; Multi deduplicates overlapping results.
+	if cfg.EndpointSliceDiscovery {
+		es, err := peer.NewEndpointSliceKubernetes(
+			cfg.PodNamespace, cfg.PodLabelSelector,
+			os.Getenv("HOST_IP"), cfg.PeerPort, scheme,
+			zoneResolver,
+		)
+		if err != nil {
+			log.Printf("endpointslice discovery disabled: %v", err)
+		} else {
+			es.EnableWatch()
+			finders = append(finders, es)
+			go es.Run(ctx, 30*time.Second, log.Printf)
+			log.Printf("EndpointSlice discovery enabled (SIC_ENDPOINTSLICE_DISCOVERY=true)")
+		}
+	}
+
+	// Zone-aware peer ordering: wrap the combined finder so same-AZ peers are
+	// tried first, reducing cross-zone data transfer costs on AWS/GCP/Azure.
+	// NODE_ZONE is injected via the Kubernetes downward API from the
+	// topology.kubernetes.io/zone node label.
+	var activeFinder peer.Finder = finders
+	if cfg.NodeZone != "" {
+		zaf := &peer.ZoneAwareFinder{
+			Inner:     finders,
+			LocalZone: cfg.NodeZone,
+			Resolver:  zoneResolver,
+		}
+		activeFinder = zaf
+		log.Printf("zone-aware routing enabled: local zone=%q", cfg.NodeZone)
+	}
+
+	// Digest gossip: Bloom-filter exchange so nodes know which peers hold a
+	// digest before sending HTTP requests. Strongly recommended for >100 nodes.
+	var digestIndex *peer.DigestIndex
+	if cfg.DigestGossip {
+		digestIndex = peer.NewDigestIndex()
+		gossipClient := &http.Client{Timeout: 15 * time.Second}
+		if useTLS {
+			// Reuse the server TLS config for gossip; peers verify each other.
+			gossipClient.Transport = &http.Transport{TLSClientConfig: serverTLS.ServerConfig().Clone()}
+		}
+		gr := &peer.GossipRunner{
+			Index:    digestIndex,
+			Peers:    activeFinder,
+			Client:   gossipClient,
+			SelfBase: self,
+			Logf:     log.Printf,
+		}
+		go gr.Run(ctx, cfg.GossipInterval)
+		log.Printf("digest gossip enabled (SIC_DIGEST_GOSSIP=true), interval=%v", cfg.GossipInterval)
+	}
+
 	// How many peers this node would ask right now. Zero on a node whose
 	// neighbours exist but are not Ready yet, or have not been listed yet.
-	m.Funcs = append(m.Funcs, metrics.Func{Name: "sic_peers", Type: "gauge", Value: func() int64 { return int64(len(finders.Candidates())) }})
+	m.Funcs = append(m.Funcs, metrics.Func{Name: "sic_peers", Type: "gauge", Value: func() int64 { return int64(len(activeFinder.Candidates())) }})
 
 	// The import walks the whole containerd content store, which can take a long
 	// time on a busy node. It runs in the background so the registry is already
@@ -137,7 +198,7 @@ func main() {
 		}()
 	}
 
-	h, err := proxy.New(st, finders, m, proxy.Options{
+	h, err := proxy.New(st, activeFinder, m, proxy.Options{
 		Timeout:             cfg.UpstreamTimeout,
 		PeerTimeout:         cfg.PeerTimeout,
 		PeerBackoff:         cfg.PeerBackoff,
@@ -151,6 +212,7 @@ func main() {
 		ProtectedRegistries: cfg.ProtectedRegistries,
 		TLS:                 clientTLS,
 		ServerName:          cfg.TLSServerName,
+		DigestIndex:         digestIndex,
 		Logf:                log.Printf,
 	})
 	if err != nil {

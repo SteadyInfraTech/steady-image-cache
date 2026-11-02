@@ -77,6 +77,25 @@ type Config struct {
 	ContainerdImport                       bool
 	ContainerdContentDir                   string
 	ImportInterval                         time.Duration
+
+	// EndpointSliceDiscovery enables the discovery.k8s.io/v1 EndpointSlice
+	// watcher for clusters with >500 nodes. Requires the "list"/"watch" verbs
+	// on endpointslices in the discovery.k8s.io API group. When true, it runs
+	// alongside (not replacing) the pod-based watcher so that either can fill
+	// in gaps.
+	EndpointSliceDiscovery bool
+
+	// NodeZone is the topology.kubernetes.io/zone label of this node, injected
+	// via the Kubernetes downward API as NODE_ZONE. When set, peer selection
+	// prefers peers in the same zone to avoid cross-AZ data transfer costs.
+	NodeZone string
+
+	// DigestGossip enables the periodic Bloom-filter exchange that lets nodes
+	// know which peers hold a digest before sending an HTTP request. Turning it
+	// on is recommended for clusters with >100 nodes; each gossip round is a
+	// ~64 KiB GET per peer every GossipInterval.
+	DigestGossip     bool
+	GossipInterval   time.Duration
 }
 
 func env(k, d string) string {
@@ -149,6 +168,11 @@ func FromEnv() Config {
 		ContainerdImport:     boolenv("SIC_CONTAINERD_IMPORT", true),
 		ContainerdContentDir: env("SIC_CONTAINERD_CONTENT_DIR", ""),
 		ImportInterval:       5 * time.Minute,
+		// New scalability features (all off by default for backwards compatibility).
+		EndpointSliceDiscovery: boolenv("SIC_ENDPOINTSLICE_DISCOVERY", false),
+		NodeZone:               os.Getenv("NODE_ZONE"),
+		DigestGossip:           boolenv("SIC_DIGEST_GOSSIP", false),
+		GossipInterval:         3 * time.Minute,
 	}
 	if v := os.Getenv("SIC_PEER_PORT"); v != "" {
 		if n, e := strconv.Atoi(v); e == nil {
@@ -215,6 +239,11 @@ func FromEnv() Config {
 		// A non-positive interval would make time.NewTicker panic.
 		if d, e := time.ParseDuration(v); e == nil && d > 0 {
 			c.ImportInterval = d
+		}
+	}
+	if v := os.Getenv("SIC_GOSSIP_INTERVAL"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil && d > 0 {
+			c.GossipInterval = d
 		}
 	}
 	return c
