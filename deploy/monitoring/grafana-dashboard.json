@@ -17,7 +17,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -43,16 +43,17 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "clamp_min(100 * (1 - (sum(rate(sic_bytes_from_upstream_total[5m])) / clamp_min(sum(rate(sic_bytes_to_clients_total[5m])), 1))), 0)",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "clamp_min(100 * (1 - sum(rate(sic_bytes_from_upstream_total[5m])) / sum(rate(sic_bytes_to_clients_total[5m]))), 0) and on() (sum(rate(sic_bytes_to_clients_total[5m])) > 0)",
           "refId": "A"
         }
       ],
-      "title": "WAN Egress Bandwidth Saved",
+      "title": "Registry Traffic Saved (of what SIC served)",
+      "description": "Share of the bytes SIC sent to containerd that did not come from a registry. Pulls that bypass SIC (a miss without upstream fallback is fetched by containerd directly) are in neither counter, so this is not the cluster-wide WAN saving. No data while SIC serves nothing.",
       "type": "gauge"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -65,19 +66,19 @@
       "options": { "legend": { "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_bytes_to_clients_total[5m]))",
           "legendFormat": "Client Pull Demand",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_bytes_from_upstream_total[5m]))",
           "legendFormat": "Upstream Registry Fetch",
           "refId": "B"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_bytes_to_peers_total[5m]))",
           "legendFormat": "Peer-to-Peer Served",
           "refId": "C"
@@ -87,7 +88,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -100,25 +101,25 @@
       "options": { "legend": { "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_local_hits_total[5m]))",
           "legendFormat": "Local Cache Hits",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_peer_hits_total[5m]))",
           "legendFormat": "Peer Cache Hits",
           "refId": "B"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_upstream_hits_total[5m]))",
           "legendFormat": "Upstream Registry Hits",
           "refId": "C"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_misses_total[5m]))",
           "legendFormat": "Misses",
           "refId": "D"
@@ -135,7 +136,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -148,19 +149,19 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_coordinator_hits_total[5m]))",
           "legendFormat": "Coordinator Hits",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_coordinator_served_total[5m]))",
           "legendFormat": "Coordinator Served",
           "refId": "B"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(rate(sic_coordinator_fallbacks_total[5m]))",
           "legendFormat": "Coordinator Fallbacks",
           "refId": "C"
@@ -170,7 +171,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -183,7 +184,7 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sic_peers",
           "legendFormat": "Node {{ instance }} Peers",
           "refId": "A"
@@ -200,7 +201,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -213,7 +214,7 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sic_cache_bytes",
           "legendFormat": "{{ instance }} Cache Usage",
           "refId": "A"
@@ -223,7 +224,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -236,19 +237,19 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(sic_containerd_linked_blobs_total)",
           "legendFormat": "Linked Blobs (Zero-Copy)",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(sic_containerd_imported_blobs_total)",
           "legendFormat": "Copied Blobs",
           "refId": "B"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "sum(sic_evicted_blobs_total)",
           "legendFormat": "Evicted Blobs",
           "refId": "C"
@@ -262,6 +263,22 @@
   "schemaVersion": 38,
   "style": "dark",
   "tags": ["steady-image-cache", "kubernetes", "containerd", "p2p"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
+  },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": { "refresh_intervals": ["5s", "10s", "30s", "1m"] },
   "timezone": "browser",

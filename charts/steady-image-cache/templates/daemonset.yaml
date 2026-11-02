@@ -57,7 +57,7 @@ spec:
         - name: SIC_INIT_CLIENT_CERT_DIR
           value: {{ .Values.initContainer.hostPaths.clientCert | quote }}
         - name: SIC_INIT_TLS_DIR
-          value: "/tls"
+          value: "/tls-client"
         - name: SIC_INIT_MIRROR_URL
           value: "https://127.0.0.1:{{ .Values.config.peerPort }}"
         volumeMounts:
@@ -65,8 +65,8 @@ spec:
           mountPath: /host{{ .Values.initContainer.hostPaths.certsD }}
         - name: host-client-cert
           mountPath: /host{{ .Values.initContainer.hostPaths.clientCert }}
-        - name: tls
-          mountPath: /tls
+        - name: client-tls
+          mountPath: /tls-client
           readOnly: true
         {{- with .Values.initContainer.resources }}
         resources:
@@ -74,6 +74,49 @@ spec:
         {{- end }}
       {{- end }}
       containers:
+      {{- if and .Values.initContainer.enabled (ne (toString .Values.initContainer.refreshInterval) "") (ne (toString .Values.initContainer.refreshInterval) "0") }}
+      # Keeps the node's copy of containerd's client certificate current when
+      # the Secret is renewed in place (cert-manager does that).
+      - name: sic-init-refresh
+        image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
+        imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+        args: ["init-node"]
+        securityContext:
+          runAsUser: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        env:
+        - name: SIC_INIT_INTERVAL
+          value: {{ .Values.initContainer.refreshInterval | quote }}
+        - name: SIC_INIT_REGISTRIES
+          value: {{ join "," .Values.initContainer.registries | quote }}
+        - name: SIC_INIT_CAPABILITIES
+          value: {{ join "," .Values.initContainer.capabilities | quote }}
+        - name: SIC_INIT_HOST_PREFIX
+          value: "/host"
+        - name: SIC_INIT_CERTS_D_DIR
+          value: {{ .Values.initContainer.hostPaths.certsD | quote }}
+        - name: SIC_INIT_CLIENT_CERT_DIR
+          value: {{ .Values.initContainer.hostPaths.clientCert | quote }}
+        - name: SIC_INIT_TLS_DIR
+          value: "/tls-client"
+        - name: SIC_INIT_MIRROR_URL
+          value: "https://127.0.0.1:{{ .Values.config.peerPort }}"
+        volumeMounts:
+        - name: host-certs-d
+          mountPath: /host{{ .Values.initContainer.hostPaths.certsD }}
+        - name: host-client-cert
+          mountPath: /host{{ .Values.initContainer.hostPaths.clientCert }}
+        - name: client-tls
+          mountPath: /tls-client
+          readOnly: true
+        {{- with .Values.initContainer.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
       - name: sic
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -103,6 +146,10 @@ spec:
           value: "app={{ include "steady-image-cache.name" . }}"
         - name: SIC_PEER_PORT
           value: {{ .Values.config.peerPort | quote }}
+        - name: SIC_UPSTREAM_TIMEOUT
+          value: {{ .Values.config.upstreamTimeout | quote }}
+        - name: SIC_IMPORT_INTERVAL
+          value: {{ .Values.config.importInterval | quote }}
         - name: SIC_PEER_TIMEOUT
           value: {{ .Values.config.peerTimeout | quote }}
         - name: SIC_PEER_BACKOFF
@@ -192,7 +239,7 @@ spec:
             scheme: HTTP
             host: 127.0.0.1
             path: /readyz
-            port: 5001
+            port: {{ include "steady-image-cache.adminPort" . }}
           initialDelaySeconds: 2
           periodSeconds: 10
         livenessProbe:
@@ -200,7 +247,7 @@ spec:
             scheme: HTTP
             host: 127.0.0.1
             path: /healthz
-            port: 5001
+            port: {{ include "steady-image-cache.adminPort" . }}
           initialDelaySeconds: 10
           periodSeconds: 20
           timeoutSeconds: 5
@@ -229,6 +276,10 @@ spec:
           secretName: {{ .Values.tls.secretName }}
           defaultMode: 0400
       {{- if .Values.initContainer.enabled }}
+      - name: client-tls
+        secret:
+          secretName: {{ .Values.initContainer.clientTLS.secretName }}
+          defaultMode: 0400
       - name: host-certs-d
         hostPath:
           path: {{ .Values.initContainer.hostPaths.certsD }}

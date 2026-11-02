@@ -21,6 +21,17 @@ initContainer:
     - ghcr.io
   capabilities:
     - pull
+  # containerd's own client certificate: a client-only pair from the same CA
+  # (ca.crt, tls.crt, tls.key) that does NOT list tls.serverName, so containerd
+  # is never taken for another node. Never the DaemonSet's own Secret (tls.secretName):
+  # its key would be copied onto the node. With tls.certManager.enabled the chart
+  # creates this Secret; otherwise create it yourself.
+  clientTLS:
+    secretName: "steady-image-cache-containerd-client"
+  # How often the node's copy of that certificate is compared with the Secret
+  # (a sidecar does it, so a renewed certificate reaches containerd). "0" runs
+  # the setup once, at pod start.
+  refreshInterval: 5m
   hostPaths:
     certsD: /etc/containerd/certs.d
     clientCert: /etc/steady-image-cache
@@ -35,6 +46,9 @@ initContainer:
 config:
   listen: "0.0.0.0:5000"
   peerPort: 5000
+  # Plain-HTTP /healthz, /readyz and /metrics. The probes use its port. The
+  # default only accepts the node itself; serviceMonitor.enabled needs an address
+  # Prometheus can reach (e.g. "0.0.0.0:5001"), and these paths have no authentication.
   adminListen: "127.0.0.1:5001"
   cacheDir: "/var/lib/steady-image-cache"
   insecure: false

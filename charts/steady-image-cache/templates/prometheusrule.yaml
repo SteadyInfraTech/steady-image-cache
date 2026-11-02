@@ -70,7 +70,7 @@ spec:
 
     {{- if .Values.prometheusRule.rules.noPeers }}
     - alert: SteadyImageCacheNoPeersDiscovered
-      expr: sic_peers == 0 and count(sic_peers) > 1
+      expr: sic_peers == 0 and on() (count(sic_peers) > 1)
       for: 5m
       labels:
         severity: warning

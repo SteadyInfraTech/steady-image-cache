@@ -2,12 +2,14 @@ package initnode
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Options holds configuration for initializing containerd mirror configuration
@@ -38,6 +40,11 @@ type Options struct {
 
 	// Capabilities containerd should use for SIC (default ["pull"]).
 	Capabilities []string
+
+	// Interval, when positive, makes RunFromEnv repeat the setup that often
+	// (SIC_INIT_INTERVAL), so certificates that are renewed in place reach the
+	// node's copy. Zero runs it once.
+	Interval time.Duration
 
 	// Logf is the logger function. If nil, log.Printf is used.
 	Logf func(string, ...any)
@@ -105,6 +112,14 @@ func OptionsFromEnv() Options {
 		}
 	}
 
+	if v := os.Getenv("SIC_INIT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opts.Interval = d
+		} else {
+			log.Printf("init-node: ignoring SIC_INIT_INTERVAL=%q: not a positive duration", v)
+		}
+	}
+
 	return opts
 }
 
@@ -135,9 +150,39 @@ func Run(opts Options) error {
 	return nil
 }
 
-// RunFromEnv reads settings from the environment and executes the initialization.
-func RunFromEnv() error {
-	return Run(OptionsFromEnv())
+// RunFromEnv reads settings from the environment and executes the initialization
+// once, or until ctx ends when SIC_INIT_INTERVAL asks for it to be repeated.
+func RunFromEnv(ctx context.Context) error {
+	opts := OptionsFromEnv()
+	if opts.Interval > 0 {
+		return Watch(ctx, opts)
+	}
+	return Run(opts)
+}
+
+// Watch runs the setup now and then every opts.Interval until ctx ends. The
+// first run must succeed (a pod that cannot configure its node should say so);
+// a later failure is logged and the files of the last good run stay in place.
+func Watch(ctx context.Context, opts Options) error {
+	logf := opts.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	if err := Run(opts); err != nil {
+		return err
+	}
+	t := time.NewTicker(opts.Interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if err := Run(opts); err != nil {
+				logf("init-node: refresh failed, keeping the previous files: %v", err)
+			}
+		}
+	}
 }
 
 // provisionCerts copies ca.crt, tls.crt, and tls.key from srcDir to dstDir with

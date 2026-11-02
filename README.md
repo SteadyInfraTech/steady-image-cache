@@ -233,7 +233,7 @@ sic init-node
 SIC_INIT_HOST_PREFIX=/host SIC_INIT_REGISTRIES=docker.io,ghcr.io sic init-node
 ```
 
-The Helm chart in `charts/steady-image-cache` includes this init container enabled by default.
+The Helm chart in `charts/steady-image-cache` includes this init container enabled by default. It copies containerd's client pair from its **own** Secret (`initContainer.clientTLS.secretName`, mounted at `/tls-client`), never from the DaemonSet's `tls` Secret: that key is the node's identity, and a certificate that lists `tls.serverName` would make containerd count as another SIC node (see "TLS"). With `tls.certManager.enabled` the chart creates that client-only certificate (client auth, no DNS name); otherwise create the Secret (`ca.crt`, `tls.crt`, `tls.key`) yourself. A sidecar (`initContainer.refreshInterval`, default 5 minutes, `0` for none) repeats the setup, so a renewed certificate reaches the node's copy before the old one expires: `sic init-node` does that itself when `SIC_INIT_INTERVAL` is set, keeping the previous files when a run fails. The chart derives the probe port from `config.adminListen`; `serviceMonitor.enabled` needs an `adminListen` that Prometheus can reach (it refuses the loopback default) and creates the headless Service the monitor selects. The admin paths have no authentication: limit who can reach them.
 
 ### The import without a second copy
 

@@ -55,3 +55,17 @@ ServiceAccount name
 {{- define "steady-image-cache.serviceAccountName" -}}
 {{- default (include "steady-image-cache.fullname" .) .Values.serviceAccount.name }}
 {{- end }}
+
+{{/*
+Port of the plain-HTTP admin listener (probes, metrics), taken from config.adminListen.
+*/}}
+{{- define "steady-image-cache.adminPort" -}}
+{{- last (splitList ":" .Values.config.adminListen) -}}
+{{- end }}
+
+{{/*
+True when config.adminListen only accepts connections from the node itself.
+*/}}
+{{- define "steady-image-cache.adminIsLoopback" -}}
+{{- if or (hasPrefix "127." .Values.config.adminListen) (hasPrefix "localhost:" .Values.config.adminListen) (hasPrefix "[::1]:" .Values.config.adminListen) -}}true{{- end -}}
+{{- end }}

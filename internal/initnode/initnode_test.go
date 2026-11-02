@@ -1,10 +1,12 @@
 package initnode
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGenerateHostsToml(t *testing.T) {
@@ -148,5 +150,70 @@ func TestRunEndToEnd(t *testing.T) {
 	clientKey := filepath.Join(hostRoot, "etc/steady-image-cache/tls.key")
 	if _, err := os.Stat(clientKey); err != nil {
 		t.Fatalf("missing tls.key on host: %v", err)
+	}
+}
+
+// A certificate renewed in place in the pod reaches the node's copy while the
+// refresh loop runs, and a failed run keeps what was there.
+func TestWatchCarriesARenewedCertificateToTheNode(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "tls")
+	hostRoot := filepath.Join(tmp, "host")
+	if err := os.MkdirAll(src, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	write := func(cert string) {
+		t.Helper()
+		for name, body := range map[string]string{"ca.crt": "ca", "tls.crt": cert, "tls.key": "key"} {
+			if err := os.WriteFile(filepath.Join(src, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write("old")
+	opts := Options{
+		Registries: []string{"docker.io"}, HostPrefix: hostRoot,
+		CertsDDir: "/etc/containerd/certs.d", ClientCertDir: "/etc/steady-image-cache",
+		TLSSourceDir: src, MirrorURL: "https://127.0.0.1:5000",
+		Interval: 10 * time.Millisecond, Logf: func(string, ...any) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, opts) }()
+
+	host := filepath.Join(hostRoot, "etc/steady-image-cache/tls.crt")
+	waitFor := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if b, err := os.ReadFile(host); err == nil && string(b) == want {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("the node's certificate never became %q", want)
+	}
+	waitFor("old")
+
+	// A half-finished rotation: the files are gone for a moment.
+	if err := os.Remove(filepath.Join(src, "tls.key")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	waitFor("old")
+
+	write("new")
+	waitFor("new")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+}
+
+func TestWatchFailsWhenTheFirstRunCannot(t *testing.T) {
+	opts := Options{TLSSourceDir: filepath.Join(t.TempDir(), "missing"), HostPrefix: t.TempDir(),
+		CertsDDir: "/c", ClientCertDir: "/e", Interval: time.Hour, Logf: func(string, ...any) {}}
+	if err := Watch(context.Background(), opts); err == nil {
+		t.Fatal("Watch reported success although the first run failed")
 	}
 }
