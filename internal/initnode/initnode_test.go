@@ -53,7 +53,7 @@ func TestProvisionCerts(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src")
 	dst := filepath.Join(tmp, "dst")
-	if err := os.MkdirAll(src, 0o755); err != nil {
+	if err := os.MkdirAll(src, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestRunEndToEnd(t *testing.T) {
 	src := filepath.Join(tmp, "tls")
 	hostRoot := filepath.Join(tmp, "host")
 
-	if err := os.MkdirAll(src, 0o755); err != nil {
+	if err := os.MkdirAll(src, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(src, "ca.crt"), []byte("ca"), 0o644)

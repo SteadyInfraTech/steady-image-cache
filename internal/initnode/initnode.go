@@ -143,7 +143,7 @@ func RunFromEnv() error {
 // provisionCerts copies ca.crt, tls.crt, and tls.key from srcDir to dstDir with
 // strict atomic writes and appropriate file permissions.
 func provisionCerts(srcDir, dstDir string, logf func(string, ...any)) error {
-	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+	if err := os.MkdirAll(dstDir, 0o750); err != nil {
 		return err
 	}
 
@@ -183,7 +183,7 @@ func provisionCerts(srcDir, dstDir string, logf func(string, ...any)) error {
 // configureRegistry creates or updates <certsDDir>/<registry>/hosts.toml.
 func configureRegistry(reg, certsDDir string, opts Options, logf func(string, ...any)) error {
 	regDir := filepath.Join(certsDDir, reg)
-	if err := os.MkdirAll(regDir, 0o755); err != nil {
+	if err := os.MkdirAll(regDir, 0o750); err != nil {
 		return err
 	}
 
