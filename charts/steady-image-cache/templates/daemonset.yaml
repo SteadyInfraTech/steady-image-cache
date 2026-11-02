@@ -116,17 +116,17 @@ spec:
         - name: SIC_PEER_WATCH
           value: {{ .Values.config.peerWatch | quote }}
         - name: SIC_MIN_FREE_BYTES
-          value: {{ .Values.config.minFreeBytes | quote }}
+          value: {{ int64 .Values.config.minFreeBytes | quote }}
         - name: SIC_MIN_FREE_PERCENT
-          value: {{ .Values.config.minFreePercent | quote }}
+          value: {{ int64 .Values.config.minFreePercent | quote }}
         {{- if gt (int .Values.config.maxCacheBytes) 0 }}
         - name: SIC_MAX_CACHE_BYTES
-          value: {{ .Values.config.maxCacheBytes | quote }}
+          value: {{ int64 .Values.config.maxCacheBytes | quote }}
         {{- end }}
         - name: SIC_SCRUB_INTERVAL
           value: {{ .Values.config.scrubInterval | quote }}
         - name: SIC_SCRUB_RATE
-          value: {{ .Values.config.scrubRate | quote }}
+          value: {{ int64 .Values.config.scrubRate | quote }}
         - name: SIC_TAG_TTL
           value: {{ .Values.config.tagTTL | quote }}
         - name: SIC_UPSTREAM_ENABLED

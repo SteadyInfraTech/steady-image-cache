@@ -12,6 +12,7 @@ keywords:
   - p2p
   - air-gapped
 home: https://steadyinfra.com/sic/
+icon: https://steadyinfra.com/sic/logo.png
 sources:
   - https://github.com/SteadyInfraTech/steady-image-cache
 maintainers:

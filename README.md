@@ -339,9 +339,18 @@ A fourth phase installs the sample mirror configuration, `deploy/containerd/mirr
 
 ### Helm Chart (Recommended)
 
-A production-ready Helm chart is provided under `charts/steady-image-cache`. It supports automated containerd `hosts.toml` configuration via an init container, cert-manager integration, ServiceMonitors, and PrometheusRules:
+A production-ready Helm chart is provided under `charts/steady-image-cache` and published as an OCI artifact to GitHub Packages. It supports automated containerd `hosts.toml` configuration via an init container, cert-manager integration, ServiceMonitors, and PrometheusRules:
 
 ```bash
+# Install directly from GitHub Container Registry (OCI):
+helm install steady-image-cache oci://ghcr.io/steadyinfratech/charts/steady-image-cache \
+  --version 1.3.0 \
+  --namespace kube-system \
+  --set initContainer.enabled=true \
+  --set config.upstreamEnabled=true \
+  --set config.upstreamRegistries="{docker.io,ghcr.io}"
+
+# Or from local source:
 helm install steady-image-cache ./charts/steady-image-cache \
   --namespace kube-system \
   --set initContainer.enabled=true \
