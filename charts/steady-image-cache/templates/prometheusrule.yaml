@@ -1,0 +1,81 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+  - name: steady-image-cache.rules
+    rules:
+    {{- if .Values.prometheusRule.rules.diskFull }}
+    - alert: SteadyImageCacheDiskFull
+      expr: increase(sic_disk_full_total[5m]) > 0
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Steady Image Cache disk reserve reached on {{ `{{ $labels.instance }}` }}"
+        description: "Node {{ `{{ $labels.instance }}` }} is refusing downloads because disk free space has reached SIC_MIN_FREE_BYTES / SIC_MIN_FREE_PERCENT reserve."
+    {{- end }}
+
+    {{- if .Values.prometheusRule.rules.corruptBlobs }}
+    - alert: SteadyImageCacheCorruptBlobsDetected
+      expr: increase(sic_corrupt_blobs_total[10m]) > 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Corrupt OCI blobs detected in cache on {{ `{{ $labels.instance }}` }}"
+        description: "Background scrubber or store verification found corrupt blobs on node {{ `{{ $labels.instance }}` }}. Possible storage or filesystem corruption."
+    {{- end }}
+
+    {{- if .Values.prometheusRule.rules.storeErrors }}
+    - alert: SteadyImageCacheHighStoreErrors
+      expr: rate(sic_store_errors_total[5m]) > 0.05
+      for: 3m
+      labels:
+        severity: critical
+      annotations:
+        summary: "High storage I/O error rate on {{ `{{ $labels.instance }}` }}"
+        description: "Node {{ `{{ $labels.instance }}` }} is failing to write or read from its cache directory."
+    {{- end }}
+
+    {{- if .Values.prometheusRule.rules.highVerifyErrors }}
+    - alert: SteadyImageCacheHighVerifyErrors
+      expr: rate(sic_verify_errors_total[5m]) > 0.1
+      for: 3m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High digest verification errors on {{ `{{ $labels.instance }}` }}"
+        description: "Peers or upstream registries are delivering content that does not match declared digests."
+    {{- end }}
+
+    {{- if .Values.prometheusRule.rules.coordinatorDegraded }}
+    - alert: SteadyImageCacheCoordinatorDegraded
+      expr: rate(sic_coordinator_fallbacks_total[10m]) > rate(sic_coordinator_hits_total[10m])
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High coordinator fallback rate on {{ `{{ $labels.instance }}` }}"
+        description: "Node {{ `{{ $labels.instance }}` }} is consistently falling back to direct pulls because coordinators are slow or unreachable."
+    {{- end }}
+
+    {{- if .Values.prometheusRule.rules.noPeers }}
+    - alert: SteadyImageCacheNoPeersDiscovered
+      expr: sic_peers == 0 and count(sic_peers) > 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Node {{ `{{ $labels.instance }}` }} sees zero peer caches"
+        description: "Pod peer discovery is finding 0 ready peers despite other nodes running in the cluster."
+    {{- end }}
+{{- end }}

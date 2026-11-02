@@ -4,6 +4,10 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- **Automated containerd host setup (`sic init-node`)**: Added the `init-node` subcommand and `internal/initnode` package to automatically provision containerd `certs.d` mirror configuration (`hosts.toml`) and install client certificates with strict permissions (0600 keys, 0644 certs) on worker nodes, eliminating manual host provisioning.
+- **Production Helm Chart (`charts/steady-image-cache`)**: Added an official Helm chart supporting automated deployment, containerd auto-configuration via `initContainer`, cert-manager CSI integration, ServiceMonitor, and PrometheusRule alerting.
+- **Production Observability (`deploy/monitoring/`)**: Added pre-configured Prometheus alerting rules (`prometheus-rules.yaml`) for disk exhaustion, store errors, corrupt blobs, and coordinator degradation, alongside an enterprise Grafana dashboard (`grafana-dashboard.json`) measuring aggregate cluster WAN bandwidth savings, peer streams, and cache hit distributions.
+
 ## 1.2.0 - 2026-11-02
 
 - **Upgrading from 1.1.x:** (1) with mutual TLS, nodes are recognised as peers only by a client certificate that lists `SIC_TLS_SERVER_NAME`; a deployment that relied on the `X-SIC-Peer` header alone must issue such certificates (the README's recipe does). (2) The sample DaemonSet mounts containerd's content directory read-only (`/var/lib/containerd/io.containerd.content.v1.content`): change the path if containerd's root is elsewhere, or remove the volume, the mount and `SIC_CONTAINERD_CONTENT_DIR`. (3) If you set `SIC_PROTECTED_REGISTRIES`, blobs cached before it was set carry no protection marks and, when requested under an unprotected namespace, are served without the registry check (under a protected one the check always runs); empty the cache after turning it on if they must be protected. Everything else below is a fix or optional.

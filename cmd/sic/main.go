@@ -15,6 +15,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/config"
 	cd "github.com/SteadyInfraTech/steady-image-cache/internal/containerd"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/health"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/initnode"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
@@ -26,6 +27,12 @@ import (
 func main() {
 	if version.Requested(os.Args[1:]) {
 		fmt.Println(version.String())
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "init-node" {
+		if err := initnode.RunFromEnv(); err != nil {
+			log.Fatalf("init-node: %v", err)
+		}
 		return
 	}
 	log.Print(version.String())

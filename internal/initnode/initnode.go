@@ -1,0 +1,288 @@
+package initnode
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Options holds configuration for initializing containerd mirror configuration
+// and provisioning client certificates on a node.
+type Options struct {
+	// Registries to configure mirrors for (e.g. ["docker.io", "ghcr.io"] or ["_default"]).
+	Registries []string
+
+	// HostPrefix is the path prefix when running inside a container with the host
+	// root mounted (e.g. "/host"). Empty when running directly on the host.
+	HostPrefix string
+
+	// CertsDDir is the path on the host to containerd's certs.d directory
+	// (default "/etc/containerd/certs.d").
+	CertsDDir string
+
+	// ClientCertDir is the path on the host where containerd client certs live
+	// (default "/etc/steady-image-cache").
+	ClientCertDir string
+
+	// TLSSourceDir is the directory where the secret/certificates are mounted
+	// inside the pod (default "/tls").
+	TLSSourceDir string
+
+	// MirrorURL is the local address containerd uses to contact SIC
+	// (default "https://127.0.0.1:5000").
+	MirrorURL string
+
+	// Capabilities containerd should use for SIC (default ["pull"]).
+	Capabilities []string
+
+	// Logf is the logger function. If nil, log.Printf is used.
+	Logf func(string, ...any)
+}
+
+// DefaultOptions returns the default Options.
+func DefaultOptions() Options {
+	return Options{
+		Registries:    []string{"docker.io", "ghcr.io"},
+		CertsDDir:     "/etc/containerd/certs.d",
+		ClientCertDir: "/etc/steady-image-cache",
+		TLSSourceDir:  "/tls",
+		MirrorURL:     "https://127.0.0.1:5000",
+		Capabilities:  []string{"pull"},
+		Logf:          log.Printf,
+	}
+}
+
+// OptionsFromEnv constructs Options from environment variables, defaulting
+// sensibly for Kubernetes init-container deployments.
+func OptionsFromEnv() Options {
+	opts := DefaultOptions()
+
+	if v := os.Getenv("SIC_INIT_REGISTRIES"); v != "" {
+		var regs []string
+		for _, r := range strings.Split(v, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				regs = append(regs, r)
+			}
+		}
+		if len(regs) > 0 {
+			opts.Registries = regs
+		}
+	}
+
+	opts.HostPrefix = os.Getenv("SIC_INIT_HOST_PREFIX")
+	if opts.HostPrefix == "" {
+		// Detect if /host is mounted (standard Kubernetes host-root mount)
+		if fi, err := os.Stat("/host"); err == nil && fi.IsDir() {
+			opts.HostPrefix = "/host"
+		}
+	}
+
+	if v := os.Getenv("SIC_INIT_CERTS_D_DIR"); v != "" {
+		opts.CertsDDir = v
+	}
+	if v := os.Getenv("SIC_INIT_CLIENT_CERT_DIR"); v != "" {
+		opts.ClientCertDir = v
+	}
+	if v := os.Getenv("SIC_INIT_TLS_DIR"); v != "" {
+		opts.TLSSourceDir = v
+	}
+	if v := os.Getenv("SIC_INIT_MIRROR_URL"); v != "" {
+		opts.MirrorURL = v
+	}
+	if v := os.Getenv("SIC_INIT_CAPABILITIES"); v != "" {
+		var caps []string
+		for _, c := range strings.Split(v, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				caps = append(caps, c)
+			}
+		}
+		if len(caps) > 0 {
+			opts.Capabilities = caps
+		}
+	}
+
+	return opts
+}
+
+// Run executes the host initialization workflow:
+// 1. Provisions client certificates and CA to ClientCertDir.
+// 2. Generates hosts.toml files in CertsDDir for each configured registry.
+func Run(opts Options) error {
+	logf := opts.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+
+	targetCertDir := filepath.Join(opts.HostPrefix, opts.ClientCertDir)
+	logf("init-node: provisioning client certificates from %s to %s", opts.TLSSourceDir, targetCertDir)
+	if err := provisionCerts(opts.TLSSourceDir, targetCertDir, logf); err != nil {
+		return fmt.Errorf("provision certificates: %w", err)
+	}
+
+	targetCertsD := filepath.Join(opts.HostPrefix, opts.CertsDDir)
+	logf("init-node: configuring containerd mirrors in %s for registries: %v", targetCertsD, opts.Registries)
+	for _, reg := range opts.Registries {
+		if err := configureRegistry(reg, targetCertsD, opts, logf); err != nil {
+			return fmt.Errorf("configure registry %q: %w", reg, err)
+		}
+	}
+
+	logf("init-node: containerd host configuration completed successfully")
+	return nil
+}
+
+// RunFromEnv reads settings from the environment and executes the initialization.
+func RunFromEnv() error {
+	return Run(OptionsFromEnv())
+}
+
+// provisionCerts copies ca.crt, tls.crt, and tls.key from srcDir to dstDir with
+// strict atomic writes and appropriate file permissions.
+func provisionCerts(srcDir, dstDir string, logf func(string, ...any)) error {
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+
+	files := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"ca.crt", 0o644},
+		{"tls.crt", 0o644},
+		{"tls.key", 0o600},
+	}
+
+	for _, f := range files {
+		src := filepath.Join(srcDir, f.name)
+		dst := filepath.Join(dstDir, f.name)
+
+		srcData, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", src, err)
+		}
+
+		if existing, err := os.ReadFile(dst); err == nil {
+			if fi, err := os.Stat(dst); err == nil && bytes.Equal(existing, srcData) && fi.Mode().Perm() == f.mode {
+				// Already identical and permissions match
+				continue
+			}
+		}
+
+		if err := writeAtomic(dst, srcData, f.mode); err != nil {
+			return fmt.Errorf("write %s: %w", dst, err)
+		}
+		logf("init-node: updated %s (mode %04o)", dst, f.mode)
+	}
+	return nil
+}
+
+// configureRegistry creates or updates <certsDDir>/<registry>/hosts.toml.
+func configureRegistry(reg, certsDDir string, opts Options, logf func(string, ...any)) error {
+	regDir := filepath.Join(certsDDir, reg)
+	if err := os.MkdirAll(regDir, 0o755); err != nil {
+		return err
+	}
+
+	hostsTomlPath := filepath.Join(regDir, "hosts.toml")
+	content := generateHostsToml(reg, opts)
+
+	if existing, err := os.ReadFile(hostsTomlPath); err == nil {
+		if bytes.Equal(existing, []byte(content)) {
+			// Already matches
+			return nil
+		}
+	}
+
+	if err := writeAtomic(hostsTomlPath, []byte(content), 0o644); err != nil {
+		return err
+	}
+	logf("init-node: wrote %s", hostsTomlPath)
+	return nil
+}
+
+// generateHostsToml generates the hosts.toml content for a registry.
+func generateHostsToml(reg string, opts Options) string {
+	var b strings.Builder
+	b.WriteString("# Generated by Steady Image Cache (SIC) init-node. DO NOT EDIT.\n")
+
+	// Host-side paths that containerd on the node must read
+	caPath := filepath.Join(opts.ClientCertDir, "ca.crt")
+	certPath := filepath.Join(opts.ClientCertDir, "tls.crt")
+	keyPath := filepath.Join(opts.ClientCertDir, "tls.key")
+
+	capsList := formatCapabilities(opts.Capabilities)
+
+	if reg == "_default" {
+		// Air-gapped fallback where SIC is the only host
+		b.WriteString(fmt.Sprintf("server = %q\n", opts.MirrorURL))
+		b.WriteString(fmt.Sprintf("capabilities = %s\n", capsList))
+		b.WriteString(fmt.Sprintf("ca = %q\n", caPath))
+		b.WriteString(fmt.Sprintf("client = [[%q, %q]]\n", certPath, keyPath))
+		return b.String()
+	}
+
+	// Normal registry mirror configuration with fallback to upstream
+	serverURL := upstreamServerURL(reg)
+	b.WriteString(fmt.Sprintf("server = %q\n\n", serverURL))
+	b.WriteString(fmt.Sprintf("[host.%q]\n", opts.MirrorURL))
+	b.WriteString(fmt.Sprintf("  capabilities = %s\n", capsList))
+	b.WriteString(fmt.Sprintf("  ca = %q\n", caPath))
+	b.WriteString(fmt.Sprintf("  client = [[%q, %q]]\n", certPath, keyPath))
+
+	return b.String()
+}
+
+// upstreamServerURL returns the default upstream URL for a registry name.
+func upstreamServerURL(reg string) string {
+	switch strings.ToLower(reg) {
+	case "docker.io":
+		return "https://registry-1.docker.io"
+	default:
+		if strings.HasPrefix(reg, "http://") || strings.HasPrefix(reg, "https://") {
+			return reg
+		}
+		return "https://" + reg
+	}
+}
+
+func formatCapabilities(caps []string) string {
+	if len(caps) == 0 {
+		return `["pull"]`
+	}
+	var quoted []string
+	for _, c := range caps {
+		quoted = append(quoted, fmt.Sprintf("%q", c))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// writeAtomic writes data to dst using a temporary file and atomic rename.
+func writeAtomic(dst string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(dst)
+	tmp, err := os.CreateTemp(dir, ".tmp-init-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := io.Copy(tmp, bytes.NewReader(data)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
+}
