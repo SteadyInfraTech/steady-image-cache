@@ -350,8 +350,20 @@ func FilterPopBits() int { return filterBits }
 func (idx *DigestIndex) Fingerprint() uint64 {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
+	return fingerprintOf(idx.self.data[:])
+}
+
+// Snapshot returns the serialised self filter and its fingerprint, read under
+// one lock: the pair always describes the same state of the filter.
+func (idx *DigestIndex) Snapshot() (fp uint64, data []byte) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return fingerprintOf(idx.self.data[:]), idx.self.marshalBinary()
+}
+
+func fingerprintOf(data []byte) uint64 {
 	var h uint64 = 14695981039346656037
-	for _, b := range idx.self.data {
+	for _, b := range data {
 		h ^= uint64(b)
 		h *= 1099511628211
 	}

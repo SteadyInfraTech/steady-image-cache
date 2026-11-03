@@ -103,3 +103,34 @@ func TestShuffledPeersKeepsALivePeerTheGroupsLack(t *testing.T) {
 		t.Fatalf("peers = %v, want both", got)
 	}
 }
+
+// Through askablePeers, with a digest and filters: under the cap the same-zone
+// holder is asked, not a cross-zone holder whose filter is sparser.
+func TestAskablePeersWithFiltersKeepsTheSameZoneHolderUnderTheCap(t *testing.T) {
+	const d = "sha256:aaaa"
+	r := peer.NewZoneResolver()
+	r.SetZone("https://near", "z1")
+	r.SetZone("https://far", "z2")
+	r.SetZone("https://other", "z1")
+	idx := peer.NewDigestIndex()
+	dense := []string{d}
+	for i := range 3000 {
+		dense = append(dense, "sha256:c"+strconv.Itoa(i))
+	}
+	filterOf(t, idx, "https://near", dense...)
+	filterOf(t, idx, "https://far", d) // matches, sparser
+	filterOf(t, idx, "https://other", "sha256:bbbb")
+	p := &Proxy{
+		peers:    &peer.ZoneAwareFinder{Inner: fixedPeers{"https://far", "https://other", "https://near"}, LocalZone: "z1", Resolver: r},
+		index:    idx,
+		down:     map[string]time.Time{},
+		now:      time.Now,
+		maxTries: 1,
+		metrics:  &metrics.Metrics{},
+	}
+	for range 50 {
+		if got := p.askablePeers("", d); !slices.Equal(got, []string{"https://near"}) {
+			t.Fatalf("asked %v, want only the same-zone holder", got)
+		}
+	}
+}

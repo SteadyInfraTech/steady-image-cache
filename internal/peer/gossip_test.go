@@ -2,6 +2,8 @@ package peer
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -133,4 +135,87 @@ func TestGossipStalledPeerDoesNotBlockTheRound(t *testing.T) {
 	if !idx.hasPeer(good.URL) {
 		t.Fatal("the peer after the stalled one got no update")
 	}
+}
+
+// Peers that stall for the whole fetch timeout are fetched side by side: a
+// round over many of them takes about one timeout per batch, not one per peer.
+func TestGossipRoundFetchesPeersConcurrently(t *testing.T) {
+	release := make(chan struct{})
+	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer stall.Close()
+	defer close(release)
+	good, _ := node(t, 3, nil)
+
+	// Many candidates that all point at stalling servers (distinct bases: the
+	// query string makes each URL its own peer).
+	var bases []string
+	for i := range 20 {
+		bases = append(bases, fmt.Sprintf("%s/p%d", stall.URL, i))
+	}
+	bases = append(bases, good.URL)
+	idx := NewDigestIndex()
+	var p gossipPeers
+	p.set(bases...)
+	g := runner(idx, &p, good)
+	g.FetchTimeout = 300 * time.Millisecond
+	g.Concurrency = 10
+	start := time.Now()
+	g.Round(context.Background())
+	// 20 stalled peers, 10 at a time: two batches of 300 ms. One at a time it
+	// would be six seconds.
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("the round took %v: the peers were fetched one after the other", d)
+	}
+	if !idx.hasPeer(good.URL) {
+		t.Fatal("the healthy peer got no update")
+	}
+}
+
+// The fingerprint and the filter in a response are of the same state, however
+// the filter changes while it is served.
+func TestGossipResponseIsOneSnapshot(t *testing.T) {
+	idx := NewDigestIndex()
+	idx.Rebuild([]string{digestN(1)})
+	srv := httptest.NewServer(&GossipHandler{Index: idx})
+	defer srv.Close()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				idx.Rebuild([]string{digestN(i), digestN(i + 1)})
+			}
+		}
+	}()
+	for range 60 {
+		resp, err := http.Get(srv.URL + GossipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body indexResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		raw, err := base64.URLEncoding.DecodeString(body.Filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fingerprintOf(raw) != body.Fingerprint {
+			t.Fatal("the fingerprint is of another state than the filter in the same response")
+		}
+	}
+	close(stop)
+	<-done
 }

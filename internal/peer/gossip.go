@@ -61,14 +61,14 @@ func (g *GossipHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	fp := g.Index.Fingerprint()
+	// The fingerprint and the bytes come from one state of the filter.
+	fp, raw := g.Index.Snapshot()
 	// Conditional GET: if the peer sends its known fingerprint and it matches,
 	// respond 304 to save bandwidth.
 	if r.URL.Query().Get("fp") == uint64ToStr(fp) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	raw := g.Index.SelfBytes()
 	body := indexResponse{
 		Filter:      base64.URLEncoding.EncodeToString(raw),
 		Fingerprint: fp,
@@ -91,6 +91,10 @@ type GossipRunner struct {
 	SelfBase string
 	// Logf receives occasional warnings. Nil discards them.
 	Logf func(string, ...any)
+	// Concurrency is how many peers are fetched at once (zero: 16), so that
+	// peers that stall for FetchTimeout each cannot add up to a round that takes
+	// minutes on a large cluster.
+	Concurrency int
 	// FetchTimeout bounds one peer's fetch, body included (zero: 15 seconds), so
 	// a peer that stalls cannot hold up the others.
 	FetchTimeout time.Duration
@@ -122,13 +126,21 @@ func (g *GossipRunner) Run(ctx context.Context, interval time.Duration) {
 func (g *GossipRunner) Round(ctx context.Context) {
 	candidates := g.Peers.Candidates()
 	active := make(map[string]bool, len(candidates))
+	sem := make(chan struct{}, cmpOrInt(g.Concurrency, 16))
+	var wg sync.WaitGroup
 	for _, base := range candidates {
 		active[base] = true
 		if base == g.SelfBase || ctx.Err() != nil {
 			continue
 		}
-		g.fetchOne(ctx, base)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			g.fetchOne(ctx, base)
+		}()
 	}
+	wg.Wait()
 	// A peer that is not a candidate any more has its filter dropped, and its
 	// fingerprint with it: when it comes back with the same filter it must be
 	// sent again, not answered "not modified" about something we threw away.
@@ -219,6 +231,13 @@ func uint64ToStr(v uint64) string {
 func cmpOr(d, def time.Duration) time.Duration {
 	if d > 0 {
 		return d
+	}
+	return def
+}
+
+func cmpOrInt(n, def int) int {
+	if n > 0 {
+		return n
 	}
 	return def
 }
