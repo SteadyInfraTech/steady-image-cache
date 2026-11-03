@@ -267,6 +267,27 @@ func (idx *DigestIndex) Holders(digest string, candidates []string) []string {
 	return out
 }
 
+// Classify splits candidates by what the filters say about digest: the peers whose
+// filter has it, the peers there is no filter for, and the peers whose filter does
+// not have it. Each list keeps the order of candidates, so a ranking the caller
+// already made (same zone first, say) survives.
+func (idx *DigestIndex) Classify(digest string, candidates []string) (holders, unknown, absent []string) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	for _, base := range candidates {
+		f, ok := idx.peers[base]
+		switch {
+		case !ok:
+			unknown = append(unknown, base)
+		case f.Test(digest):
+			holders = append(holders, base)
+		default:
+			absent = append(absent, base)
+		}
+	}
+	return holders, unknown, absent
+}
+
 // keepOnly drops the filters of the peers that are not in active.
 func (idx *DigestIndex) keepOnly(active map[string]bool) {
 	idx.mu.Lock()

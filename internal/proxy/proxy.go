@@ -1083,6 +1083,13 @@ func (p *Proxy) shuffledPeers() []string {
 		rand.Shuffle(len(part), func(i, j int) { part[i], part[j] = part[j], part[i] })
 		out = append(out, part...)
 	}
+	// A peer the finder listed for livePeers but not for the groups (discovery
+	// changed in between) is still a live peer: ask it last.
+	for _, b := range live {
+		if alive[b] {
+			out = append(out, b)
+		}
+	}
 	return out
 }
 
@@ -1140,22 +1147,16 @@ func (p *Proxy) askablePeers(ns, d string) []string {
 }
 
 // rankByFilters puts the peers that probably hold d first, then the ones nothing
-// is known about, then those whose filter says they do not (each group in the
-// order it came in). A filter that is out of date can only cost a request.
+// is known about, then those whose filter says they do not. Inside each of the
+// three the order is the one peers came in (a zone ranking, shuffled within its
+// groups), so the filters never move a farther peer ahead of a nearer one that
+// matches as well. A filter that is out of date can only cost a request.
 func rankByFilters(idx *peer.DigestIndex, d string, peers []string) []string {
-	likely := idx.Holders(d, peers) // holders by filter, then peers without a filter
-	in := make(map[string]bool, len(likely))
-	for _, b := range likely {
-		in[b] = true
-	}
+	holders, unknown, absent := idx.Classify(d, peers)
 	out := make([]string, 0, len(peers))
-	out = append(out, likely...)
-	for _, b := range peers {
-		if !in[b] {
-			out = append(out, b)
-		}
-	}
-	return out
+	out = append(out, holders...)
+	out = append(out, unknown...)
+	return append(out, absent...)
 }
 
 // idleBody cancels the request when no data has arrived for d. It replaces a

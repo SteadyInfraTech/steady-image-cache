@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,5 +65,41 @@ func TestAskablePeersKeepsSameZonePeersFirstUnderTheCap(t *testing.T) {
 		if !slices.Equal(got, same) {
 			t.Fatalf("asked %v, want the two same-zone peers", got)
 		}
+	}
+}
+
+// Among the peers that match, the order given (nearest first) stays: a sparser
+// filter does not move a farther peer ahead.
+func TestRankByFiltersKeepsTheGivenOrderAmongMatches(t *testing.T) {
+	idx := peer.NewDigestIndex()
+	const d = "sha256:aaaa"
+	dense := []string{d}
+	for i := range 3000 {
+		dense = append(dense, "sha256:"+strings.Repeat("c", 3)+strconv.Itoa(i))
+	}
+	filterOf(t, idx, "https://near", dense...)
+	filterOf(t, idx, "https://far", d) // sparser than near
+	got := rankByFilters(idx, d, []string{"https://near", "https://far"})
+	if !slices.Equal(got, []string{"https://near", "https://far"}) {
+		t.Fatalf("order = %v, want the nearest first", got)
+	}
+}
+
+// A peer the groups lack (discovery changed between two reads) is still asked.
+type shrinking struct {
+	calls int
+}
+
+func (s *shrinking) Candidates() []string { return []string{"https://a", "https://b"} }
+func (s *shrinking) CandidateGroups() [][]string {
+	return [][]string{{"https://a"}} // b was removed after Candidates was read
+}
+
+func TestShuffledPeersKeepsALivePeerTheGroupsLack(t *testing.T) {
+	p := &Proxy{peers: &shrinking{}, down: map[string]time.Time{}, now: time.Now, metrics: &metrics.Metrics{}}
+	got := p.shuffledPeers()
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"https://a", "https://b"}) {
+		t.Fatalf("peers = %v, want both", got)
 	}
 }
