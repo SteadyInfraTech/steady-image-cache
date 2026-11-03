@@ -145,7 +145,7 @@ func Run(opts Options) error {
 	}
 	if err := apply(opts, targetCertDir, logf); err != nil {
 		if rerr := restoreCerts(before); rerr != nil {
-			return fmt.Errorf("%w (and putting the previous certificates back failed: %v)", err, rerr)
+			return fmt.Errorf("%w (and putting the previous certificates back failed: %w)", err, rerr)
 		}
 		return err
 	}
