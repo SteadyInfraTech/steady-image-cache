@@ -3,7 +3,7 @@ name: steady-image-cache
 description: A node-local, peer-assisted OCI registry cache for Kubernetes and containerd
 type: application
 version: 1.3.0
-appVersion: "1.2.0"
+appVersion: "1.3.0"
 keywords:
   - containerd
   - registry
