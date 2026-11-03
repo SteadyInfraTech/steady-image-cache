@@ -62,4 +62,4 @@ spec:
         severity: warning
       annotations:
         summary: "Node {{ $labels.instance }} sees zero peer caches"
-        description: "Peer discovery is reporting 0 ready peers despite multiple SIC pods existing in the cluster."
+        description: "Pod peer discovery is finding 0 ready peers despite other nodes running in the cluster."
