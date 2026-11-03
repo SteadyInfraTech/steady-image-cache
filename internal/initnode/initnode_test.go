@@ -308,3 +308,40 @@ func TestFailedRunRestoresTheCertificatesItHadChanged(t *testing.T) {
 		})
 	}
 }
+
+// A registry whose configuration cannot be written takes the earlier registries'
+// new configuration back with it.
+func TestFailedRunRestoresTheHostsTomlOfEarlierRegistries(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "tls")
+	host := filepath.Join(tmp, "host")
+	certsD := filepath.Join(host, "etc/containerd/certs.d")
+	if err := os.MkdirAll(filepath.Join(certsD, "a.example"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(src, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"ca.crt", "tls.crt", "tls.key"} {
+		if err := os.WriteFile(filepath.Join(src, n), []byte(n), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := filepath.Join(certsD, "a.example", "hosts.toml")
+	if err := os.WriteFile(old, []byte("server = \"https://old\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// b.example is a file: its directory cannot be made.
+	if err := os.WriteFile(filepath.Join(certsD, "b.example"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Registries: []string{"a.example", "b.example"}, HostPrefix: host, CertsDDir: "/etc/containerd/certs.d",
+		ClientCertDir: "/etc/steady-image-cache", TLSSourceDir: src, MirrorURL: "https://127.0.0.1:5000",
+		Logf: func(string, ...any) {}}
+	if err := Run(opts); err == nil {
+		t.Fatal("Run succeeded although the second registry could not be configured")
+	}
+	if b, _ := os.ReadFile(old); string(b) != "server = \"https://old\"\n" {
+		t.Fatalf("the earlier registry's hosts.toml is %q, want the old one", b)
+	}
+}

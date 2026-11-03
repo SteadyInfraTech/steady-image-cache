@@ -136,16 +136,17 @@ func Run(opts Options) error {
 	targetCertDir := filepath.Join(opts.HostPrefix, opts.ClientCertDir)
 
 	// The certificates and the mirror configuration are one change: containerd
-	// must never be left with a mixed set of certificate files, or with new
-	// certificates for a configuration that failed. Whatever goes wrong below,
+	// must never be left with a mixed set of certificate files, with new
+	// certificates for a configuration that failed, or with the configuration of
+	// some registries changed and not of the others. Whatever goes wrong below,
 	// the files are put back as they were.
-	before, err := snapshotCerts(targetCertDir)
+	before, err := snapshotFiles(managedFiles(opts, targetCertDir))
 	if err != nil {
-		return fmt.Errorf("read the certificates on the node: %w", err)
+		return fmt.Errorf("read the files on the node: %w", err)
 	}
 	if err := apply(opts, targetCertDir, logf); err != nil {
-		if rerr := restoreCerts(before); rerr != nil {
-			return fmt.Errorf("%w (and putting the previous certificates back failed: %w)", err, rerr)
+		if rerr := restoreFiles(before); rerr != nil {
+			return fmt.Errorf("%w (and putting the previous files back failed: %w)", err, rerr)
 		}
 		return err
 	}
@@ -189,11 +190,24 @@ type savedFile struct {
 	existed bool
 }
 
-// snapshotCerts records the certificate files in dir.
-func snapshotCerts(dir string) ([]savedFile, error) {
-	var out []savedFile
+// managedFiles lists the files a run writes: the certificates and the
+// hosts.toml of each registry.
+func managedFiles(opts Options, certDir string) []string {
+	var out []string
 	for _, f := range certFiles {
-		p := filepath.Join(dir, f.name)
+		out = append(out, filepath.Join(certDir, f.name))
+	}
+	certsD := filepath.Join(opts.HostPrefix, opts.CertsDDir)
+	for _, reg := range opts.Registries {
+		out = append(out, filepath.Join(certsD, reg, "hosts.toml"))
+	}
+	return out
+}
+
+// snapshotFiles records the files at paths.
+func snapshotFiles(paths []string) ([]savedFile, error) {
+	var out []savedFile
+	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if errors.Is(err, os.ErrNotExist) {
 			out = append(out, savedFile{path: p})
@@ -211,9 +225,9 @@ func snapshotCerts(dir string) ([]savedFile, error) {
 	return out, nil
 }
 
-// restoreCerts puts the files back as snapshotCerts saw them, removing those
+// restoreFiles puts the files back as snapshotFiles saw them, removing those
 // that were not there. It tries every file and reports the first failure.
-func restoreCerts(saved []savedFile) error {
+func restoreFiles(saved []savedFile) error {
 	var first error
 	for _, f := range saved {
 		var err error
