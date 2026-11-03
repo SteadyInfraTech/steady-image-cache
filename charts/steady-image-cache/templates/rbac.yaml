@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "steady-image-cache.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "steady-image-cache.fullname" . }}

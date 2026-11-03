@@ -1,0 +1,22 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if include "steady-image-cache.adminIsLoopback" . }}
+{{- fail "serviceMonitor.enabled needs config.adminListen on an address Prometheus can reach (for example \"0.0.0.0:5001\"): 127.0.0.1 only accepts the node itself. The admin paths have no authentication; restrict them with a NetworkPolicy or the node firewall." }}
+{{- end }}
+# A headless Service for the ServiceMonitor, which selects Services. The pods
+# use the host network, so the endpoints are the node addresses.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "steady-image-cache.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: metrics
+    port: {{ include "steady-image-cache.adminPort" . }}
+    targetPort: {{ include "steady-image-cache.adminPort" . }}
+{{- end }}

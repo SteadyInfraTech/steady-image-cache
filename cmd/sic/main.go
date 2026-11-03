@@ -16,6 +16,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/config"
 	cd "github.com/SteadyInfraTech/steady-image-cache/internal/containerd"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/health"
+	"github.com/SteadyInfraTech/steady-image-cache/internal/initnode"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/peer"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/proxy"
@@ -59,11 +60,22 @@ func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestInd
 			rebuildFilter(st, idx)
 		}
 	}
+// runInitNode is `sic init-node`: once, or repeatedly with SIC_INIT_INTERVAL.
+func runInitNode() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return initnode.RunFromEnv(ctx)
 }
 
 func main() {
 	if version.Requested(os.Args[1:]) {
 		fmt.Println(version.String())
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "init-node" {
+		if err := runInitNode(); err != nil {
+			log.Fatalf("init-node: %v", err)
+		}
 		return
 	}
 	log.Print(version.String())

@@ -1,0 +1,43 @@
+{{- if .Values.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.tls.secretName }}
+  dnsNames:
+    - {{ .Values.tls.serverName }}
+  ipAddresses:
+    - 127.0.0.1
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+    - client auth
+  issuerRef:
+    {{- toYaml .Values.tls.certManager.issuerRef | nindent 4 }}
+{{- if .Values.initContainer.enabled }}
+---
+# containerd's own client certificate: client auth only, and without the DNS name
+# tls.serverName, which would make containerd count as another SIC node.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}-containerd-client
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.initContainer.clientTLS.secretName }}
+  commonName: {{ include "steady-image-cache.fullname" . }}-containerd-client
+  usages:
+    - digital signature
+    - key encipherment
+    - client auth
+  issuerRef:
+    {{- toYaml .Values.tls.certManager.issuerRef | nindent 4 }}
+{{- end }}
+{{- end }}

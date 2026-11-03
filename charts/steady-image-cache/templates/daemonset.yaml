@@ -1,0 +1,291 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "steady-image-cache.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "steady-image-cache.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "steady-image-cache.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "steady-image-cache.fullname" . }}
+      hostNetwork: true
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.initContainer.enabled }}
+      initContainers:
+      - name: sic-init
+        image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
+        imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+        args: ["init-node"]
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        env:
+        - name: SIC_INIT_REGISTRIES
+          value: {{ join "," .Values.initContainer.registries | quote }}
+        - name: SIC_INIT_CAPABILITIES
+          value: {{ join "," .Values.initContainer.capabilities | quote }}
+        - name: SIC_INIT_HOST_PREFIX
+          value: "/host"
+        - name: SIC_INIT_CERTS_D_DIR
+          value: {{ .Values.initContainer.hostPaths.certsD | quote }}
+        - name: SIC_INIT_CLIENT_CERT_DIR
+          value: {{ .Values.initContainer.hostPaths.clientCert | quote }}
+        - name: SIC_INIT_TLS_DIR
+          value: "/tls-client"
+        - name: SIC_INIT_MIRROR_URL
+          value: "https://127.0.0.1:{{ .Values.config.peerPort }}"
+        volumeMounts:
+        - name: host-certs-d
+          mountPath: /host{{ .Values.initContainer.hostPaths.certsD }}
+        - name: host-client-cert
+          mountPath: /host{{ .Values.initContainer.hostPaths.clientCert }}
+        - name: client-tls
+          mountPath: /tls-client
+          readOnly: true
+        {{- with .Values.initContainer.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      containers:
+      {{- if and .Values.initContainer.enabled (ne (toString .Values.initContainer.refreshInterval) "") (ne (toString .Values.initContainer.refreshInterval) "0") }}
+      # Keeps the node's copy of containerd's client certificate current when
+      # the Secret is renewed in place (cert-manager does that).
+      - name: sic-init-refresh
+        image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
+        imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+        args: ["init-node"]
+        securityContext:
+          runAsUser: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        env:
+        - name: SIC_INIT_INTERVAL
+          value: {{ .Values.initContainer.refreshInterval | quote }}
+        - name: SIC_INIT_REGISTRIES
+          value: {{ join "," .Values.initContainer.registries | quote }}
+        - name: SIC_INIT_CAPABILITIES
+          value: {{ join "," .Values.initContainer.capabilities | quote }}
+        - name: SIC_INIT_HOST_PREFIX
+          value: "/host"
+        - name: SIC_INIT_CERTS_D_DIR
+          value: {{ .Values.initContainer.hostPaths.certsD | quote }}
+        - name: SIC_INIT_CLIENT_CERT_DIR
+          value: {{ .Values.initContainer.hostPaths.clientCert | quote }}
+        - name: SIC_INIT_TLS_DIR
+          value: "/tls-client"
+        - name: SIC_INIT_MIRROR_URL
+          value: "https://127.0.0.1:{{ .Values.config.peerPort }}"
+        volumeMounts:
+        - name: host-certs-d
+          mountPath: /host{{ .Values.initContainer.hostPaths.certsD }}
+        - name: host-client-cert
+          mountPath: /host{{ .Values.initContainer.hostPaths.clientCert }}
+        - name: client-tls
+          mountPath: /tls-client
+          readOnly: true
+        {{- with .Values.initContainer.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      - name: sic
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          runAsUser: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        terminationMessagePolicy: FallbackToLogsOnError
+        ports:
+        - name: registry
+          containerPort: {{ .Values.config.peerPort }}
+          hostPort: {{ .Values.config.peerPort }}
+        env:
+        - name: SIC_LISTEN
+          value: {{ .Values.config.listen | quote }}
+        - name: SIC_ADMIN_LISTEN
+          value: {{ .Values.config.adminListen | quote }}
+        - name: SIC_CACHE_DIR
+          value: {{ .Values.config.cacheDir | quote }}
+        - name: SIC_INSECURE
+          value: {{ .Values.config.insecure | quote }}
+        - name: SIC_KUBERNETES_DISCOVERY
+          value: "true"
+        - name: SIC_POD_LABEL_SELECTOR
+          value: "app={{ include "steady-image-cache.name" . }}"
+        - name: SIC_PEER_PORT
+          value: {{ .Values.config.peerPort | quote }}
+        - name: SIC_UPSTREAM_TIMEOUT
+          value: {{ .Values.config.upstreamTimeout | quote }}
+        - name: SIC_IMPORT_INTERVAL
+          value: {{ .Values.config.importInterval | quote }}
+        - name: SIC_PEER_TIMEOUT
+          value: {{ .Values.config.peerTimeout | quote }}
+        - name: SIC_PEER_BACKOFF
+          value: {{ .Values.config.peerBackoff | quote }}
+        - name: SIC_PEER_MAX_TRIES
+          value: {{ .Values.config.peerMaxTries | quote }}
+        - name: SIC_COORDINATE
+          value: {{ .Values.config.coordinate | quote }}
+        - name: SIC_COORDINATE_WAIT
+          value: {{ .Values.config.coordWait | quote }}
+        - name: SIC_PEER_WATCH
+          value: {{ .Values.config.peerWatch | quote }}
+        - name: SIC_MIN_FREE_BYTES
+          value: {{ int64 .Values.config.minFreeBytes | quote }}
+        - name: SIC_MIN_FREE_PERCENT
+          value: {{ int64 .Values.config.minFreePercent | quote }}
+        {{- if gt (int .Values.config.maxCacheBytes) 0 }}
+        - name: SIC_MAX_CACHE_BYTES
+          value: {{ int64 .Values.config.maxCacheBytes | quote }}
+        {{- end }}
+        - name: SIC_SCRUB_INTERVAL
+          value: {{ .Values.config.scrubInterval | quote }}
+        - name: SIC_SCRUB_RATE
+          value: {{ int64 .Values.config.scrubRate | quote }}
+        - name: SIC_TAG_TTL
+          value: {{ .Values.config.tagTTL | quote }}
+        - name: SIC_UPSTREAM_ENABLED
+          value: {{ .Values.config.upstreamEnabled | quote }}
+        - name: SIC_UPSTREAM_REGISTRIES
+          value: {{ join "," .Values.config.upstreamRegistries | quote }}
+        - name: SIC_PROTECTED_REGISTRIES
+          value: {{ join "," .Values.config.protectedRegistries | quote }}
+        - name: SIC_CONTAINERD_IMPORT
+          value: {{ .Values.config.containerdImport | quote }}
+        - name: SIC_CONTAINERD_ADDRESS
+          value: {{ .Values.config.containerdAddress | quote }}
+        - name: SIC_CONTAINERD_NAMESPACE
+          value: {{ .Values.config.containerdNamespace | quote }}
+        {{- if .Values.config.containerdContentDir }}
+        - name: SIC_CONTAINERD_CONTENT_DIR
+          value: {{ .Values.config.containerdContentDir | quote }}
+        {{- end }}
+        - name: SIC_TLS_CERT
+          value: "/tls/tls.crt"
+        - name: SIC_TLS_KEY
+          value: "/tls/tls.key"
+        - name: SIC_TLS_CA
+          value: "/tls/ca.crt"
+        - name: SIC_TLS_CLIENT_CERT
+          value: "/tls/tls.crt"
+        - name: SIC_TLS_CLIENT_KEY
+          value: "/tls/tls.key"
+        - name: SIC_TLS_SERVER_NAME
+          value: {{ .Values.tls.serverName | quote }}
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        volumeMounts:
+        - name: cache
+          mountPath: {{ .Values.config.cacheDir }}
+        - name: containerd-socket
+          mountPath: {{ .Values.config.containerdAddress }}
+          readOnly: true
+        {{- if .Values.config.containerdContentDir }}
+        - name: containerd-content
+          mountPath: {{ .Values.config.containerdContentDir }}
+          readOnly: true
+        {{- end }}
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            scheme: HTTP
+            host: {{ include "steady-image-cache.adminHost" . | quote }}
+            path: /readyz
+            port: {{ include "steady-image-cache.adminPort" . }}
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            scheme: HTTP
+            host: {{ include "steady-image-cache.adminHost" . | quote }}
+            path: /healthz
+            port: {{ include "steady-image-cache.adminPort" . }}
+          initialDelaySeconds: 10
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 6
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      volumes:
+      - name: cache
+        hostPath:
+          path: {{ .Values.config.cacheDir }}
+          type: DirectoryOrCreate
+      - name: containerd-socket
+        hostPath:
+          path: {{ .Values.config.containerdAddress }}
+          type: Socket
+      {{- if .Values.config.containerdContentDir }}
+      - name: containerd-content
+        hostPath:
+          path: {{ .Values.config.containerdContentDir }}
+          type: Directory
+      {{- end }}
+      - name: tls
+        secret:
+          secretName: {{ .Values.tls.secretName }}
+          defaultMode: 0400
+      {{- if .Values.initContainer.enabled }}
+      - name: client-tls
+        secret:
+          secretName: {{ .Values.initContainer.clientTLS.secretName }}
+          defaultMode: 0400
+      - name: host-certs-d
+        hostPath:
+          path: {{ .Values.initContainer.hostPaths.certsD }}
+          type: DirectoryOrCreate
+      - name: host-client-cert
+        hostPath:
+          path: {{ .Values.initContainer.hostPaths.clientCert }}
+          type: DirectoryOrCreate
+      {{- end }}

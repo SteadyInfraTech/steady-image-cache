@@ -213,6 +213,8 @@ Metrics on the admin (or main) listener, all counters unless noted: `sic_local_h
 
 The others are named where their behaviour is described above.
 
+Pre-packaged Prometheus alerting rules (`deploy/monitoring/prometheus-rules.yaml`) and an enterprise Grafana dashboard (`deploy/monitoring/grafana-dashboard.json`) are available in the repository.
+
 `sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods once (with `resourceVersion=0`, which the API server answers from its cache instead of reading etcd) and then follows them with a watch, keeping only Ready ones, so a neighbour that becomes Ready, or goes away, is known within moments. The watch needs the `watch` verb on pods, which the sample RBAC grants; without it the node says so in its log and lists every 30 seconds instead. It lists again when the server ends the watch (after five minutes), when the server says it has lost the point to resume from, and when a miss finds no peers (at most every 5 seconds). `SIC_PEER_WATCH=false` always lists every 30 seconds. While a list or watch cannot be made, the node keeps the peers it knew.
 
 ## Large clusters
@@ -229,6 +231,20 @@ Two sample configurations, to be installed on each node with the certificate pat
 
 * `deploy/containerd/mirror-hosts.toml` is the one to start from when the nodes can reach the registries (or an internal registry). Install it as `/etc/containerd/certs.d/<registry>/hosts.toml`, once per registry you want cached. SIC is a mirror: containerd asks it first and goes on to the registry when SIC does not answer or does not have the content. A node whose SIC pod is down, restarting or being upgraded still pulls, and SIC's own image is never held hostage by SIC. The sample advertises only the `pull` capability, not `resolve`: containerd asks the registry which digest a tag names, then fetches the manifest and layers by digest from SIC. A tag that has moved is therefore never answered from an old cached or imported alias, which SIC cannot rule out when it has no way to ask the registry itself. Add `resolve` only when upstream fallback is enabled for that registry (`SIC_UPSTREAM_ENABLED=true` and the registry in `SIC_UPSTREAM_REGISTRIES`); SIC then confirms tags against it after `SIC_TAG_TTL`. A registry with a private CA also needs a root-level `ca` entry in its `hosts.toml` (commented in the sample): the `ca` under the SIC host trusts SIC only, so without one the fallback to the registry fails TLS verification. To have SIC fetch and cache what no node has yet, enable upstream fallback for that registry; without it a miss is a `404` and containerd takes the content from the registry directly, uncached.
 * `deploy/containerd/hosts.toml` makes SIC the only host for every registry (`_default`). Use it only when nothing but the peers can supply images, as in an air-gapped cluster without an internal registry. containerd cannot fall through to anything else then, so read "Upgrading" below first.
+
+### Automated containerd setup (`sic init-node`)
+
+Setting up `/etc/containerd/certs.d` and client certificates manually across many nodes can be automated using `sic init-node`. When run on a node or as an `initContainer` in a DaemonSet, it automatically copies client certificates with secure permissions (`0600` for keys, `0644` for certs) and generates `hosts.toml` for the configured registries:
+
+```bash
+# Direct run on a node:
+sic init-node
+
+# Or inside an initContainer with host root mounted at /host:
+SIC_INIT_HOST_PREFIX=/host SIC_INIT_REGISTRIES=docker.io,ghcr.io sic init-node
+```
+
+The Helm chart in `charts/steady-image-cache` includes this init container enabled by default. It copies containerd's client pair from its **own** Secret (`initContainer.clientTLS.secretName`, mounted at `/tls-client`), never from the DaemonSet's `tls` Secret: that key is the node's identity, and a certificate that lists `tls.serverName` would make containerd count as another SIC node (see "TLS"). With `tls.certManager.enabled` the chart creates that client-only certificate (client auth, no DNS name); otherwise create the Secret (`ca.crt`, `tls.crt`, `tls.key`) yourself. A sidecar (`initContainer.refreshInterval`, default 5 minutes, `0` for none) repeats the setup, so a renewed certificate reaches the node's copy before the old one expires: `sic init-node` does that itself when `SIC_INIT_INTERVAL` is set, keeping the previous files when a run fails. The chart derives the probe port from `config.adminListen`; `serviceMonitor.enabled` needs an `adminListen` that Prometheus can reach (it refuses the loopback default) and creates the headless Service the monitor selects. The admin paths have no authentication: limit who can reach them.
 
 ### The import without a second copy
 
@@ -331,6 +347,29 @@ A fourth phase installs the sample mirror configuration, `deploy/containerd/mirr
 * `GET /readyz`
 
 ## Deployment
+
+### Helm Chart (Recommended)
+
+A production-ready Helm chart is provided under `charts/steady-image-cache` and published as an OCI artifact to GitHub Packages. It supports automated containerd `hosts.toml` configuration via an init container, cert-manager integration, ServiceMonitors, and PrometheusRules:
+
+```bash
+# Install directly from GitHub Container Registry (OCI):
+helm install steady-image-cache oci://ghcr.io/steadyinfratech/charts/steady-image-cache \
+  --version 1.3.0 \
+  --namespace kube-system \
+  --set initContainer.enabled=true \
+  --set config.upstreamEnabled=true \
+  --set config.upstreamRegistries="{docker.io,ghcr.io}"
+
+# Or from local source:
+helm install steady-image-cache ./charts/steady-image-cache \
+  --namespace kube-system \
+  --set initContainer.enabled=true \
+  --set config.upstreamEnabled=true \
+  --set config.upstreamRegistries="{docker.io,ghcr.io}"
+```
+
+### Manifest
 
 `deploy/daemonset.yaml` is a starting point, not a finished product; it needs the TLS secret `steady-image-cache-tls` and an image reference you have chosen. What it does, and why:
 

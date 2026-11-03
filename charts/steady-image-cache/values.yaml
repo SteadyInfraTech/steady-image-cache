@@ -1,0 +1,117 @@
+image:
+  repository: ghcr.io/steadyinfratech/steady-image-cache
+  pullPolicy: IfNotPresent
+  tag: "v1.2.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# initContainer automatically provisions containerd mirror configuration (hosts.toml)
+# and distributes client certificates onto the node filesystem.
+initContainer:
+  enabled: true
+  image:
+    repository: ghcr.io/steadyinfratech/steady-image-cache
+    tag: "v1.2.0"
+    pullPolicy: IfNotPresent
+  # Registries to configure mirrors for (e.g. ["docker.io", "ghcr.io"] or ["_default"])
+  registries:
+    - docker.io
+    - ghcr.io
+  capabilities:
+    - pull
+  # containerd's own client certificate: a client-only pair from the same CA
+  # (ca.crt, tls.crt, tls.key) that does NOT list tls.serverName, so containerd
+  # is never taken for another node. Never the DaemonSet's own Secret (tls.secretName):
+  # its key would be copied onto the node. With tls.certManager.enabled the chart
+  # creates this Secret; otherwise create it yourself.
+  clientTLS:
+    secretName: "steady-image-cache-containerd-client"
+  # How often the node's copy of that certificate is compared with the Secret
+  # (a sidecar does it, so a renewed certificate reaches containerd). "0" runs
+  # the setup once, at pod start.
+  refreshInterval: 5m
+  hostPaths:
+    certsD: /etc/containerd/certs.d
+    clientCert: /etc/steady-image-cache
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+    requests:
+      cpu: 10m
+      memory: 16Mi
+
+config:
+  listen: "0.0.0.0:5000"
+  peerPort: 5000
+  # Plain-HTTP /healthz, /readyz and /metrics. The probes use its port. The
+  # default only accepts the node itself; serviceMonitor.enabled needs an address
+  # Prometheus can reach (e.g. "0.0.0.0:5001"), and these paths have no authentication.
+  adminListen: "127.0.0.1:5001"
+  cacheDir: "/var/lib/steady-image-cache"
+  insecure: false
+  peerTimeout: 5s
+  peerBackoff: 30s
+  peerMaxTries: 4
+  coordinate: true
+  coordWait: 20s
+  peerWatch: true
+  minFreeBytes: 1073741824       # 1 GiB reserve
+  minFreePercent: 20             # 20% filesystem reserve
+  maxCacheBytes: 0               # 0 = uncapped (governed by reserve)
+  scrubInterval: 24h
+  scrubRate: 33554432            # 32 MiB/s
+  tagTTL: 10m
+  upstreamEnabled: false
+  upstreamRegistries: []         # e.g. ["docker.io", "ghcr.io"]
+  protectedRegistries: []        # must be a subset of upstreamRegistries
+  upstreamTimeout: 30s
+  containerdImport: true
+  containerdNamespace: "k8s.io"
+  containerdAddress: "/run/containerd/containerd.sock"
+  # containerd content directory for zero-copy symlinking:
+  containerdContentDir: "/var/lib/containerd/io.containerd.content.v1.content"
+  importInterval: 5m
+
+tls:
+  secretName: "steady-image-cache-tls"
+  serverName: "steady-image-cache"
+  certManager:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 512Mi
+
+priorityClassName: system-node-critical
+
+tolerations:
+  - operator: Exists
+
+nodeSelector: {}
+affinity: {}
+
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  scrapeTimeout: 10s
+  labels: {}
+
+prometheusRule:
+  enabled: false
+  labels: {}
+  rules:
+    diskFull: true
+    corruptBlobs: true
+    storeErrors: true
+    highVerifyErrors: true
+    coordinatorDegraded: true
+    noPeers: true
