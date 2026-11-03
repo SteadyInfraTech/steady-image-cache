@@ -4,6 +4,10 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+## 1.3.0 - 2026-11-04
+
+Upgrading from 1.2.x needs only the new image: everything below is new and optional, and no existing setting, metric or API path changes. The sample DaemonSet now names `:v1.3.0`.
+
 - New `sic init-node` subcommand: sets up a node for containerd. It copies containerd's client certificate pair (`ca.crt`, `tls.crt`, `tls.key`; key mode 0600) to the node and writes a `hosts.toml` for each registry in `SIC_INIT_REGISTRIES`. With `SIC_INIT_INTERVAL` it repeats the setup, so a renewed certificate reaches the node; a failed run keeps the previous files. Use a client-only pair for it, never the DaemonSet's own key.
 - New Helm chart `charts/steady-image-cache` (DaemonSet, RBAC, optional cert-manager `Certificate`s, `ServiceMonitor` and `PrometheusRule`), published to `oci://ghcr.io/steadyinfratech/charts` for each release tag (the chart version is the tag's). containerd gets a certificate of its own (`initContainer.clientTLS.secretName`, created by the chart with cert-manager: client auth only, no DNS name) and a sidecar keeps the node's copy current; the probes follow `config.adminListen`; `serviceMonitor.enabled` needs an `adminListen` Prometheus can reach.
 - New `deploy/monitoring/`: Prometheus alerting rules (disk, store errors, corrupt blobs, coordinator fallbacks, no peers) and a Grafana dashboard (selectable Prometheus data source) for bandwidth served from the cache, peer streams and hit distribution.
