@@ -237,7 +237,7 @@ spec:
         readinessProbe:
           httpGet:
             scheme: HTTP
-            host: 127.0.0.1
+            host: {{ include "steady-image-cache.adminHost" . | quote }}
             path: /readyz
             port: {{ include "steady-image-cache.adminPort" . }}
           initialDelaySeconds: 2
@@ -245,7 +245,7 @@ spec:
         livenessProbe:
           httpGet:
             scheme: HTTP
-            host: 127.0.0.1
+            host: {{ include "steady-image-cache.adminHost" . | quote }}
             path: /healthz
             port: {{ include "steady-image-cache.adminPort" . }}
           initialDelaySeconds: 10

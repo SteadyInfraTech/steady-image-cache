@@ -3,6 +3,7 @@ package initnode
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -133,6 +134,28 @@ func Run(opts Options) error {
 	}
 
 	targetCertDir := filepath.Join(opts.HostPrefix, opts.ClientCertDir)
+
+	// The certificates and the mirror configuration are one change: containerd
+	// must never be left with a mixed set of certificate files, or with new
+	// certificates for a configuration that failed. Whatever goes wrong below,
+	// the files are put back as they were.
+	before, err := snapshotCerts(targetCertDir)
+	if err != nil {
+		return fmt.Errorf("read the certificates on the node: %w", err)
+	}
+	if err := apply(opts, targetCertDir, logf); err != nil {
+		if rerr := restoreCerts(before); rerr != nil {
+			return fmt.Errorf("%w (and putting the previous certificates back failed: %v)", err, rerr)
+		}
+		return err
+	}
+
+	logf("init-node: containerd host configuration completed successfully")
+	return nil
+}
+
+// apply provisions the certificates and writes the mirror configuration.
+func apply(opts Options, targetCertDir string, logf func(string, ...any)) error {
 	logf("init-node: provisioning client certificates from %s to %s", opts.TLSSourceDir, targetCertDir)
 	if err := provisionCerts(opts.TLSSourceDir, targetCertDir, logf); err != nil {
 		return fmt.Errorf("provision certificates: %w", err)
@@ -145,9 +168,65 @@ func Run(opts Options) error {
 			return fmt.Errorf("configure registry %q: %w", reg, err)
 		}
 	}
-
-	logf("init-node: containerd host configuration completed successfully")
 	return nil
+}
+
+// certFiles are the certificate files init-node keeps on the node, with their modes.
+var certFiles = []struct {
+	name string
+	mode os.FileMode
+}{
+	{"ca.crt", 0o644},
+	{"tls.crt", 0o644},
+	{"tls.key", 0o600},
+}
+
+// savedFile is a certificate file as it was before a run.
+type savedFile struct {
+	path    string
+	data    []byte
+	mode    os.FileMode
+	existed bool
+}
+
+// snapshotCerts records the certificate files in dir.
+func snapshotCerts(dir string) ([]savedFile, error) {
+	var out []savedFile
+	for _, f := range certFiles {
+		p := filepath.Join(dir, f.name)
+		data, err := os.ReadFile(p)
+		if errors.Is(err, os.ErrNotExist) {
+			out = append(out, savedFile{path: p})
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		fi, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, savedFile{path: p, data: data, mode: fi.Mode().Perm(), existed: true})
+	}
+	return out, nil
+}
+
+// restoreCerts puts the files back as snapshotCerts saw them, removing those
+// that were not there. It tries every file and reports the first failure.
+func restoreCerts(saved []savedFile) error {
+	var first error
+	for _, f := range saved {
+		var err error
+		if f.existed {
+			err = writeAtomic(f.path, f.data, f.mode)
+		} else if e := os.Remove(f.path); e != nil && !errors.Is(e, os.ErrNotExist) {
+			err = e
+		}
+		if err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // RunFromEnv reads settings from the environment and executes the initialization
@@ -192,14 +271,7 @@ func provisionCerts(srcDir, dstDir string, logf func(string, ...any)) error {
 		return err
 	}
 
-	files := []struct {
-		name string
-		mode os.FileMode
-	}{
-		{"ca.crt", 0o644},
-		{"tls.crt", 0o644},
-		{"tls.key", 0o600},
-	}
+	files := certFiles
 
 	// Everything is read before anything is written: a source that cannot be read
 	// (a half-finished rotation) must not leave a new certificate beside the old key.

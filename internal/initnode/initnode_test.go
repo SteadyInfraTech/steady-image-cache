@@ -251,3 +251,60 @@ func TestFailedRunLeavesNoNewCertificateBesideTheOldKey(t *testing.T) {
 		t.Fatalf("the node's certificate is %q after a failed run, want the old one", b)
 	}
 }
+
+// If the mirror configuration cannot be written, the certificates of the same
+// run are not kept: the node is left as it was, or clean if it was new.
+func TestFailedRunRestoresTheCertificatesItHadChanged(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		previous bool
+	}{{"node had certificates", true}, {"new node", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			src := filepath.Join(tmp, "tls")
+			host := filepath.Join(tmp, "host")
+			if err := os.MkdirAll(src, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range map[string]string{"ca.crt": "ca2", "tls.crt": "cert2", "tls.key": "key2"} {
+				if err := os.WriteFile(filepath.Join(src, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			nodeDir := filepath.Join(host, "etc/steady-image-cache")
+			if tc.previous {
+				if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for name, body := range map[string]string{"ca.crt": "ca1", "tls.crt": "cert1", "tls.key": "key1"} {
+					if err := os.WriteFile(filepath.Join(nodeDir, name), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// certs.d is a file, so no registry directory can be made in it.
+			if err := os.MkdirAll(filepath.Join(host, "etc/containerd"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(host, "etc/containerd/certs.d"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{Registries: []string{"docker.io"}, HostPrefix: host, CertsDDir: "/etc/containerd/certs.d",
+				ClientCertDir: "/etc/steady-image-cache", TLSSourceDir: src, MirrorURL: "https://127.0.0.1:5000",
+				Logf: func(string, ...any) {}}
+			if err := Run(opts); err == nil {
+				t.Fatal("Run succeeded although the mirror configuration could not be written")
+			}
+			for name, want := range map[string]string{"ca.crt": "ca1", "tls.crt": "cert1", "tls.key": "key1"} {
+				b, err := os.ReadFile(filepath.Join(nodeDir, name))
+				if tc.previous {
+					if err != nil || string(b) != want {
+						t.Fatalf("%s = %q (%v), want the previous %q", name, b, err, want)
+					}
+				} else if err == nil {
+					t.Fatalf("%s was left on a node that had none", name)
+				}
+			}
+		})
+	}
+}

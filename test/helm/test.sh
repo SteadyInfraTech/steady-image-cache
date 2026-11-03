@@ -72,6 +72,13 @@ grep -q -A1 'name: SIC_UPSTREAM_TIMEOUT' "$TMP_DIR/admin.yaml"
 grep -q 'value: "45s"' "$TMP_DIR/admin.yaml"
 grep -q 'value: "7m"' "$TMP_DIR/admin.yaml"
 
+echo "=== Testing template: probes connect to the configured admin address ==="
+helm template sic "$CHART_DIR" --set config.adminListen=10.1.2.3:5099 > "$TMP_DIR/host.yaml"
+test "$(grep -c 'host: "10.1.2.3"' "$TMP_DIR/host.yaml")" = 2
+helm template sic "$CHART_DIR" --set config.adminListen=0.0.0.0:5099 | grep -q 'host: "127.0.0.1"'
+helm template sic "$CHART_DIR" | grep -q 'host: "127.0.0.1"'
+helm template sic "$CHART_DIR" --set 'config.adminListen=[::]:5099' | grep -q 'host: "::1"'
+
 echo "=== Testing template: containerd gets a client-only certificate, never the pod's key ==="
 # the init containers mount the client Secret, not the DaemonSet's own
 awk '/name: sic-init$/,/name: sic$/' "$TMP_DIR/default.yaml" > "$TMP_DIR/init-part.yaml"

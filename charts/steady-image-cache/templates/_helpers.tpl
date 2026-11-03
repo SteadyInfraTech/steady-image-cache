@@ -69,3 +69,16 @@ True when config.adminListen only accepts connections from the node itself.
 {{- define "steady-image-cache.adminIsLoopback" -}}
 {{- if or (hasPrefix "127." .Values.config.adminListen) (hasPrefix "localhost:" .Values.config.adminListen) (hasPrefix "[::1]:" .Values.config.adminListen) -}}true{{- end -}}
 {{- end }}
+
+{{/*
+Host the probes connect to: the address config.adminListen binds, or loopback
+when it binds every address (or only loopback).
+*/}}
+{{- define "steady-image-cache.adminHost" -}}
+{{- $l := .Values.config.adminListen -}}
+{{- $host := trimSuffix (printf ":%s" (include "steady-image-cache.adminPort" .)) $l | trimPrefix "[" | trimSuffix "]" -}}
+{{- if or (eq $host "") (eq $host "0.0.0.0") -}}127.0.0.1
+{{- else if eq $host "::" -}}::1
+{{- else -}}{{ $host }}
+{{- end -}}
+{{- end }}
