@@ -1156,3 +1156,21 @@ func (s *Store) Resolve(ns, repo, ref string) (string, bool) {
 	d, ok := s.aliases[key(ns, repo, ref)]
 	return d, ok
 }
+
+// Digests lists the blobs the store holds (complete ones, copies and links
+// alike), as "sha256:<hex>". It reads the directory only, nothing is hashed. A
+// directory that cannot be read is an error, not an empty store.
+func (s *Store) Digests() ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(s.root, "blobs", "sha256"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".part-") {
+			continue
+		}
+		out = append(out, "sha256:"+e.Name())
+	}
+	return out, nil
+}

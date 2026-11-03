@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,43 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/version"
 )
+
+// filterRebuildEvery is how often the filter other nodes fetch is made again from
+// what the store holds, which also forgets blobs that were evicted.
+const filterRebuildEvery = time.Minute
+
+var filterMu sync.Mutex
+
+// rebuildFilter makes the node's own digest filter from what the store holds. If
+// the store cannot be listed the filter stays as it was: an empty one would tell
+// the peers this node holds nothing.
+func rebuildFilter(st *store.Store, idx *peer.DigestIndex) {
+	// One at a time, listing and replacing together: an older listing must not
+	// replace the filter made from a newer one (the import and the timer both call it).
+	filterMu.Lock()
+	defer filterMu.Unlock()
+	ds, err := st.Digests()
+	if err != nil {
+		log.Printf("digest filter: not rebuilt: %v", err)
+		return
+	}
+	idx.Rebuild(ds)
+}
+
+// keepFilterCurrent builds the node's own digest filter again every interval
+// until ctx ends (the first one is built before gossip starts).
+func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestIndex, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rebuildFilter(st, idx)
+		}
+	}
+}
 
 // runInitNode is `sic init-node`: once, or repeatedly with SIC_INIT_INTERVAL.
 func runInitNode() error {
@@ -108,10 +146,19 @@ func main() {
 		scheme = "https"
 	}
 	var self string // this node as the others list it, for coordination
-	if cfg.KubernetesDiscovery {
+	if cfg.KubernetesDiscovery || cfg.EndpointSliceDiscovery {
 		if ip := os.Getenv("HOST_IP"); net.ParseIP(ip) != nil {
 			self = scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(cfg.PeerPort))
 		}
+	}
+
+	// Zone-aware routing: a ZoneResolver tracks which zone each peer lives in.
+	// It is populated by the EndpointSlice watcher (via the zone field on each
+	// endpoint). The pod watcher does not carry zone info directly, but the
+	// downward-API NODE_ZONE covers this node's own zone for coord ranking.
+	zoneResolver := peer.NewZoneResolver()
+
+	if cfg.KubernetesDiscovery {
 		k, err := peer.NewKubernetes(cfg.PodNamespace, cfg.PodLabelSelector, os.Getenv("HOST_IP"), cfg.PeerPort, scheme)
 		if err != nil {
 			log.Printf("kubernetes discovery disabled: %v", err)
@@ -123,9 +170,51 @@ func main() {
 			go k.Run(ctx, 30*time.Second, log.Printf)
 		}
 	}
+
+	// EndpointSlice discovery: recommended for clusters >500 nodes.
+	// Runs alongside pod-based discovery; Multi deduplicates overlapping results.
+	if cfg.EndpointSliceDiscovery {
+		es, err := peer.NewEndpointSliceKubernetes(
+			cfg.PodNamespace, cfg.PodLabelSelector,
+			os.Getenv("HOST_IP"), cfg.PeerPort, scheme,
+			zoneResolver,
+		)
+		if err != nil {
+			log.Printf("endpointslice discovery disabled: %v", err)
+		} else {
+			es.EnableWatch()
+			finders = append(finders, es)
+			go es.Run(ctx, 30*time.Second, log.Printf)
+			log.Printf("EndpointSlice discovery enabled (SIC_ENDPOINTSLICE_DISCOVERY=true)")
+		}
+	}
+
+	// Zone-aware peer ordering: wrap the combined finder so same-AZ peers are
+	// tried first, reducing cross-zone data transfer costs on AWS/GCP/Azure.
+	// NODE_ZONE is injected via the Kubernetes downward API from the
+	// topology.kubernetes.io/zone node label.
+	var activeFinder peer.Finder = finders
+	if cfg.NodeZone != "" {
+		zaf := &peer.ZoneAwareFinder{
+			Inner:     finders,
+			LocalZone: cfg.NodeZone,
+			Resolver:  zoneResolver,
+		}
+		activeFinder = zaf
+		log.Printf("zone-aware routing enabled: local zone=%q", cfg.NodeZone)
+	}
+
+	// Digest gossip: nodes exchange Bloom filters of the blobs they hold, so a
+	// miss asks the nodes that probably have the blob first. Started below,
+	// once the proxy exists (it supplies the peer client and the peer check).
+	var digestIndex *peer.DigestIndex
+	if cfg.DigestGossip {
+		digestIndex = peer.NewDigestIndex()
+	}
+
 	// How many peers this node would ask right now. Zero on a node whose
 	// neighbours exist but are not Ready yet, or have not been listed yet.
-	m.Funcs = append(m.Funcs, metrics.Func{Name: "sic_peers", Type: "gauge", Value: func() int64 { return int64(len(finders.Candidates())) }})
+	m.Funcs = append(m.Funcs, metrics.Func{Name: "sic_peers", Type: "gauge", Value: func() int64 { return int64(len(activeFinder.Candidates())) }})
 
 	// The import walks the whole containerd content store, which can take a long
 	// time on a busy node. It runs in the background so the registry is already
@@ -133,9 +222,17 @@ func main() {
 	if cfg.ContainerdImport {
 		imp := &cd.Importer{Address: cfg.ContainerdAddress, Namespace: cfg.ContainerdNamespace, Store: st, Metrics: m, ContentDir: cfg.ContainerdContentDir, Protect: len(cfg.ProtectedRegistries) > 0}
 		go func() {
+			// What the import added is advertised to the peers at once (also after a
+			// partial failure), not at the next rebuild of the filter.
+			advertise := func() {
+				if digestIndex != nil {
+					rebuildFilter(st, digestIndex)
+				}
+			}
 			if err := imp.Import(ctx); err != nil {
 				log.Printf("initial %s import: %v", imp, err)
 			}
+			advertise()
 			t := time.NewTicker(cfg.ImportInterval)
 			defer t.Stop()
 			for {
@@ -146,12 +243,13 @@ func main() {
 					if err := imp.Import(ctx); err != nil {
 						log.Printf("containerd import: %v", err)
 					}
+					advertise()
 				}
 			}
 		}()
 	}
 
-	h, err := proxy.New(st, finders, m, proxy.Options{
+	h, err := proxy.New(st, activeFinder, m, proxy.Options{
 		Timeout:             cfg.UpstreamTimeout,
 		PeerTimeout:         cfg.PeerTimeout,
 		PeerBackoff:         cfg.PeerBackoff,
@@ -165,6 +263,7 @@ func main() {
 		ProtectedRegistries: cfg.ProtectedRegistries,
 		TLS:                 clientTLS,
 		ServerName:          cfg.TLSServerName,
+		DigestIndex:         digestIndex,
 		Logf:                log.Printf,
 	})
 	if err != nil {
@@ -180,6 +279,25 @@ func main() {
 	mux.Handle("/metrics", m)
 	mux.HandleFunc("/healthz", health.Live)
 	mux.Handle("/readyz", health.Ready(st.Writable))
+	if digestIndex != nil {
+		// Only another node may read the filter (it says which digests this node
+		// holds); the admin listener does not serve it.
+		mux.Handle(peer.GossipPath, &peer.GossipHandler{Index: digestIndex, Allow: h.IsPeer})
+		gr := &peer.GossipRunner{
+			Index:    digestIndex,
+			Peers:    activeFinder,
+			Client:   h.PeerClient,
+			Header:   map[string]string{proxy.PeerHeader: "1"},
+			SelfBase: self,
+			Logf:     log.Printf,
+		}
+		// The filter is built before the first round: a peer that fetched an empty
+		// one would rank this node as not holding anything.
+		rebuildFilter(st, digestIndex)
+		go keepFilterCurrent(ctx, st, digestIndex, filterRebuildEvery)
+		go gr.Run(ctx, cfg.GossipInterval)
+		log.Printf("digest gossip enabled (SIC_DIGEST_GOSSIP=true), interval=%v", cfg.GossipInterval)
+	}
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	// Health and metrics on a plain-HTTP address for kubelet probes and local

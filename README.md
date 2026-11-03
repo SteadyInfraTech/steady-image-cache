@@ -189,6 +189,9 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | `SIC_PEER_TIMEOUT`, `SIC_PEER_BACKOFF`, `SIC_PEER_MAX_TRIES` | `5s`, `30s`, `4` | See "Peer requests". |
 | `SIC_PEER_WATCH` | `true` | Follow pods with a watch instead of listing every 30s. See "Health and metrics". |
 | `SIC_COORDINATE`, `SIC_COORDINATE_WAIT` | `true`, `20s` | One fetch per digest for nodes that miss at the same moment. See "Simultaneous pulls". |
+| `SIC_ENDPOINTSLICE_DISCOVERY` | `false` | List peers from EndpointSlices as well as pods, for clusters of some hundreds of nodes. See "Large clusters". |
+| `NODE_ZONE` | unset | This node's zone: peers in it are asked first. See "Large clusters". |
+| `SIC_DIGEST_GOSSIP`, `SIC_GOSSIP_INTERVAL` | `false`, `3m` | Nodes exchange filters of the blobs they hold, and a miss asks the likely holders first. See "Large clusters". |
 | `SIC_UPSTREAM_ENABLED` | `false` | Fetch misses from registries. |
 | `SIC_UPSTREAM_REGISTRIES` | unset | The registries that may be contacted, comma separated. Anything else is refused. |
 | `SIC_UPSTREAM_TIMEOUT` | `30s` | Bounds connecting to a registry, and how long a transfer may go without receiving data (peers and registries alike). |
@@ -213,6 +216,14 @@ The others are named where their behaviour is described above.
 Pre-packaged Prometheus alerting rules (`deploy/monitoring/prometheus-rules.yaml`) and an enterprise Grafana dashboard (`deploy/monitoring/grafana-dashboard.json`) are available in the repository.
 
 `sic_peers` is the number of peers this node would currently ask. Kubernetes discovery lists the pods once (with `resourceVersion=0`, which the API server answers from its cache instead of reading etcd) and then follows them with a watch, keeping only Ready ones, so a neighbour that becomes Ready, or goes away, is known within moments. The watch needs the `watch` verb on pods, which the sample RBAC grants; without it the node says so in its log and lists every 30 seconds instead. It lists again when the server ends the watch (after five minutes), when the server says it has lost the point to resume from, and when a miss finds no peers (at most every 5 seconds). `SIC_PEER_WATCH=false` always lists every 30 seconds. While a list or watch cannot be made, the node keeps the peers it knew.
+
+## Large clusters
+
+Three optional features, all off by default, for clusters where asking peers at random gets expensive.
+
+* **EndpointSlice discovery** (`SIC_ENDPOINTSLICE_DISCOVERY=true`) reads the peers from the EndpointSlices of a Service that selects the SIC pods (`SIC_POD_LABEL_SELECTOR` is the label selector the slices are listed by; a slice carries the labels of its Service, so the Service needs the labels the selector names), watched like pods, instead of from every pod object. It runs next to the pod discovery, whose peers it adds to. The node needs `get`, `list` and `watch` on `endpointslices` in `discovery.k8s.io`, which the sample RBAC does not grant; and `HOST_IP`, so that it leaves itself out.
+* **Zones** (`NODE_ZONE`): peers in this node's zone are asked first, then those whose zone is not known, then the others. A peer's zone is learned from its EndpointSlice endpoint, so it works with EndpointSlice discovery only. The zone of the node itself has to be given: a pod cannot read its node's labels through the downward API, so set it per node pool or from your own tooling.
+* **Digest gossip** (`SIC_DIGEST_GOSSIP=true`): every node keeps a counting Bloom filter (64 KiB) of the blobs it holds, rebuilt from the cache every minute, and fetches the filters of its peers every `SIC_GOSSIP_INTERVAL` (a `304` when nothing changed). A miss asks the peers whose filter has the digest first, then those it has no filter for, then those whose filter says no. It only orders the peers: a filter can be minutes old and has false positives (under 1% at 10 000 blobs, more when the cache holds many more), so nothing is skipped, and `SIC_PEER_MAX_TRIES` is what keeps a miss short. The filter is served on the registry listener at `/sic/index` to other nodes only (the certificate check of "TLS"; a client gets `403`), never on the admin listener.
 
 ## Registry mirror
 
