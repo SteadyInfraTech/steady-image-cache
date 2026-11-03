@@ -6,17 +6,16 @@
 // sequential probing into a near-deterministic 1-hop lookup.
 //
 // Design choices:
-//   - 4-bit counters (nibble-packed) keep the serialised filter under 5 KiB for
-//     a typical 10 000-digest cache (m=80 000 bits, 10 bytes/counter × 4 bits).
-//   - k=5 hash functions give a false-positive rate < 2% at that fill level.
+//   - 4-bit counters, packed two to a byte: the serialised filter is 64 KiB
+//     (131 072 counters), whatever the cache holds.
+//   - k=5 hash functions give a false-positive rate under 1% at 10 000 digests,
+//     and the filter fills up (more false positives) beyond some tens of thousands.
 //   - The filter is Add-only between full rebuilds; removals happen by
 //     rebuilding from the store periodically (see DigestIndex.Rebuild).
 
 package peer
 
 import (
-	"encoding/binary"
-	"math/bits"
 	"sync"
 )
 
@@ -151,7 +150,7 @@ func (f *countingFilter) estimateCount() int {
 	if denom <= 0 {
 		return nonZero
 	}
-	return nonZero * filterBits / (filterK * (filterBits - nonZero) + 1)
+	return nonZero * filterBits / (filterK*(filterBits-nonZero) + 1)
 }
 
 // DigestIndex is a thread-safe digest advertisement index. Each node maintains
@@ -159,8 +158,8 @@ func (f *countingFilter) estimateCount() int {
 // gossip). The Proxy uses Holders to route a miss to the most-likely peer
 // before falling back to random probing.
 type DigestIndex struct {
-	mu      sync.RWMutex
-	self    countingFilter
+	mu       sync.RWMutex
+	self     countingFilter
 	peers    map[string]*countingFilter // base URL → filter
 	popcount map[string]int             // estimated item counts per peer
 }
@@ -268,6 +267,26 @@ func (idx *DigestIndex) Holders(digest string, candidates []string) []string {
 	return out
 }
 
+// keepOnly drops the filters of the peers that are not in active.
+func (idx *DigestIndex) keepOnly(active map[string]bool) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for base := range idx.peers {
+		if !active[base] {
+			delete(idx.peers, base)
+			delete(idx.popcount, base)
+		}
+	}
+}
+
+// hasPeer reports whether a filter is held for the peer at base.
+func (idx *DigestIndex) hasPeer(base string) bool {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	_, ok := idx.peers[base]
+	return ok
+}
+
 // PopCount returns the estimated number of distinct items in a peer's filter.
 func (idx *DigestIndex) PopCount(base string) int {
 	idx.mu.RLock()
@@ -305,34 +324,6 @@ func FilterSize() int { return filterBits / 2 }
 // FilterPopBits returns the total number of counter slots (for sizing metrics).
 func FilterPopBits() int { return filterBits }
 
-// HammingWeight counts the number of non-zero nibbles in a serialised filter
-// (used in tests and metrics to characterise filter density).
-func HammingWeight(data []byte) int {
-	n := 0
-	for _, b := range data {
-		if b&0x0f != 0 {
-			n++
-		}
-		if b>>4 != 0 {
-			n++
-		}
-	}
-	return n
-}
-
-// popcount64 counts set bits in a uint64 (used internally).
-func popcount64(x uint64) int { return bits.OnesCount64(x) }
-
-// popcount16 counts set bits in a uint16.
-func popcount16(x uint16) int { return bits.OnesCount16(x) }
-
-// encodedLen returns the length of a base64-URL-encoded filter.
-func encodedLen() int {
-	// base64: ceil(n/3)*4
-	n := filterBits / 2
-	return (n + 2) / 3 * 4
-}
-
 // Fingerprint returns a 64-bit FNV-1a fingerprint of the filter bytes, used
 // to detect whether a peer's filter has changed since the last exchange.
 func (idx *DigestIndex) Fingerprint() uint64 {
@@ -345,13 +336,3 @@ func (idx *DigestIndex) Fingerprint() uint64 {
 	}
 	return h
 }
-
-// byteSwap64 returns x with bytes reversed (for endian-independent hashing in tests).
-func byteSwap64(x uint64) uint64 { return binary.BigEndian.Uint64(binary.LittleEndian.AppendUint64(nil, x)) }
-
-// Ensure unused imports are satisfied.
-var _ = popcount64
-var _ = popcount16
-var _ = encodedLen
-var _ = byteSwap64
-var _ = HammingWeight

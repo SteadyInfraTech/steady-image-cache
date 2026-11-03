@@ -150,7 +150,7 @@ func TestProtectedRegistryIgnoresThePeerHeader(t *testing.T) {
 		}
 	}
 	// No peer is asked for it, and none is believed.
-	if got := p.askablePeers(host); len(got) != 0 {
+	if got := p.askablePeers(host, ""); len(got) != 0 {
 		t.Fatalf("askablePeers for a protected registry = %v", got)
 	}
 }

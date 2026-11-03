@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -27,9 +28,9 @@ import (
 const (
 	// GossipPath is the HTTP path served by GossipHandler.
 	GossipPath = "/sic/index"
-	// gossipMaxBody is the maximum response body accepted from a peer: slightly
-	// more than a full filter to allow for JSON framing.
-	gossipMaxBody = filterBits/2 + 512
+	// gossipMaxBody is the most a response may hold: the filter as base64, and
+	// room for the JSON around it.
+	gossipMaxBody = (filterBits/2+2)/3*4 + 1024
 )
 
 // indexResponse is the JSON body returned by GossipHandler.
@@ -42,15 +43,22 @@ type indexResponse struct {
 }
 
 // GossipHandler serves this node's digest-index filter over HTTP. Mount it at
-// GossipPath on the existing SIC listener (both the main TLS listener and the
-// plain-HTTP admin listener, so peers can always fetch it).
+// GossipPath on the main listener only (the admin listener has no
+// authentication), with Allow set to the check that tells another SIC node from
+// a client: which digests a node holds is for the nodes to know.
 type GossipHandler struct {
 	Index *DigestIndex
+	// Allow decides who may fetch the filter. Nil allows everyone.
+	Allow func(*http.Request) bool
 }
 
 func (g *GossipHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if g.Allow != nil && !g.Allow(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	fp := g.Index.Fingerprint()
@@ -72,10 +80,13 @@ func (g *GossipHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // GossipRunner periodically fetches filter snapshots from all live peers and
 // stores them in the DigestIndex.
 type GossipRunner struct {
-	Index    *DigestIndex
-	Peers    Finder
-	Client   *http.Client
-	Interval time.Duration
+	Index *DigestIndex
+	Peers Finder
+	// Client returns the client to use for one round (it may change when the
+	// certificates are rotated).
+	Client func() *http.Client
+	// Header is sent with every request (it names this node a peer).
+	Header map[string]string
 	// SelfBase is this node's own base URL; its filter is never fetched.
 	SelfBase string
 	// Logf receives occasional warnings. Nil discards them.
@@ -86,68 +97,67 @@ type GossipRunner struct {
 	lastFP map[string]uint64
 }
 
-// Run runs the gossip loop until ctx is cancelled.
-func (g *GossipRunner) Run(ctx interface{ Done() <-chan struct{} }, interval time.Duration) {
+// Run fetches the filters now and then every interval until ctx ends.
+func (g *GossipRunner) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 3 * time.Minute
 	}
-	g.mu.Lock()
-	g.lastFP = make(map[string]uint64)
-	g.mu.Unlock()
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		g.Round(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.round()
 		}
 	}
 }
 
-func (g *GossipRunner) round() {
+// Round fetches the filter of every candidate once and forgets the peers that
+// are no longer candidates.
+func (g *GossipRunner) Round(ctx context.Context) {
 	candidates := g.Peers.Candidates()
+	active := make(map[string]bool, len(candidates))
 	for _, base := range candidates {
-		if base == g.SelfBase {
+		active[base] = true
+		if base == g.SelfBase || ctx.Err() != nil {
 			continue
 		}
-		g.fetchOne(base)
+		g.fetchOne(ctx, base)
 	}
-	// Remove stale peers that are no longer candidates.
-	g.Index.mu.Lock()
-	active := make(map[string]bool, len(candidates))
-	for _, b := range candidates {
-		active[b] = true
-	}
-	for base := range g.Index.peers {
+	// A peer that is not a candidate any more has its filter dropped, and its
+	// fingerprint with it: when it comes back with the same filter it must be
+	// sent again, not answered "not modified" about something we threw away.
+	g.mu.Lock()
+	for base := range g.lastFP {
 		if !active[base] {
-			delete(g.Index.peers, base)
-			delete(g.Index.popcount, base)
+			delete(g.lastFP, base)
 		}
 	}
-	g.Index.mu.Unlock()
+	g.mu.Unlock()
+	g.Index.keepOnly(active)
 }
 
-func (g *GossipRunner) fetchOne(base string) {
+func (g *GossipRunner) fetchOne(ctx context.Context, base string) {
 	g.mu.Lock()
-	fp := g.lastFP[base]
+	fp, known := g.lastFP[base]
 	g.mu.Unlock()
 
 	u := base + GossipPath
-	if fp != 0 {
+	if known && g.Index.hasPeer(base) {
 		u += "?fp=" + uint64ToStr(fp)
 	}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return
 	}
-	resp, err := g.Client.Do(req)
+	for k, v := range g.Header {
+		req.Header.Set(k, v)
+	}
+	resp, err := g.Client().Do(req)
 	if err != nil {
-		if g.Logf != nil {
-			g.Logf("gossip: fetch %s: %v", base, err)
-		}
+		g.logf("gossip: fetch %s: %v", base, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -155,20 +165,32 @@ func (g *GossipRunner) fetchOne(base string) {
 		return // filter unchanged
 	}
 	if resp.StatusCode != http.StatusOK {
+		g.logf("gossip: %s answered %d", base, resp.StatusCode)
 		return
 	}
 	var body indexResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, gossipMaxBody)).Decode(&body); err != nil {
+		g.logf("gossip: %s sent an unreadable filter: %v", base, err)
 		return
 	}
 	raw, err := base64.URLEncoding.DecodeString(body.Filter)
 	if err != nil {
+		g.logf("gossip: %s sent an unreadable filter: %v", base, err)
 		return
 	}
 	if g.Index.UpdatePeer(base, raw) {
 		g.mu.Lock()
+		if g.lastFP == nil {
+			g.lastFP = make(map[string]uint64)
+		}
 		g.lastFP[base] = body.Fingerprint
 		g.mu.Unlock()
+	}
+}
+
+func (g *GossipRunner) logf(format string, args ...any) {
+	if g.Logf != nil {
+		g.Logf(format, args...)
 	}
 }
 

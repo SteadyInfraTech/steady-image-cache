@@ -22,6 +22,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/tlsutil"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/version"
 )
+
 func main() {
 	if version.Requested(os.Args[1:]) {
 		fmt.Println(version.String())
@@ -149,25 +150,12 @@ func main() {
 		log.Printf("zone-aware routing enabled: local zone=%q", cfg.NodeZone)
 	}
 
-	// Digest gossip: Bloom-filter exchange so nodes know which peers hold a
-	// digest before sending HTTP requests. Strongly recommended for >100 nodes.
+	// Digest gossip: nodes exchange Bloom filters of the blobs they hold, so a
+	// miss asks the nodes that probably have the blob first. Started below,
+	// once the proxy exists (it supplies the peer client and the peer check).
 	var digestIndex *peer.DigestIndex
 	if cfg.DigestGossip {
 		digestIndex = peer.NewDigestIndex()
-		gossipClient := &http.Client{Timeout: 15 * time.Second}
-		if useTLS {
-			// Reuse the server TLS config for gossip; peers verify each other.
-			gossipClient.Transport = &http.Transport{TLSClientConfig: serverTLS.ServerConfig().Clone()}
-		}
-		gr := &peer.GossipRunner{
-			Index:    digestIndex,
-			Peers:    activeFinder,
-			Client:   gossipClient,
-			SelfBase: self,
-			Logf:     log.Printf,
-		}
-		go gr.Run(ctx, cfg.GossipInterval)
-		log.Printf("digest gossip enabled (SIC_DIGEST_GOSSIP=true), interval=%v", cfg.GossipInterval)
 	}
 
 	// How many peers this node would ask right now. Zero on a node whose
@@ -228,6 +216,22 @@ func main() {
 	mux.Handle("/metrics", m)
 	mux.HandleFunc("/healthz", health.Live)
 	mux.Handle("/readyz", health.Ready(st.Writable))
+	if digestIndex != nil {
+		// Only another node may read the filter (it says which digests this node
+		// holds); the admin listener does not serve it.
+		mux.Handle(peer.GossipPath, &peer.GossipHandler{Index: digestIndex, Allow: h.IsPeer})
+		gr := &peer.GossipRunner{
+			Index:    digestIndex,
+			Peers:    activeFinder,
+			Client:   h.PeerClient,
+			Header:   map[string]string{proxy.PeerHeader: "1"},
+			SelfBase: self,
+			Logf:     log.Printf,
+		}
+		go gr.Run(ctx, cfg.GossipInterval)
+		go keepFilterCurrent(ctx, st, digestIndex, filterRebuildEvery)
+		log.Printf("digest gossip enabled (SIC_DIGEST_GOSSIP=true), interval=%v", cfg.GossipInterval)
+	}
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	// Health and metrics on a plain-HTTP address for kubelet probes and local

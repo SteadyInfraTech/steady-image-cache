@@ -94,8 +94,8 @@ type Config struct {
 	// know which peers hold a digest before sending an HTTP request. Turning it
 	// on is recommended for clusters with >100 nodes; each gossip round is a
 	// ~64 KiB GET per peer every GossipInterval.
-	DigestGossip     bool
-	GossipInterval   time.Duration
+	DigestGossip   bool
+	GossipInterval time.Duration
 }
 
 func env(k, d string) string {

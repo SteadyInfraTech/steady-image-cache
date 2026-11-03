@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Large clusters, all optional and off by default (README, "Large clusters"): `SIC_ENDPOINTSLICE_DISCOVERY` lists peers from EndpointSlices; `NODE_ZONE` makes a node ask peers in its own zone first; `SIC_DIGEST_GOSSIP` (with `SIC_GOSSIP_INTERVAL`) has nodes exchange Bloom filters of the blobs they hold, so a miss asks the likely holders first. The filter is served at `/sic/index` to other nodes only.
 ## 1.2.0 - 2026-11-02
 
 - **Upgrading from 1.1.x:** (1) with mutual TLS, nodes are recognised as peers only by a client certificate that lists `SIC_TLS_SERVER_NAME`; a deployment that relied on the `X-SIC-Peer` header alone must issue such certificates (the README's recipe does). (2) The sample DaemonSet mounts containerd's content directory read-only (`/var/lib/containerd/io.containerd.content.v1.content`): change the path if containerd's root is elsewhere, or remove the volume, the mount and `SIC_CONTAINERD_CONTENT_DIR`. (3) If you set `SIC_PROTECTED_REGISTRIES`, blobs cached before it was set carry no protection marks and, when requested under an unprotected namespace, are served without the registry check (under a protected one the check always runs); empty the cache after turning it on if they must be protected. Everything else below is a fix or optional.

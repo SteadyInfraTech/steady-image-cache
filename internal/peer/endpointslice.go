@@ -24,6 +24,7 @@ package peer
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -82,7 +83,7 @@ type EndpointSliceKubernetes struct {
 	resolver                    *ZoneResolver // optional; nil disables zone tracking
 
 	mu     sync.RWMutex
-	peers  []string // sorted peer base URLs
+	peers  []string                 // sorted peer base URLs
 	slices map[string]endpointSlice // by slice name, as of rv
 	rv     string
 
@@ -392,15 +393,31 @@ func (e *EndpointSliceKubernetes) recomputeLocked() {
 		}
 	}
 	sort.Strings(peers)
+	if e.resolver != nil {
+		// A peer that is gone takes its zone with it.
+		now := make(map[string]bool, len(peers))
+		for _, b := range peers {
+			now[b] = true
+		}
+		for b := range e.resolver.Zones() {
+			if !now[b] {
+				e.resolver.DeleteZone(b)
+			}
+		}
+	}
 	e.peers = peers
 }
 
 // certPoolFromPEM parses PEM certificates into an x509.CertPool.
 func certPoolFromPEM(ca []byte) (*x509.CertPool, error) {
-	return mustCertPool(ca)
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca) {
+		return nil, errors.New("no valid certificates in CA bundle")
+	}
+	return pool, nil
 }
 
 // tlsRoundTripper builds an http.RoundTripper that uses pool for server verification.
 func tlsRoundTripper(pool *x509.CertPool) http.RoundTripper {
-	return &http.Transport{TLSClientConfig: tlsClientConfig(pool)}
+	return &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 }

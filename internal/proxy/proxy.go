@@ -109,6 +109,11 @@ type Options struct {
 	// re-checked for changes. Nil means plain HTTP between peers.
 	TLS        *tlsutil.Reloader
 	ServerName string
+	// DigestIndex, when set, tells a miss which peers probably hold the blob
+	// (filters the nodes exchange, see peer.GossipRunner): those are asked
+	// first. It only orders: a peer whose filter says no is still asked when
+	// PeerMaxTries leaves room, because its filter may be minutes old.
+	DigestIndex *peer.DigestIndex
 	// Logf receives warnings about refused or failed transfers, at most one
 	// per kind and peer per minute. Nil discards them.
 	Logf func(string, ...any)
@@ -117,6 +122,7 @@ type Options struct {
 type Proxy struct {
 	store           *store.Store
 	peers           peer.Finder
+	index           *peer.DigestIndex
 	upstreamClient  *http.Client
 	metrics         *metrics.Metrics
 	upstream        bool
@@ -199,6 +205,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 	px := &Proxy{
 		store: s,
 		peers: p,
+		index: o.DigestIndex,
 		// Upstream registries are public services: verify them against the
 		// system roots, not against the private CA used between SIC nodes.
 		upstreamClient:  &http.Client{Transport: upstreamTransport, CheckRedirect: upstreamRedirect},
@@ -432,6 +439,13 @@ func (p *Proxy) isPeer(r *http.Request) bool {
 	// holder of *.example.com is not one of ours.
 	return tlsutil.ListsName(r.TLS.PeerCertificates[0], p.serverName)
 }
+
+// IsPeer reports whether r comes from another SIC node (see isPeer).
+func (p *Proxy) IsPeer(r *http.Request) bool { return p.isPeer(r) }
+
+// PeerClient is the client for requests to other nodes, current with the
+// certificates on disk.
+func (p *Proxy) PeerClient() *http.Client { return p.peerHTTP() }
 
 // peersVerified reports whether a peer is told from a client by its
 // certificate rather than by a header that anyone can send.
@@ -880,7 +894,7 @@ func (p *Proxy) headBlob(w http.ResponseWriter, in info, path, d string) {
 	size, ok := int64(-1), false
 	var challenge []string
 	var throttle *fetchResult
-	for _, base := range p.askablePeers(in.ns) {
+	for _, base := range p.askablePeers(in.ns, d) {
 		resp, e := p.do(in.ctx, http.MethodHead, p.peerHTTP(), p.peerURL(base, path, in.ns), p.peerHdr(in.ns))
 		if e != nil {
 			p.peerFailed(base, e)
@@ -1085,17 +1099,40 @@ func (p *Proxy) livePeers() []string {
 }
 
 // askablePeers is shuffledPeers cut to the number one miss may ask. The peers
-// are in random order, so the ones left out differ from miss to miss.
-func (p *Proxy) askablePeers(ns string) []string {
+// are in random order, so the ones left out differ from miss to miss. With a
+// digest index and a digest, the peers whose filter says they hold it come first.
+func (p *Proxy) askablePeers(ns, d string) []string {
 	if p.protected[ns] && !p.peersVerified() {
 		return nil // without certificates a peer cannot be told from a client
 	}
 	peers := p.shuffledPeers()
+	if p.index != nil && d != "" {
+		peers = rankByFilters(p.index, d, peers)
+	}
 	if p.maxTries > 0 && len(peers) > p.maxTries {
 		p.metrics.PeerCapped.Add(1)
 		peers = peers[:p.maxTries]
 	}
 	return peers
+}
+
+// rankByFilters puts the peers that probably hold d first, then the ones nothing
+// is known about, then those whose filter says they do not (each group in the
+// order it came in). A filter that is out of date can only cost a request.
+func rankByFilters(idx *peer.DigestIndex, d string, peers []string) []string {
+	likely := idx.Holders(d, peers) // holders by filter, then peers without a filter
+	in := make(map[string]bool, len(likely))
+	for _, b := range likely {
+		in[b] = true
+	}
+	out := make([]string, 0, len(peers))
+	out = append(out, likely...)
+	for _, b := range peers {
+		if !in[b] {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // idleBody cancels the request when no data has arrived for d. It replaces a
@@ -1294,7 +1331,7 @@ func refused(e error) bool {
 
 func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 	var noSpace fetchResult
-	for _, base := range p.askablePeers(in.ns) {
+	for _, base := range p.askablePeers(in.ns, d) {
 		res, done := p.tryPeer(in, p.peerHTTP(), base, path, d, p.peerHdr(in.ns), false)
 		if done {
 			return res
@@ -1403,7 +1440,7 @@ func (p *Proxy) storeManifest(resp *http.Response, namespace, ref string, receiv
 
 // fetchManifestPeers returns the digest of the manifest it stored.
 func (p *Proxy) fetchManifestPeers(in info, path, ref string) (string, fetchResult) {
-	for _, base := range p.askablePeers(in.ns) {
+	for _, base := range p.askablePeers(in.ns, "") {
 		resp, e := p.get(in.ctx, p.peerHTTP(), p.peerURL(base, path, in.ns), p.peerHdr(in.ns, "Accept", in.accept))
 		if e != nil {
 			p.peerFailed(base, e)

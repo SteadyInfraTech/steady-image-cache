@@ -19,24 +19,6 @@ import (
 	"time"
 )
 
-// mustCertPool parses PEM-encoded CA certificates into an x509.CertPool.
-// It returns an error when no valid certificates are found.
-func mustCertPool(ca []byte) (*x509.CertPool, error) {
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca) {
-		return nil, fmt.Errorf("no valid certificates in CA bundle")
-	}
-	return pool, nil
-}
-
-// tlsClientConfig builds a tls.Config using pool for server verification.
-func tlsClientConfig(pool *x509.CertPool) *tls.Config {
-	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-}
-
-// syncRWMutex is kept for compatibility; not used by callers in this package.
-type syncRWMutex = sync.RWMutex
-
 type Finder interface{ Candidates() []string }
 
 // Poker is a Finder that learns of its peers from somewhere slow, and can be
