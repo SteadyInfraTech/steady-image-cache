@@ -201,14 +201,21 @@ func provisionCerts(srcDir, dstDir string, logf func(string, ...any)) error {
 		{"tls.key", 0o600},
 	}
 
-	for _, f := range files {
+	// Everything is read before anything is written: a source that cannot be read
+	// (a half-finished rotation) must not leave a new certificate beside the old key.
+	data := make([][]byte, len(files))
+	for i, f := range files {
 		src := filepath.Join(srcDir, f.name)
-		dst := filepath.Join(dstDir, f.name)
-
-		srcData, err := os.ReadFile(src)
+		b, err := os.ReadFile(src)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", src, err)
 		}
+		data[i] = b
+	}
+
+	for i, f := range files {
+		dst := filepath.Join(dstDir, f.name)
+		srcData := data[i]
 
 		if existing, err := os.ReadFile(dst); err == nil {
 			if fi, err := os.Stat(dst); err == nil && bytes.Equal(existing, srcData) && fi.Mode().Perm() == f.mode {

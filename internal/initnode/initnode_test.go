@@ -217,3 +217,37 @@ func TestWatchFailsWhenTheFirstRunCannot(t *testing.T) {
 		t.Fatal("Watch reported success although the first run failed")
 	}
 }
+
+// A run that cannot read all of the sources changes nothing on the node: a new
+// certificate must never sit beside the old key.
+func TestFailedRunLeavesNoNewCertificateBesideTheOldKey(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "tls")
+	dst := filepath.Join(tmp, "node")
+	if err := os.MkdirAll(src, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(src, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("ca.crt", "ca")
+	put("tls.crt", "old-cert")
+	put("tls.key", "old-key")
+	logf := func(string, ...any) {}
+	if err := provisionCerts(src, dst, logf); err != nil {
+		t.Fatal(err)
+	}
+	put("tls.crt", "new-cert")
+	if err := os.Remove(filepath.Join(src, "tls.key")); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisionCerts(src, dst, logf); err == nil {
+		t.Fatal("a missing key was not reported")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "tls.crt")); string(b) != "old-cert" {
+		t.Fatalf("the node's certificate is %q after a failed run, want the old one", b)
+	}
+}

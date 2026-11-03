@@ -56,7 +56,7 @@ jobs:
     # overwritten by later builds of main.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -66,6 +66,39 @@ jobs:
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      - name: Check that the chart names the release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The release pull request sets the chart's application version and
+          # image tags to the release (RELEASING.md); a chart published for a tag
+          # that does not match would deploy another version.
+          VERSION="${TAG#v}"
+          grep -q "^appVersion: \"$VERSION\"$" charts/steady-image-cache/Chart.yaml \
+            || { echo "Chart.yaml appVersion is not $VERSION" >&2; exit 1; }
+          test "$(grep -c "tag: \"$TAG\"" charts/steady-image-cache/values.yaml)" = 2 \
+            || { echo "values.yaml must name $TAG for both images" >&2; exit 1; }
+
+      - name: Wait for the release image
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # The same tag starts release.yml, which builds and pushes the image. The
+          # chart is published only once that image exists, so it is never
+          # available before what it deploys.
+          IMAGE="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]'):$TAG"
+          for i in $(seq 1 60); do
+            if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+              echo "$IMAGE is published"
+              exit 0
+            fi
+            echo "waiting for $IMAGE ($i/60)"
+            sleep 30
+          done
+          echo "$IMAGE was not published within 30 minutes" >&2
+          exit 1
 
       - name: Package Helm chart
         id: package
