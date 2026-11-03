@@ -187,9 +187,17 @@ func main() {
 	if cfg.ContainerdImport {
 		imp := &cd.Importer{Address: cfg.ContainerdAddress, Namespace: cfg.ContainerdNamespace, Store: st, Metrics: m, ContentDir: cfg.ContainerdContentDir, Protect: len(cfg.ProtectedRegistries) > 0}
 		go func() {
+			// What the import added is advertised to the peers at once (also after a
+			// partial failure), not at the next rebuild of the filter.
+			advertise := func() {
+				if digestIndex != nil {
+					digestIndex.Rebuild(st.Digests())
+				}
+			}
 			if err := imp.Import(ctx); err != nil {
 				log.Printf("initial %s import: %v", imp, err)
 			}
+			advertise()
 			t := time.NewTicker(cfg.ImportInterval)
 			defer t.Stop()
 			for {
@@ -200,6 +208,7 @@ func main() {
 					if err := imp.Import(ctx); err != nil {
 						log.Printf("containerd import: %v", err)
 					}
+					advertise()
 				}
 			}
 		}()
