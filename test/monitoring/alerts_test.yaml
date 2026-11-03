@@ -1,0 +1,73 @@
+# Unit tests of the alert rules, run by test/monitoring/test.sh against both
+# copies of the rules (deploy/monitoring and the chart's PrometheusRule).
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # One node sees no peers while others do: the alert fires for that node only.
+  # (The expression once used `and count(sic_peers) > 1`, whose label-less right
+  # side matched no series, so it never fired.)
+  - name: a node without peers in a cluster with more nodes
+    interval: 1m
+    input_series:
+      - series: 'sic_peers{instance="a"}'
+        values: '0x20'
+      - series: 'sic_peers{instance="b"}'
+        values: '2x20'
+      - series: 'sic_peers{instance="c"}'
+        values: '2x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SteadyImageCacheNoPeersDiscovered
+        exp_alerts: []   # not for long enough yet
+      - eval_time: 10m
+        alertname: SteadyImageCacheNoPeersDiscovered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: a
+            exp_annotations:
+              summary: "Node a sees zero peer caches"
+              description: "Pod peer discovery is finding 0 ready peers despite other nodes running in the cluster."
+
+  # A cluster of one node has no peers, and that is no fault.
+  - name: a single node
+    interval: 1m
+    input_series:
+      - series: 'sic_peers{instance="a"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SteadyImageCacheNoPeersDiscovered
+        exp_alerts: []
+
+  - name: disk reserve reached
+    interval: 1m
+    input_series:
+      - series: 'sic_disk_full_total{instance="a"}'
+        values: '0 0 0 1 2 3 4 5 6 7 8 9 10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SteadyImageCacheDiskFull
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: SteadyImageCacheDiskFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: a
+            exp_annotations:
+              summary: "Steady Image Cache disk reserve reached on a"
+              description: "Node a is refusing downloads because disk free space has reached SIC_MIN_FREE_BYTES / SIC_MIN_FREE_PERCENT reserve."
+
+  - name: a quiet counter does not alert
+    interval: 1m
+    input_series:
+      - series: 'sic_disk_full_total{instance="a"}'
+        values: '5x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SteadyImageCacheDiskFull
+        exp_alerts: []

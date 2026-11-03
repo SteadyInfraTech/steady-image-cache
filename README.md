@@ -337,6 +337,8 @@ A fourth phase installs the sample mirror configuration, `deploy/containerd/mirr
 
 `MODE=registries test/e2e/run.sh` (the workflow `e2e-registries.yml`, run on release tags, weekly and by hand, not on every pull request) deploys the same way and pulls from public ECR and GHCR through their own anonymous token services, then from a second node through the first. Public registries throttle shared addresses, so a registry that keeps answering `429` is skipped with a warning and the others still decide the result; the run fails if every registry was throttled, since then nothing was checked. It does not cover Docker Hub or private images behind a token service; the relay of their challenges is tested in the unit tests against a fake registry.
 
+`test/e2e/helm.sh` (the workflow `e2e-helm.yml`, on changes to the chart or the code) does the same for the Helm chart: it installs cert-manager and the chart with `helm install` on a kind cluster, checks what `sic init-node` left on every node (files, modes, `hosts.toml`, a client-only certificate that does not name SIC and is not the pod's key), pulls an image on one node from another through the mirror it configured, then has cert-manager issue both certificates again and checks that every node's copy follows, that SIC presents the new server certificate, and that a pull afterwards still works. `test/helm/test.sh` renders the chart; `test/monitoring/test.sh` runs `promtool` on the alert rules (both copies) with unit tests of the alerts, and parses every expression of the Grafana dashboard.
+
 ## Endpoints
 
 * `GET /v2/`
