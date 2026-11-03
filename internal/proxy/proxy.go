@@ -1056,10 +1056,33 @@ func (p *Proxy) peerFailed(base string, e error) {
 
 // shuffledPeers returns the peers worth asking, in random order so misses are
 // spread over the cluster instead of all going to the same first peer. Peers
-// that failed recently are left out until their back-off has passed.
+// that failed recently are left out until their back-off has passed. When the
+// finder ranks its peers in groups (same zone first), the order is random only
+// inside a group, so the cap on tries never leaves out a nearer peer for a
+// farther one.
 func (p *Proxy) shuffledPeers() []string {
-	out := p.livePeers()
-	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	live := p.livePeers()
+	g, ok := p.peers.(peer.Grouper)
+	if !ok {
+		rand.Shuffle(len(live), func(i, j int) { live[i], live[j] = live[j], live[i] })
+		return live
+	}
+	alive := make(map[string]bool, len(live))
+	for _, b := range live {
+		alive[b] = true
+	}
+	out := make([]string, 0, len(live))
+	for _, group := range g.CandidateGroups() {
+		part := make([]string, 0, len(group))
+		for _, b := range group {
+			if alive[b] {
+				part = append(part, b)
+				delete(alive, b) // a peer in two groups counts once
+			}
+		}
+		rand.Shuffle(len(part), func(i, j int) { part[i], part[j] = part[j], part[i] })
+		out = append(out, part...)
+	}
 	return out
 }
 

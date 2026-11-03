@@ -28,13 +28,17 @@ type ZoneAwareFinder struct {
 }
 
 // Candidates returns the inner finder's candidates, with same-zone peers
-// sorted to the front.
+// first, then those whose zone is unknown, then the others.
 func (z *ZoneAwareFinder) Candidates() []string {
-	candidates := z.Inner.Candidates()
-	if z.LocalZone == "" || z.Resolver == nil {
-		return candidates
+	groups := z.CandidateGroups()
+	if len(groups) == 1 {
+		return groups[0]
 	}
-	return z.sortByZone(candidates)
+	var out []string
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
 }
 
 // Poke forwards to the inner finder if it supports pokes.
@@ -44,30 +48,33 @@ func (z *ZoneAwareFinder) Poke() {
 	}
 }
 
-// sortByZone partitions candidates into same-zone and cross-zone groups,
-// preserving original order within each group.
-func (z *ZoneAwareFinder) sortByZone(candidates []string) []string {
-	sameZone := make([]string, 0, len(candidates))
-	crossZone := make([]string, 0, len(candidates))
-	unknownZone := make([]string, 0)
+// Grouper is a Finder whose candidates come in ranked groups: everything in an
+// earlier group is preferred to everything in a later one, and the order inside
+// a group means nothing, so a caller that spreads load shuffles within groups.
+type Grouper interface {
+	CandidateGroups() [][]string
+}
 
+// CandidateGroups returns the candidates as same-zone peers, peers whose zone is
+// not known, and peers in other zones, in that order. Without a local zone it is
+// one group.
+func (z *ZoneAwareFinder) CandidateGroups() [][]string {
+	candidates := z.Inner.Candidates()
+	if z.LocalZone == "" || z.Resolver == nil {
+		return [][]string{candidates}
+	}
+	var same, unknown, cross []string
 	for _, c := range candidates {
-		zone := z.Resolver.ZoneOf(c)
-		switch {
+		switch zone := z.Resolver.ZoneOf(c); {
 		case zone == "":
-			unknownZone = append(unknownZone, c)
+			unknown = append(unknown, c)
 		case zone == z.LocalZone:
-			sameZone = append(sameZone, c)
+			same = append(same, c)
 		default:
-			crossZone = append(crossZone, c)
+			cross = append(cross, c)
 		}
 	}
-	// Order: same-zone → unknown zone → cross-zone.
-	out := make([]string, 0, len(candidates))
-	out = append(out, sameZone...)
-	out = append(out, unknownZone...)
-	out = append(out, crossZone...)
-	return out
+	return [][]string{same, unknown, cross}
 }
 
 // ZoneResolver maps peer base URLs to their zone labels. It is safe for

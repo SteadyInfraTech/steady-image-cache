@@ -27,6 +27,18 @@ import (
 // what the store holds, which also forgets blobs that were evicted.
 const filterRebuildEvery = time.Minute
 
+// rebuildFilter makes the node's own digest filter from what the store holds. If
+// the store cannot be listed the filter stays as it was: an empty one would tell
+// the peers this node holds nothing.
+func rebuildFilter(st *store.Store, idx *peer.DigestIndex) {
+	ds, err := st.Digests()
+	if err != nil {
+		log.Printf("digest filter: not rebuilt: %v", err)
+		return
+	}
+	idx.Rebuild(ds)
+}
+
 // keepFilterCurrent builds the node's own digest filter again every interval
 // until ctx ends (the first one is built before gossip starts).
 func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestIndex, every time.Duration) {
@@ -37,7 +49,7 @@ func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestInd
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			idx.Rebuild(st.Digests())
+			rebuildFilter(st, idx)
 		}
 	}
 }
@@ -113,6 +125,11 @@ func main() {
 		scheme = "https"
 	}
 	var self string // this node as the others list it, for coordination
+	if cfg.KubernetesDiscovery || cfg.EndpointSliceDiscovery {
+		if ip := os.Getenv("HOST_IP"); net.ParseIP(ip) != nil {
+			self = scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(cfg.PeerPort))
+		}
+	}
 
 	// Zone-aware routing: a ZoneResolver tracks which zone each peer lives in.
 	// It is populated by the EndpointSlice watcher (via the zone field on each
@@ -121,9 +138,6 @@ func main() {
 	zoneResolver := peer.NewZoneResolver()
 
 	if cfg.KubernetesDiscovery {
-		if ip := os.Getenv("HOST_IP"); net.ParseIP(ip) != nil {
-			self = scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(cfg.PeerPort))
-		}
 		k, err := peer.NewKubernetes(cfg.PodNamespace, cfg.PodLabelSelector, os.Getenv("HOST_IP"), cfg.PeerPort, scheme)
 		if err != nil {
 			log.Printf("kubernetes discovery disabled: %v", err)
@@ -191,7 +205,7 @@ func main() {
 			// partial failure), not at the next rebuild of the filter.
 			advertise := func() {
 				if digestIndex != nil {
-					digestIndex.Rebuild(st.Digests())
+					rebuildFilter(st, digestIndex)
 				}
 			}
 			if err := imp.Import(ctx); err != nil {
@@ -258,7 +272,7 @@ func main() {
 		}
 		// The filter is built before the first round: a peer that fetched an empty
 		// one would rank this node as not holding anything.
-		digestIndex.Rebuild(st.Digests())
+		rebuildFilter(st, digestIndex)
 		go keepFilterCurrent(ctx, st, digestIndex, filterRebuildEvery)
 		go gr.Run(ctx, cfg.GossipInterval)
 		log.Printf("digest gossip enabled (SIC_DIGEST_GOSSIP=true), interval=%v", cfg.GossipInterval)
