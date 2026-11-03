@@ -82,7 +82,8 @@ helm template sic "$CHART_DIR" --set initContainer.refreshInterval=0 | { ! grep 
 grep -q 'steady-image-cache-containerd-client' "$TMP_DIR/default.yaml"
 grep -q 'steady-image-cache-containerd-client' "$TMP_DIR/cert-manager.yaml"
 # that certificate is client-only and does not name the server (which would make containerd a node)
-awk '/commonName: .*containerd-client/,0' "$TMP_DIR/cert-manager.yaml" > "$TMP_DIR/client-cert.yaml"
+awk 'BEGIN { RS = "\n---\n" } /kind: Certificate/ && /commonName: .*containerd-client/' "$TMP_DIR/cert-manager.yaml" > "$TMP_DIR/client-cert.yaml"
+test -s "$TMP_DIR/client-cert.yaml"
 grep -q 'client auth' "$TMP_DIR/client-cert.yaml"
 refute 'server auth' "$TMP_DIR/client-cert.yaml"
 refute 'dnsNames' "$TMP_DIR/client-cert.yaml"

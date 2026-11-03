@@ -75,9 +75,9 @@ jobs:
           # image tags to the release (RELEASING.md); a chart published for a tag
           # that does not match would deploy another version.
           VERSION="${TAG#v}"
-          grep -q "^appVersion: \"$VERSION\"$" charts/steady-image-cache/Chart.yaml \
-            || { echo "Chart.yaml appVersion is not $VERSION" >&2; exit 1; }
-          test "$(grep -c "tag: \"$TAG\"" charts/steady-image-cache/values.yaml)" = 2 \
+          grep -qFx "appVersion: \"$VERSION\"" charts/steady-image-cache/Chart.yaml \
+            || { echo "Chart.yaml appVersion is not \"$VERSION\"" >&2; exit 1; }
+          test "$(grep -cF -- "tag: \"$TAG\"" charts/steady-image-cache/values.yaml)" = 2 \
             || { echo "values.yaml must name $TAG for both images" >&2; exit 1; }
 
       - name: Wait for the release image
