@@ -61,6 +61,7 @@ func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestInd
 		}
 	}
 }
+
 // runInitNode is `sic init-node`: once, or repeatedly with SIC_INIT_INTERVAL.
 func runInitNode() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
