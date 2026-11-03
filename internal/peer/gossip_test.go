@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type gossipPeers struct{ list atomic.Pointer[[]string] }
@@ -102,5 +103,34 @@ func TestGossipHandlerRefusesWhoIsNotAPeer(t *testing.T) {
 	runner(idx, &p, srv).Round(context.Background())
 	if idx.PeerCount() != 1 {
 		t.Fatal("a peer was refused")
+	}
+}
+
+// A peer that sends its headers and then stalls must not hold up the others.
+func TestGossipStalledPeerDoesNotBlockTheRound(t *testing.T) {
+	release := make(chan struct{})
+	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer stall.Close()
+	defer close(release)
+	good, _ := node(t, 3, nil)
+	idx := NewDigestIndex()
+	var p gossipPeers
+	p.set(stall.URL, good.URL)
+	g := runner(idx, &p, good)
+	g.FetchTimeout = 200 * time.Millisecond
+	done := make(chan struct{})
+	go func() { g.Round(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled peer blocked the round")
+	}
+	if !idx.hasPeer(good.URL) {
+		t.Fatal("the peer after the stalled one got no update")
 	}
 }

@@ -91,6 +91,9 @@ type GossipRunner struct {
 	SelfBase string
 	// Logf receives occasional warnings. Nil discards them.
 	Logf func(string, ...any)
+	// FetchTimeout bounds one peer's fetch, body included (zero: 15 seconds), so
+	// a peer that stalls cannot hold up the others.
+	FetchTimeout time.Duration
 
 	// lastFP tracks the last fingerprint received per peer, to skip unchanged filters.
 	mu     sync.Mutex
@@ -143,6 +146,9 @@ func (g *GossipRunner) fetchOne(ctx context.Context, base string) {
 	g.mu.Lock()
 	fp, known := g.lastFP[base]
 	g.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, cmpOr(g.FetchTimeout, 15*time.Second))
+	defer cancel()
 
 	u := base + GossipPath
 	if known && g.Index.hasPeer(base) {
@@ -208,4 +214,11 @@ func uint64ToStr(v uint64) string {
 		v /= 10
 	}
 	return string(buf[i:])
+}
+
+func cmpOr(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
 }

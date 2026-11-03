@@ -27,17 +27,17 @@ import (
 // what the store holds, which also forgets blobs that were evicted.
 const filterRebuildEvery = time.Minute
 
-// keepFilterCurrent builds the node's own digest filter now and then every
-// interval until ctx ends.
+// keepFilterCurrent builds the node's own digest filter again every interval
+// until ctx ends (the first one is built before gossip starts).
 func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestIndex, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		idx.Rebuild(st.Digests())
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			idx.Rebuild(st.Digests())
 		}
 	}
 }
@@ -247,8 +247,11 @@ func main() {
 			SelfBase: self,
 			Logf:     log.Printf,
 		}
-		go gr.Run(ctx, cfg.GossipInterval)
+		// The filter is built before the first round: a peer that fetched an empty
+		// one would rank this node as not holding anything.
+		digestIndex.Rebuild(st.Digests())
 		go keepFilterCurrent(ctx, st, digestIndex, filterRebuildEvery)
+		go gr.Run(ctx, cfg.GossipInterval)
 		log.Printf("digest gossip enabled (SIC_DIGEST_GOSSIP=true), interval=%v", cfg.GossipInterval)
 	}
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
