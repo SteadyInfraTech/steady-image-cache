@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,10 +28,16 @@ import (
 // what the store holds, which also forgets blobs that were evicted.
 const filterRebuildEvery = time.Minute
 
+var filterMu sync.Mutex
+
 // rebuildFilter makes the node's own digest filter from what the store holds. If
 // the store cannot be listed the filter stays as it was: an empty one would tell
 // the peers this node holds nothing.
 func rebuildFilter(st *store.Store, idx *peer.DigestIndex) {
+	// One at a time, listing and replacing together: an older listing must not
+	// replace the filter made from a newer one (the import and the timer both call it).
+	filterMu.Lock()
+	defer filterMu.Unlock()
 	ds, err := st.Digests()
 	if err != nil {
 		log.Printf("digest filter: not rebuilt: %v", err)
