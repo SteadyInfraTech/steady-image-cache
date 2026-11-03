@@ -23,6 +23,25 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/version"
 )
 
+// filterRebuildEvery is how often the filter other nodes fetch is made again from
+// what the store holds, which also forgets blobs that were evicted.
+const filterRebuildEvery = time.Minute
+
+// keepFilterCurrent builds the node's own digest filter now and then every
+// interval until ctx ends.
+func keepFilterCurrent(ctx context.Context, st *store.Store, idx *peer.DigestIndex, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		idx.Rebuild(st.Digests())
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 func main() {
 	if version.Requested(os.Args[1:]) {
 		fmt.Println(version.String())
