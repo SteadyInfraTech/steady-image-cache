@@ -25,6 +25,14 @@
 #                              instead of the self-contained test, pull from real
 #                              public registries (needs the internet); see
 #                              .github/workflows/e2e-registries.yml
+#   MODE=operations test/e2e/run.sh
+#                              instead of phases 3 and 4, roll the DaemonSet back
+#                              to the previous release and forward again, one node
+#                              at a time, and check that the cache and the peers
+#                              survive; needs the internet for the old image, see
+#                              .github/workflows/e2e-operations.yml
+#                              (PREVIOUS_IMAGE=... names the old image; the default
+#                              is the newest release tag older than the manifest's)
 set -Eeuo pipefail
 # Newer Docker adds an attestation manifest to every image it builds. The images
 # here are pushed to a test registry and pulled by containerd, which fetches only
@@ -35,7 +43,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
 KEEP=${KEEP:-}
 MODE=${MODE:-local}
-case $MODE in local|registries) ;; *) echo "MODE must be local or registries" >&2; exit 1 ;; esac
+case $MODE in local|registries|operations) ;; *) echo "MODE must be local, registries or operations" >&2; exit 1 ;; esac
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
 SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
@@ -230,6 +238,123 @@ registries_phase() {
   fi
   [ "${#checked[@]}" -gt 0 ] || fail "every registry was rate limiting; nothing was checked (${skipped[*]})"
   log "pass: ${checked[*]} over the registry's own token service, then shared between nodes"
+}
+
+# previous_image: the image of the newest release older than the one the sample
+# DaemonSet names (releases are the v1.2.3 tags; pre-releases do not count).
+previous_image() {
+  [ -z "${PREVIOUS_IMAGE:-}" ] || { echo "$PREVIOUS_IMAGE"; return; }
+  local repo=${SIC_IMAGE%:*} cur=${SIC_IMAGE##*:} prev
+  prev=$(git -C "$ROOT" tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -v -- '-' | { cat; echo "$cur"; } | sort -Vu | grep -B1 -x "$cur" | head -n 1)
+  [ -n "$prev" ] && [ "$prev" != "$cur" ] || fail "no release older than $cur among the git tags (fetch the tags, or set PREVIOUS_IMAGE)"
+  echo "$repo:$prev"
+}
+
+# operations_phase: what happens to a cluster that already holds a cache when
+# SIC is rolled back to the previous release and forward again. The DaemonSet
+# cannot surge on its fixed port, so the pods are replaced by hand, a node at a
+# time (updateStrategy OnDelete), which also leaves the cluster mixed between
+# versions for as long as it takes. Needs the registry of phase 2, with the
+# images the nodes have pulled.
+operations_phase() {
+  local prev cur=$SIC_IMAGE
+  prev=$(previous_image)
+  log "operations: $prev, then $cur again"
+  docker pull -q "$prev" >/dev/null || fail "could not pull $prev"
+  kind load docker-image "$prev" --name "$CLUSTER"
+  kubectl -n kube-system patch daemonset steady-image-cache --type=merge -p '{"spec":{"updateStrategy":{"type":"OnDelete","rollingUpdate":null}}}'
+
+  # ready_on NODE IMAGE: the SIC pod on NODE runs IMAGE and is Ready.
+  ready_on() {
+    [ "$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$1" \
+      -o jsonpath='{range .items[*]}{.spec.containers[0].image} {.status.containerStatuses[0].ready}{"\n"}{end}')" = "$2 true" ]
+  }
+  # move_to IMAGE NODE...: the pods on the nodes are replaced by pods of IMAGE.
+  move_to() {
+    local img=$1 n; shift
+    kubectl -n kube-system set image daemonset/steady-image-cache sic="$img"
+    for n in "$@"; do
+      kubectl -n kube-system delete pod -l app=steady-image-cache --field-selector "spec.nodeName=$n" --wait=true >/dev/null
+      wait_for "SIC on $n to run $img" 120 ready_on "$n" "$img"
+    done
+  }
+  everyone_sees_everyone() { sees_all_peers "$A" && sees_all_peers "$B"; }
+
+  # served_from_cache NODE DIGEST: the node's SIC answers for the image's
+  # manifest and its first layer from its cache alone (the registry is paused,
+  # so anything it had to ask for would hang), and what it sends is what the
+  # digests say.
+  served_from_cache() {
+    local rc=0
+    docker pause "$REGISTRY" >/dev/null
+    cache_check "$1" "$2" || rc=$?
+    docker unpause "$REGISTRY" >/dev/null
+    return "$rc"
+  }
+  cache_get() {
+    docker exec "$1" curl -fsS --max-time 20 --cacert /etc/steady-image-cache/ca.crt \
+      --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/up/$2/$3?ns=$REGISTRY_HOST"
+  }
+  cache_check() {
+    local n=$1 d=$2 m=$WORK/served-manifest layer got
+    cache_get "$n" manifests "$d" > "$m" || { echo "$n: no manifest $d from the cache"; return 1; }
+    [ "sha256:$(sha256sum < "$m" | cut -d' ' -f1)" = "$d" ] || { echo "$n: the manifest differs from its digest"; return 1; }
+    layer=$(jq -r '.layers[0].digest' "$m")
+    got=$(cache_get "$n" blobs "$layer" | sha256sum | cut -d' ' -f1) || { echo "$n: no blob $layer from the cache"; return 1; }
+    [ "sha256:$got" = "$layer" ] || { echo "$n: the layer differs from its digest"; return 1; }
+  }
+  check_cache() { served_from_cache "$1" "$2" || fail "$1's cache does not serve $2 after the change"; }
+  no_errors() {
+    local n
+    for n in "$A" "$B"; do
+      [ "$(metric "$n" sic_verify_errors_total)" = 0 ] || fail "$n had verification errors"
+    done
+  }
+
+  DA=$(node_digest "$A"); DB=$(node_digest "$B")
+  [[ $DA == sha256:* && $DB == sha256:* ]] || fail "the nodes have no image to check against (A '$DA', B '$DB')"
+  echo "before: $A holds $DA, $B holds $DB"
+  check_cache "$A" "$DA"; check_cache "$B" "$DB"
+
+  log "operations: roll back, a node at a time: what the newer version cached, the older one serves"
+  move_to "$prev" "$A"
+  wait_for "$A to see its peers" 90 sees_all_peers "$A"
+  check_cache "$A" "$DA"
+  move_to "$prev" "$B" "$CLUSTER-control-plane"
+  wait_for "every node to see every other" 90 everyone_sees_everyone
+  check_cache "$B" "$DB"; check_cache "$A" "$DA"
+  no_errors
+
+  log "operations: $A upgraded first, the others still on $prev: peers of two versions share blobs, both ways"
+  move_to "$cur" "$A"
+  wait_for "every node to see every other" 90 everyone_sees_everyone
+  check_cache "$A" "$DA"
+  local gets peer_before
+  push mixed1 mixed1 >/dev/null
+  gets=$(registry_blob_gets)
+  docker exec "$A" crictl pull "$UP:mixed1"
+  [ $(( $(registry_blob_gets) - gets )) = 3 ] || fail "the new node made $(( $(registry_blob_gets) - gets )) registry fetches for a new image, want 3"
+  gets=$(registry_blob_gets); peer_before=$(from_cluster "$B")
+  docker exec "$B" crictl pull "$UP:mixed1"
+  [ "$(registry_blob_gets)" = "$gets" ] || fail "the old node went to the registry for what the new node had"
+  [ $(( $(from_cluster "$B") - peer_before )) -ge 3 ] || fail "the old node got $(( $(from_cluster "$B") - peer_before )) blobs from its peers, want at least 3"
+  push mixed2 mixed2 >/dev/null
+  gets=$(registry_blob_gets)
+  docker exec "$B" crictl pull "$UP:mixed2"
+  [ $(( $(registry_blob_gets) - gets )) = 3 ] || fail "the old node made $(( $(registry_blob_gets) - gets )) registry fetches for a new image, want 3"
+  gets=$(registry_blob_gets); peer_before=$(from_cluster "$A")
+  docker exec "$A" crictl pull "$UP:mixed2"
+  [ "$(registry_blob_gets)" = "$gets" ] || fail "the new node went to the registry for what the old node had"
+  [ $(( $(from_cluster "$A") - peer_before )) -ge 3 ] || fail "the new node got $(( $(from_cluster "$A") - peer_before )) blobs from its peers, want at least 3"
+  no_errors
+
+  log "operations: the rest upgraded: the cache the older version kept is served"
+  move_to "$cur" "$B" "$CLUSTER-control-plane"
+  wait_for "every node to see every other" 90 everyone_sees_everyone
+  check_cache "$A" "$DA"; check_cache "$B" "$DB"
+  no_errors
+  log "operations passed: back and forth between $prev and $cur, with the cache, the peers and the digests intact"
 }
 
 log "build the SIC image"
@@ -472,6 +597,8 @@ echo "registry blob requests for three simultaneous pulls: $herd_gets (config an
 echo "coordinator requests served: $coord_before -> $(cluster_metric sic_coordinator_served_total)"
 [ "$herd_gets" = 3 ] || fail "the registry served $herd_gets blobs for three simultaneous pulls, want 3, one per blob"
 [ "$(cluster_metric sic_coordinator_served_total)" -gt "$coord_before" ] || fail "no node answered as a coordinator"
+
+if [ "$MODE" = operations ]; then operations_phase; exit 0; fi
 
 log "the registry goes away: a cached tag is still served, and counted as stale"
 docker stop "$REGISTRY" >/dev/null

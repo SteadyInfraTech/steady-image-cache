@@ -1,0 +1,51 @@
+name: End-to-end (operations)
+
+# What the other end-to-end tests do not do: roll the DaemonSet back to the
+# previous release and forward again, a node at a time, on a cluster that
+# already holds a cache. See "operations_phase" in test/e2e/run.sh. It pulls
+# the previous release's image from ghcr.io, so it needs the internet.
+on:
+  push:
+    branches:
+      - main
+    paths: &paths
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/daemonset.yaml"
+      - "test/e2e/**"
+      - "Dockerfile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/e2e-operations.yml"
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-operations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  operations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The release tags tell the test which image is the previous one.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.27.0
+
+      - name: Roll back and forward
+        run: MODE=operations test/e2e/run.sh
