@@ -369,7 +369,7 @@ A production-ready Helm chart is provided under `charts/steady-image-cache` and 
 ```bash
 # Install directly from GitHub Container Registry (OCI):
 helm install steady-image-cache oci://ghcr.io/steadyinfratech/charts/steady-image-cache \
-  --version 1.3.0 \
+  --version 1.3.1 \
   --namespace kube-system \
   --set initContainer.enabled=true \
   --set config.upstreamEnabled=true \
@@ -387,7 +387,7 @@ helm install steady-image-cache ./charts/steady-image-cache \
 
 `deploy/daemonset.yaml` is a starting point, not a finished product; it needs the TLS secret `steady-image-cache-tls` and an image reference you have chosen. What it does, and why:
 
-* **Image.** The manifest names the release image `ghcr.io/steadyinfratech/steady-image-cache:v1.3.0`; pin the tag you have tested, or an `@sha256:` digest. (`:main` is the branch build and is not meant for production; `:latest` follows the newest release.) Images are published for `linux/amd64` and `linux/arm64`. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
+* **Image.** The manifest names the release image `ghcr.io/steadyinfratech/steady-image-cache:v1.3.1`; pin the tag you have tested, or an `@sha256:` digest. (`:main` is the branch build and is not meant for production; `:latest` follows the newest release.) Images are published for `linux/amd64` and `linux/arm64`. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
 * **Root, with nothing else.** The container runs as root only because containerd's socket is normally `root:root 0660`. It drops every capability, cannot gain privileges, has a read-only root file system and the runtime's default seccomp profile. If you turn the containerd import off (`SIC_CONTAINERD_IMPORT=false`) it needs no socket and can run as a non-root user that owns the cache directory.
 * **Resources.** Requests of 50m CPU and 64Mi memory; a memory limit of 512Mi to catch a leak. There is no CPU limit on purpose: hashing a layer is bursty, and throttling only makes pulls slower.
 * **Probes.** Readiness uses `/readyz` and liveness `/healthz`, both on the plain-HTTP admin port, because kubelet cannot present the client certificate the main port wants. The liveness probe waits for a minute of failures before restarting: a restart interrupts transfers under way.
