@@ -10,12 +10,23 @@
 # If the registries can be reached from the nodes, prefer
 # deploy/containerd/mirror-hosts.toml: it keeps SIC in front but lets containerd
 # fall back to the registry, and removes that dependency.
+#
+# The [host] table is required, not a style: containerd 1.x before 1.7.32
+# rejects a hosts.toml with only root-level fields ("invalid `host` tree",
+# containerd #10027) and then goes to the registry itself, which is the opposite
+# of this file's purpose. The root-level settings stay as well: containerd
+# treats the server as a host of its own and gives it those, not the table's.
 server = "https://127.0.0.1:5000"
 capabilities = ["pull", "resolve"]
 ca = "/etc/steady-image-cache/ca.crt"
-# containerd's own client certificate, for the mutual TLS that SIC requires: a
-# client-only pair from the same CA as SIC's certificate (README, "TLS"), put on
-# the node by your provisioning. Do not copy the DaemonSet's tls.key here: that
-# is the server key of the SIC pod, and a copy readable on the node widens what
-# its exposure costs.
 client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]
+
+[host."https://127.0.0.1:5000"]
+  capabilities = ["pull", "resolve"]
+  ca = "/etc/steady-image-cache/ca.crt"
+  # containerd's own client certificate, for the mutual TLS that SIC requires: a
+  # client-only pair from the same CA as SIC's certificate (README, "TLS"), put on
+  # the node by your provisioning. Do not copy the DaemonSet's tls.key here: that
+  # is the server key of the SIC pod, and a copy readable on the node widens what
+  # its exposure costs.
+  client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]

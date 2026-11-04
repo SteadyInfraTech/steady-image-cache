@@ -148,12 +148,15 @@ wait_for "cert-manager to accept the issuers" 120 applied
 kubectl wait --for=condition=Ready clusterissuer/e2e-ca --timeout=120s
 
 log "helm install: the chart as it is, with the local image and a short refresh"
+# The disk reserve is off here, as in run.sh: a CI runner with a nearly full disk
+# made SIC refuse to cache a 600-byte blob and failed an unrelated run.
 helm install "$RELEASE" "$ROOT/charts/steady-image-cache" -n "$NS" \
   --set image.repository="$IMAGE_REPO" --set image.tag="$IMAGE_TAG" \
   --set initContainer.image.repository="$IMAGE_REPO" --set initContainer.image.tag="$IMAGE_TAG" \
   --set "initContainer.registries={registry.example.test}" \
   --set initContainer.refreshInterval=10s \
   --set config.importInterval=3s \
+  --set config.minFreeBytes=0 --set config.minFreePercent=0 \
   --set tls.certManager.enabled=true \
   --set tls.certManager.issuerRef.name=e2e-ca --set tls.certManager.issuerRef.kind=ClusterIssuer \
   --wait --timeout 6m
