@@ -58,15 +58,30 @@ jobs:
       # new interesting input is minimised for at most 5s (the default is 60s,
       # during which the run shows no progress), and each step is given a
       # time limit, so that a stall is a failure with a name, not a long wait.
+      # The Go fuzz engine sometimes ends a run that found nothing with "context
+      # deadline exceeded" when the time is up (seen on shared runners, on
+      # different targets). That is the engine, not a finding: a finding prints
+      # "Failing input written to". The first is tried once more, with a warning;
+      # anything else fails at once.
       - name: Fuzz
         run: |
           set -e
+          fuzz() {
+            local attempt
+            for attempt in 1 2; do
+              if timeout 120 go test "$@" > fuzz.log 2>&1; then cat fuzz.log; return 0; fi
+              cat fuzz.log
+              if grep -q 'Failing input written to' fuzz.log || ! grep -q 'context deadline exceeded' fuzz.log; then return 1; fi
+              echo "::warning::the fuzz engine timed out at the end of its run ($*); trying again"
+            done
+            return 1
+          }
           for t in FuzzSplitPath FuzzValidRepoAndRef FuzzRetryAfterOf FuzzManifestType; do
             printf 'Fuzz target: %s\n' "$t"
-            timeout 120 go test ./internal/proxy -run '^$' -fuzz "^${t}\$" -fuzztime 20s -fuzzminimizetime 5s
+            fuzz ./internal/proxy -run '^$' -fuzz "^${t}\$" -fuzztime 20s -fuzzminimizetime 5s
           done
           printf 'Fuzz target: FuzzParsePeers\n'
-          timeout 120 go test ./internal/peer -run '^$' -fuzz '^FuzzParsePeers$' -fuzztime 20s -fuzzminimizetime 5s
+          fuzz ./internal/peer -run '^$' -fuzz '^FuzzParsePeers$' -fuzztime 20s -fuzzminimizetime 5s
 
   vulncheck:
     runs-on: ubuntu-latest
