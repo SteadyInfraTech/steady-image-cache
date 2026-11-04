@@ -261,7 +261,13 @@ operations_phase() {
   prev=$(previous_image)
   log "operations: $prev, then $cur again"
   docker pull -q "$prev" >/dev/null || fail "could not pull $prev"
-  kind load docker-image "$prev" --name "$CLUSTER"
+  # Not "kind load": the old image is a multi-platform index, and kind imports it
+  # with --all-platforms, which fails when Docker keeps only this platform's blobs.
+  docker save "$prev" -o "$WORK/prev.tar"
+  for n in "${NODES[@]}"; do
+    docker exec -i "$n" ctr -n k8s.io images import --digests --snapshotter=overlayfs - < "$WORK/prev.tar" >/dev/null \
+      || fail "could not import $prev on $n"
+  done
   kubectl -n kube-system patch daemonset steady-image-cache --type=merge -p '{"spec":{"updateStrategy":{"type":"OnDelete","rollingUpdate":null}}}'
 
   # ready_on NODE IMAGE: the SIC pod on NODE runs IMAGE and is Ready.
