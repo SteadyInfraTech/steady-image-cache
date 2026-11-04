@@ -21,6 +21,11 @@
 #   test/e2e/run.sh            # creates the cluster "sic-e2e" and deletes it
 #   KEEP=1 test/e2e/run.sh     # leave the cluster for inspection
 #   CLUSTER=foo test/e2e/run.sh
+#   NODE_IMAGE=kindest/node:v1.30.0 EXPECT_CONTAINERD=1.7. test/e2e/run.sh
+#                              run on nodes with another containerd; the version
+#                              the nodes really have is printed, and the run fails
+#                              if it does not start with EXPECT_CONTAINERD (see
+#                              .github/workflows/e2e-containerd.yml)
 #   MODE=registries test/e2e/run.sh
 #                              instead of the self-contained test, pull from real
 #                              public registries (needs the internet); see
@@ -42,6 +47,8 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-sic-e2e}
 KEEP=${KEEP:-}
+NODE_IMAGE=${NODE_IMAGE:-}
+EXPECT_CONTAINERD=${EXPECT_CONTAINERD:-}
 MODE=${MODE:-local}
 case $MODE in local|registries|operations) ;; *) echo "MODE must be local, registries or operations" >&2; exit 1 ;; esac
 # The image the manifest names, so that bumping the tag there for a release does
@@ -373,12 +380,21 @@ docker build --build-arg VERSION=e2e -t "$SIC_IMAGE" "$ROOT"
 
 log "create the kind cluster $CLUSTER"
 kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
-kind create cluster --name "$CLUSTER" --config "$ROOT/test/e2e/kind-config.yaml" --kubeconfig "$KUBECONFIG" --wait 120s
+kind create cluster --name "$CLUSTER" --config "$ROOT/test/e2e/kind-config.yaml" --kubeconfig "$KUBECONFIG" --wait 120s ${NODE_IMAGE:+--image "$NODE_IMAGE"}
 mapfile -t NODES < <(kind get nodes --name "$CLUSTER")
 A=$CLUSTER-worker
 B=$CLUSTER-worker2
 for n in "$A" "$B"; do [[ " ${NODES[*]} " == *" $n "* ]] || fail "expected node $n, have: ${NODES[*]}"; done
 kind load docker-image "$SIC_IMAGE" --name "$CLUSTER"
+# The runtime SIC talks to. A leg that says it tests containerd 1.7 must have it.
+for n in "${NODES[@]}"; do
+  CONTAINERD_VERSION=$(docker exec "$n" containerd --version | awk '{print $3}')
+  CONTAINERD_VERSION=${CONTAINERD_VERSION#v}
+  echo "containerd on $n: $CONTAINERD_VERSION (kubelet $(docker exec "$n" kubelet --version | awk '{print $2}'))"
+  if [ -n "$EXPECT_CONTAINERD" ] && [[ $CONTAINERD_VERSION != "$EXPECT_CONTAINERD"* ]]; then
+    fail "$n runs containerd $CONTAINERD_VERSION, this run is for $EXPECT_CONTAINERD (node image: ${NODE_IMAGE:-kind's default})"
+  fi
+done
 
 log "certificates (the recipe from the README, plus a client-only one for containerd)"
 (
