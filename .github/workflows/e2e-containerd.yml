@@ -1,0 +1,67 @@
+name: End-to-end (containerd versions)
+
+# The same end-to-end test as e2e.yml, on nodes with different containerd
+# versions: SIC reads containerd's content store and image list, so the
+# daemon's version is part of what it depends on. Each leg checks the version
+# the nodes really have (see EXPECT_CONTAINERD in test/e2e/run.sh), so a node
+# image that quietly changes its containerd fails the leg instead of testing
+# something else. kind's default node image carries containerd 2.x; the older
+# one is from the line of node images built with 1.7.
+on:
+  push:
+    branches:
+      - main
+    paths: &paths
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/**"
+      - "test/e2e/**"
+      - "Dockerfile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/e2e-containerd.yml"
+  pull_request:
+    paths: *paths
+  schedule:
+    - cron: "41 3 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-containerd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  containerd:
+    name: containerd ${{ matrix.expect }}x
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - expect: "1.7."
+            node_image: "kindest/node:v1.30.0"
+          - expect: "2."
+            node_image: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.27.0
+
+      - name: Run the end-to-end test
+        env:
+          NODE_IMAGE: ${{ matrix.node_image }}
+          EXPECT_CONTAINERD: ${{ matrix.expect }}
+        run: test/e2e/run.sh

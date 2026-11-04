@@ -392,7 +392,7 @@ for n in "${NODES[@]}"; do
   CONTAINERD_VERSION=${CONTAINERD_VERSION#v}
   echo "containerd on $n: $CONTAINERD_VERSION (kubelet $(docker exec "$n" kubelet --version | awk '{print $2}'))"
   if [ -n "$EXPECT_CONTAINERD" ] && [[ $CONTAINERD_VERSION != "$EXPECT_CONTAINERD"* ]]; then
-    fail "$n runs containerd $CONTAINERD_VERSION, this run is for $EXPECT_CONTAINERD (node image: ${NODE_IMAGE:-kind's default})"
+    fail "$n runs containerd $CONTAINERD_VERSION, this run is for $EXPECT_CONTAINERD (node image: ${NODE_IMAGE:-the kind default})"
   fi
 done
 
