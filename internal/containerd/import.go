@@ -13,8 +13,8 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/errdefs"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
