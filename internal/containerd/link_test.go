@@ -13,7 +13,7 @@ import (
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 
-	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/opencontainers/go-digest"
 )
 

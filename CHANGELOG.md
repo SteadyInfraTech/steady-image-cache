@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- SIC reads containerd through the containerd v2 client library (`github.com/containerd/containerd/v2`, v2.4.2) instead of v1.7. The daemon's version does not change: the end-to-end test runs on containerd 1.7 and 2.x nodes. This clears the four containerd findings (GO-2026-5064, -5338, -5622, -6791) that `govulncheck` reported for v1 and CI had to accept; none of them was reachable from SIC's use of the client.
 - Fix: `deploy/containerd/hosts.toml` (SIC as the only host, `_default`) and the `_default` file that `sic init-node` writes had only root-level fields. containerd 1.x before 1.7.32 refuses such a file (`invalid host tree`, containerd#10027; the end-to-end test showed it on 1.7.15), and then went to the registry itself, so SIC-only was not in force there. Both now have a `[host]` table as well as the root-level settings. containerd 2.x accepted the old file. **If you installed the old file on containerd 1.x nodes older than 1.7.32**, replace it, or pulls on them were going to the registry directly. The files for named registries (`mirror-hosts.toml` and init-node's) were fine.
 ## 1.3.0 - 2026-11-04
 

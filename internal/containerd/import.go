@@ -11,10 +11,10 @@ import (
 
 	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
-	containerd "github.com/containerd/containerd"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/namespaces"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -204,7 +204,7 @@ func (i *Importer) importContent(ctx context.Context, cs contentWalker) error {
 		}
 		ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: info.Digest, Size: info.Size})
 		if err != nil {
-			if errdefs.IsNotFound(err) {
+			if errors.Is(err, errdefs.ErrNotFound) {
 				return nil // garbage-collected since it was listed
 			}
 			failed.add(fmt.Errorf("open containerd content %s: %w", d, err))
