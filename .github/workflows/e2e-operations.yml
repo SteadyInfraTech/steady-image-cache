@@ -36,6 +36,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # The release tags tell the test which image is the previous one.
           fetch-depth: 0
 

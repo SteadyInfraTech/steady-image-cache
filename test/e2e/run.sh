@@ -290,13 +290,15 @@ operations_phase() {
   # manifest and its first layer from its cache alone (the registry is paused,
   # so anything it had to ask for would hang), and what it sends is what the
   # digests say.
-  served_from_cache() {
+  # with_registry_paused COMMAND...: the registry does not answer while it runs.
+  with_registry_paused() {
     local rc=0
     docker pause "$REGISTRY" >/dev/null
-    cache_check "$1" "$2" || rc=$?
+    "$@" || rc=$?
     docker unpause "$REGISTRY" >/dev/null
     return "$rc"
   }
+  served_from_cache() { with_registry_paused cache_check "$1" "$2"; }
   cache_get() {
     docker exec "$1" curl -fsS --max-time 20 --cacert /etc/steady-image-cache/ca.crt \
       --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
@@ -332,25 +334,26 @@ operations_phase() {
   check_cache "$B" "$DB"; check_cache "$A" "$DA"
   no_errors
 
-  log "operations: $A upgraded first, the others still on $prev: peers of two versions share blobs, both ways"
+  log "operations: $A upgraded first, the others still on $prev: peers of two versions serve each other, both ways"
   move_to "$cur" "$A"
   wait_for "every node to see every other" 90 everyone_sees_everyone
   check_cache "$A" "$DA"
   local gets peer_before
-  push mixed1 mixed1 >/dev/null
+  local m1 m2
+  m1=$(push mixed1 mixed1)
   gets=$(registry_blob_gets)
   docker exec "$A" crictl pull "$UP:mixed1"
   [ $(( $(registry_blob_gets) - gets )) = 3 ] || fail "the new node made $(( $(registry_blob_gets) - gets )) registry fetches for a new image, want 3"
   gets=$(registry_blob_gets); peer_before=$(from_cluster "$B")
-  docker exec "$B" crictl pull "$UP:mixed1"
+  with_registry_paused docker exec "$B" crictl pull "$UP@$m1" || fail "the old node could not pull from the cluster while the registry was away"
   [ "$(registry_blob_gets)" = "$gets" ] || fail "the old node went to the registry for what the new node had"
   [ $(( $(from_cluster "$B") - peer_before )) -ge 3 ] || fail "the old node got $(( $(from_cluster "$B") - peer_before )) blobs from its peers, want at least 3"
-  push mixed2 mixed2 >/dev/null
+  m2=$(push mixed2 mixed2)
   gets=$(registry_blob_gets)
   docker exec "$B" crictl pull "$UP:mixed2"
   [ $(( $(registry_blob_gets) - gets )) = 3 ] || fail "the old node made $(( $(registry_blob_gets) - gets )) registry fetches for a new image, want 3"
   gets=$(registry_blob_gets); peer_before=$(from_cluster "$A")
-  docker exec "$A" crictl pull "$UP:mixed2"
+  with_registry_paused docker exec "$A" crictl pull "$UP@$m2" || fail "the new node could not pull from the cluster while the registry was away"
   [ "$(registry_blob_gets)" = "$gets" ] || fail "the new node went to the registry for what the old node had"
   [ $(( $(from_cluster "$A") - peer_before )) -ge 3 ] || fail "the new node got $(( $(from_cluster "$A") - peer_before )) blobs from its peers, want at least 3"
   no_errors
@@ -434,7 +437,21 @@ serves() {
     --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
     "https://127.0.0.1:5000/v2/e2e/app/manifests/$DIGEST?ns=registry.example.test"
 }
-wait_for "$A's SIC to serve the manifest" 90 serves
+# The import adds the manifest before the blobs it names, so the manifest alone
+# is no sign that a pull on another node can be completed.
+serves_every_blob() {
+  local m d
+  serves || return 1
+  m=$(docker exec "$A" curl -fsS --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/app/manifests/$DIGEST?ns=registry.example.test") || return 1
+  for d in $(jq -r '.config.digest, .layers[].digest' <<<"$m"); do
+    docker exec "$A" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
+      --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/app/blobs/$d?ns=registry.example.test" || return 1
+  done
+}
+wait_for "$A's SIC to serve the manifest and every blob it names" 90 serves_every_blob
 # Peers are listed every 30s, and a pod that was not Ready at the last listing
 # is missing from it.
 sees_peer() { sees_all_peers "$B"; }
