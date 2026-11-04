@@ -11,11 +11,15 @@
 # deploy/containerd/mirror-hosts.toml: it keeps SIC in front but lets containerd
 # fall back to the registry, and removes that dependency.
 #
-# The [host] table is required, not a style: containerd 1.x (all of 1.7) rejects
-# a hosts.toml with only root-level fields ("invalid `host` tree", containerd
-# #10027) and then goes to the registry itself, which is the opposite of this
-# file's purpose. containerd 2.x accepts both.
+# The [host] table is required, not a style: containerd 1.x before 1.7.32
+# rejects a hosts.toml with only root-level fields ("invalid `host` tree",
+# containerd #10027) and then goes to the registry itself, which is the opposite
+# of this file's purpose. The root-level settings stay as well: containerd
+# treats the server as a host of its own and gives it those, not the table's.
 server = "https://127.0.0.1:5000"
+capabilities = ["pull", "resolve"]
+ca = "/etc/steady-image-cache/ca.crt"
+client = [["/etc/steady-image-cache/tls.crt", "/etc/steady-image-cache/tls.key"]]
 
 [host."https://127.0.0.1:5000"]
   capabilities = ["pull", "resolve"]

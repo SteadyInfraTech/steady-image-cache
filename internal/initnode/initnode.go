@@ -354,16 +354,26 @@ func generateHostsToml(reg string, opts Options) string {
 
 	capsList := formatCapabilities(opts.Capabilities)
 
-	// Every file needs a [host] table: containerd 1.x refuses a hosts.toml with
-	// only root-level fields ("invalid `host` tree", containerd#10027; the fix
-	// was never released for 1.7), and then falls through to the registry itself.
-	// For _default the server is SIC too: the air-gapped case, where SIC is the
-	// only host and nothing falls through.
+	// Every file needs a [host] table: containerd 1.x before 1.7.32 refuses a
+	// hosts.toml with only root-level fields ("invalid `host` tree",
+	// containerd#10027) and then falls through to the registry itself.
 	serverURL := upstreamServerURL(reg)
 	if reg == "_default" {
+		// The air-gapped case: SIC is the server and the only host, so nothing
+		// falls through. containerd treats the root server as a host of its own
+		// (before or after the [host] tables), and gives it the root-level
+		// capabilities, CA and client certificate, so they are written there as
+		// well as in the table: a server entry without them would be asked to
+		// push and to resolve, and could not do mutual TLS.
 		serverURL = opts.MirrorURL
+		b.WriteString(fmt.Sprintf("server = %q\n", serverURL))
+		b.WriteString(fmt.Sprintf("capabilities = %s\n", capsList))
+		b.WriteString(fmt.Sprintf("ca = %q\n", caPath))
+		b.WriteString(fmt.Sprintf("client = [[%q, %q]]\n\n", certPath, keyPath))
+	} else {
+		// A registry mirror with fallback to the registry itself.
+		b.WriteString(fmt.Sprintf("server = %q\n\n", serverURL))
 	}
-	b.WriteString(fmt.Sprintf("server = %q\n\n", serverURL))
 	b.WriteString(fmt.Sprintf("[host.%q]\n", opts.MirrorURL))
 	b.WriteString(fmt.Sprintf("  capabilities = %s\n", capsList))
 	b.WriteString(fmt.Sprintf("  ca = %q\n", caPath))

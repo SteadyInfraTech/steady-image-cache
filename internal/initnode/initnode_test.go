@@ -45,6 +45,14 @@ func TestGenerateHostsToml(t *testing.T) {
 		if !strings.Contains(out, `server = "https://127.0.0.1:5000"`) {
 			t.Errorf("expected _default server to be SIC, got:\n%s", out)
 		}
+		// The root server is a host of its own in containerd 2.x, and takes its
+		// capabilities, CA and client certificate from the root of the file.
+		root := out[:strings.Index(out, "[host.")]
+		for _, want := range []string{"capabilities = ", `ca = "/etc/steady-image-cache/ca.crt"`, "client = [["} {
+			if !strings.Contains(root, want) {
+				t.Errorf("_default: no %q at the root of the file, the server entry would lack it:\n%s", want, out)
+			}
+		}
 	})
 
 	// containerd 1.x refuses a hosts.toml that has no [host] table ("invalid
