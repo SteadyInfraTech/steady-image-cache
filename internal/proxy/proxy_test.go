@@ -408,27 +408,32 @@ func TestUpstreamDisabledNeverDialsNamespaceHost(t *testing.T) {
 // A layer that takes longer than the timeout in total must still arrive as long
 // as data keeps flowing.
 func TestSlowButSteadyTransferSucceeds(t *testing.T) {
-	body := []byte(strings.Repeat("x", 10*1024))
+	// A chunk every 20ms against a limit of 400ms: a transfer that takes longer
+	// than the limit as a whole (600ms) but never goes quiet for anything like it.
+	// The margin is wide on purpose: a loaded runner under the race detector can
+	// pause a goroutine for a few hundred milliseconds.
+	const chunks = 30
+	body := []byte(strings.Repeat("x", chunks*1024))
 	d := digestOf(body)
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		fl := w.(http.Flusher)
-		chunk := len(body) / 10
-		for i := 0; i < 10; i++ {
+		chunk := len(body) / chunks
+		for i := 0; i < chunks; i++ {
 			w.Write(body[i*chunk : (i+1)*chunk])
 			fl.Flush()
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 	}))
 	defer slow.Close()
-	a := newNode(t, Options{Timeout: 250 * time.Millisecond})
+	a := newNode(t, Options{Timeout: 400 * time.Millisecond})
 	a.fin.urls.Store(&[]string{slow.URL})
 	start := time.Now()
 	resp, got := get(t, a.srv.URL+"/v2/lib/app/blobs/"+d)
 	if resp.StatusCode != 200 || len(got) != len(body) {
 		t.Fatalf("status %d, %d bytes", resp.StatusCode, len(got))
 	}
-	if time.Since(start) < 400*time.Millisecond {
+	if time.Since(start) < 500*time.Millisecond {
 		t.Fatal("test is not exercising a transfer longer than the timeout")
 	}
 }
