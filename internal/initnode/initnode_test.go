@@ -45,10 +45,20 @@ func TestGenerateHostsToml(t *testing.T) {
 		if !strings.Contains(out, `server = "https://127.0.0.1:5000"`) {
 			t.Errorf("expected _default server to be SIC, got:\n%s", out)
 		}
-		if strings.Contains(out, `[host.`) {
-			t.Errorf("_default should not define a sub-host mirror, got:\n%s", out)
-		}
 	})
+
+	// containerd 1.x refuses a hosts.toml that has no [host] table ("invalid
+	// `host` tree"), whatever else it holds, so each file must have one naming
+	// SIC, and that is where the certificates are given.
+	for _, reg := range opts.Registries {
+		out := generateHostsToml(reg, opts)
+		if !strings.Contains(out, "\n[host.\"https://127.0.0.1:5000\"]\n") {
+			t.Errorf("%s: no [host] table for SIC, containerd 1.x would reject the file:\n%s", reg, out)
+		}
+		if !strings.Contains(out, "  ca = ") || !strings.Contains(out, "  client = ") {
+			t.Errorf("%s: the host table lacks the CA or the client certificate:\n%s", reg, out)
+		}
+	}
 }
 
 func TestProvisionCerts(t *testing.T) {

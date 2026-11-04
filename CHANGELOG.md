@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Fix: `deploy/containerd/hosts.toml` (SIC as the only host, `_default`) and the `_default` file that `sic init-node` writes had only root-level fields, which every containerd 1.x (including 1.7) refuses (`invalid host tree`, containerd#10027, not fixed in 1.7); containerd then went to the registry itself, so "SIC only" was not in force there. Both now have a `[host]` table. On containerd 2.x the old file worked. **If you installed the old file on containerd 1.x nodes**, replace it, or pulls were going to the registry directly. The files for named registries (`mirror-hosts.toml` and init-node's) were fine.
 ## 1.3.0 - 2026-11-04
 
 Upgrading from 1.2.x needs only the new image: everything below is new and optional, and no existing setting, metric or API path changes. The sample DaemonSet now names `:v1.3.0`.

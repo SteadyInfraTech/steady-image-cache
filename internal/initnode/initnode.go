@@ -354,17 +354,15 @@ func generateHostsToml(reg string, opts Options) string {
 
 	capsList := formatCapabilities(opts.Capabilities)
 
-	if reg == "_default" {
-		// Air-gapped fallback where SIC is the only host
-		b.WriteString(fmt.Sprintf("server = %q\n", opts.MirrorURL))
-		b.WriteString(fmt.Sprintf("capabilities = %s\n", capsList))
-		b.WriteString(fmt.Sprintf("ca = %q\n", caPath))
-		b.WriteString(fmt.Sprintf("client = [[%q, %q]]\n", certPath, keyPath))
-		return b.String()
-	}
-
-	// Normal registry mirror configuration with fallback to upstream
+	// Every file needs a [host] table: containerd 1.x refuses a hosts.toml with
+	// only root-level fields ("invalid `host` tree", containerd#10027; the fix
+	// was never released for 1.7), and then falls through to the registry itself.
+	// For _default the server is SIC too: the air-gapped case, where SIC is the
+	// only host and nothing falls through.
 	serverURL := upstreamServerURL(reg)
+	if reg == "_default" {
+		serverURL = opts.MirrorURL
+	}
 	b.WriteString(fmt.Sprintf("server = %q\n\n", serverURL))
 	b.WriteString(fmt.Sprintf("[host.%q]\n", opts.MirrorURL))
 	b.WriteString(fmt.Sprintf("  capabilities = %s\n", capsList))
