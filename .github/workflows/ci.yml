@@ -60,9 +60,8 @@ jobs:
       # time limit, so that a stall is a failure with a name, not a long wait.
       # The Go fuzz engine sometimes ends a run that found nothing with "context
       # deadline exceeded" when the time is up (seen on shared runners, on
-      # different targets). That is the engine, not a finding: a finding prints
-      # "Failing input written to". The first is tried once more, with a warning;
-      # anything else fails at once.
+      # different targets). If nothing shows a finding (see the check below) it is
+      # tried once more, with a warning; anything else fails at once.
       - name: Fuzz
         run: |
           set -e
@@ -71,7 +70,13 @@ jobs:
             for attempt in 1 2; do
               if timeout 120 go test "$@" > fuzz.log 2>&1; then cat fuzz.log; return 0; fi
               cat fuzz.log
-              if grep -q 'Failing input written to' fuzz.log || ! grep -q 'context deadline exceeded' fuzz.log; then return 1; fi
+              # A finding can also end as a deadline error, when the time runs out
+              # while the failing input is being minimised: the engine has then
+              # saved it without saying so. Any saved input, or a minimising
+              # message, is a finding.
+              if grep -qE 'Failing input written to|minimizing .*failing input' fuzz.log \
+                || [ -n "$(git ls-files --others --exclude-standard -- '*/testdata/fuzz/*')" ] \
+                || ! grep -q 'context deadline exceeded' fuzz.log; then return 1; fi
               echo "::warning::the fuzz engine timed out at the end of its run ($*); trying again"
             done
             return 1
