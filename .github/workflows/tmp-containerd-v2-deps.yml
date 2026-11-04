@@ -1,0 +1,29 @@
+name: TEMPORARY resolve containerd v2 dependencies
+# Throwaway: runs on the migration branch's pull request only, resolves go.mod and
+# go.sum (which cannot be done where the author works) and prints them. Not to be merged.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/tmp-containerd-v2-deps.yml"
+permissions:
+  contents: read
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Resolve
+        run: |
+          go list -m -versions github.com/containerd/containerd/v2 | tr ' ' '\n' | tail -8
+          go get github.com/containerd/containerd/v2@latest
+          go mod tidy
+          go build ./... 2>&1 | head -40
+          go vet ./... 2>&1 | head -40
+          echo "=== go.mod"; cat go.mod
+          echo "=== GOSUM-BEGIN"; base64 -w0 go.sum; echo; echo "=== GOSUM-END"
+          echo "=== GOMOD-BEGIN"; base64 -w0 go.mod; echo; echo "=== GOMOD-END"
