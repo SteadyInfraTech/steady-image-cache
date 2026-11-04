@@ -426,7 +426,11 @@ done
 log "deploy SIC from deploy/daemonset.yaml"
 kubectl apply -f "$ROOT/deploy/daemonset.yaml"
 # Only the interval differs from the sample: the default is five minutes.
-kubectl -n kube-system set env daemonset/steady-image-cache SIC_IMPORT_INTERVAL=3s
+# The disk reserve is off: these runs are not about disk pressure (the unit tests
+# are), and a CI runner whose disk is more than 80% full at the start would make
+# SIC refuse to cache even a 600-byte blob ("507 Insufficient Storage"), which
+# has failed unrelated runs.
+kubectl -n kube-system set env daemonset/steady-image-cache SIC_IMPORT_INTERVAL=3s SIC_MIN_FREE_BYTES=0 SIC_MIN_FREE_PERCENT=0
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 
 if [ "$MODE" = registries ]; then registries_phase; exit 0; fi
