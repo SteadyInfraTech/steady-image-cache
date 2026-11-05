@@ -51,6 +51,8 @@ Every pull request runs the checks that apply to the files it changes. What each
 | `e2e-registries.yml` | pulls from real public registries (needs the internet, not a gate for pull requests) | tags, weekly, by hand |
 | `store-benchmark.yml` | the store read benchmark | `internal/store/**` |
 
+The *When* column is a summary. The authority is the `on:` block at the top of each workflow file: the end-to-end workflows also run when `cmd/**`, `internal/**`, `Dockerfile`, `go.mod`, `go.sum`, `test/e2e/**` (including `kind-config.yaml`) or the workflow file itself change, and `deploy.yml` and `helm.yml` have their own path lists. A change to a test script runs the jobs that use it.
+
 When a check is red:
 
 * **Read the failure; do not just rerun.** A rerun hides a flake that will come back, or a real finding. A timing test needs a margin of ten times or more over what a loaded runner can do (`TestSlowButSteadyTransferSucceeds` failed at four). A fuzz run that ends with `context deadline exceeded` and no saved input is retried once by the workflow; a saved input is a finding and fails at once.
