@@ -1,5 +1,9 @@
-.PHONY: build test
+.PHONY: build test race vet
 build:
 	go build ./cmd/sic
 test:
 	go test ./...
+race:
+	go test -race ./...
+vet:
+	go vet ./...

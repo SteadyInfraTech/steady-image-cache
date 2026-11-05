@@ -6,7 +6,7 @@ A node-local, peer-assisted OCI registry cache for Kubernetes/containerd, design
 
 ## Status
 
-SIC is a young project: the first release was on 2026-10-24. What is covered so far: unit and race-detector tests, fuzzing of request and pod-list parsing, fault-injection tests of the cache, and an end-to-end test on a three-node [kind](https://kind.sigs.k8s.io/) cluster that includes real registries (see "End-to-end test"). What is not covered yet: clusters beyond a handful of nodes, long-running soak and failure-injection tests, and containerd versions beyond the two the end-to-end test runs on (1.7 and 2.x, see "End-to-end test"). Published numbers for rollout time and registry traffic do not exist yet either, so measure on your own cluster before relying on it for one.
+SIC is a young project: the first release was on 2026-10-24. What is covered so far: unit and race-detector tests, fuzzing of request and pod-list parsing, fault-injection tests of the cache, and end-to-end tests on kind clusters with a real containerd (see "End-to-end test"): peers, real registries behind a private CA and with passwords, the sample mirror configuration, the Helm chart with cert-manager and certificate renewal, rolling back to the previous release and forward again, and containerd 1.7 and 2.x nodes. The alert rules have unit tests (`promtool`). What is not covered yet: clusters beyond a handful of nodes (the cost of gossip is computed and measured on a model, see "Large clusters", but not on a real cluster of that size), a pod killed in the middle of a download, long-running soak tests, and containerd versions beyond the two named. Published numbers for rollout time and registry traffic do not exist yet either, so measure on your own cluster before relying on it for one.
 
 Things to know before deploying, each described in the section named:
 
@@ -329,9 +329,9 @@ docker build -t steady-image-cache:dev .
 docker run --rm steady-image-cache:dev --version
 ```
 
-The release build stamps its version with `--build-arg VERSION=...`; without it the binary reports `dev`.
+The release build stamps its version with `--build-arg VERSION=...`; without it the binary reports `dev`. `go.mod` names the Go version the tests and linters use; the Dockerfile builds the release with the Go 1.27 image. SIC reads containerd through the `github.com/containerd/containerd/v2` client library, which works against containerd 1.7 and 2.x daemons.
 
-The build requires the containerd Go client dependency declared in `go.mod`.
+How a change is made, what CI checks and what a release needs are in `CONTRIBUTING.md` and `RELEASING.md`.
 
 ### End-to-end test
 
