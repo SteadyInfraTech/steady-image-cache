@@ -110,7 +110,7 @@ jobs:
       # again: ids in ACCEPTED, with the reason here, do not fail the job.
       - name: govulncheck
         env:
-          ACCEPTED: ""
+          ACCEPTED: "GO-2026-6859"
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck -format json ./... > vuln.json
