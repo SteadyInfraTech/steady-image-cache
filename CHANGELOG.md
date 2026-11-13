@@ -4,8 +4,13 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+## 1.3.2 - 2026-11-13
+
+A release that changes what you can verify, not what runs. Upgrading from 1.3.1 needs only the new image (or chart); no setting, metric or API path changes, and no file needs replacing.
+
 - Release images and the Helm chart are now signed with cosign (keyless, by the release workflow's GitHub identity), and the image index carries a per-platform SBOM (SPDX) and the build's provenance. The release job verifies its own signature and the presence of the SBOMs before it is green. How to verify: README, "Verifying a release". Nothing changes in what runs; releases before this one stay unsigned.
 - Built with Go 1.27.4 and `klauspost/compress` 1.20.2 (dependency updates).
+
 ## 1.3.1 - 2026-11-05
 
 A fix release. Upgrading from 1.3.0 needs only the new image, except for one file: **if you installed `deploy/containerd/hosts.toml` as the `_default` configuration (or listed `_default` in `SIC_INIT_REGISTRIES`) on containerd 1.x nodes older than 1.7.32, install the new file**; see the first entry. No setting, metric or API path changes.
