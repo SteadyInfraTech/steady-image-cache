@@ -34,6 +34,25 @@ The settings, the metric names and the HTTP paths are the public interface and f
 * **Tags that stay current**, with the registry deciding what a tag is; peers only share content by digest.
 * Images for `linux/amd64` and `linux/arm64`; `sic --version` prints the build.
 
+## How SIC differs from Spegel, Dragonfly and Kraken
+
+All four move image content between nodes so that the registry is asked less. They differ in what they assume and in what they are for. This is from their own documentation as of November 2026 (linked), not from running them side by side; check their pages for anything that may have changed.
+
+| | SIC | [Spegel](https://spegel.dev/docs/architecture/) | [Dragonfly](https://d7y.io/docs/concepts/terminology/architecture) | [Kraken](https://uber-kraken.readthedocs.io/) |
+|---|---|---|---|---|
+| Shape | One DaemonSet; each node serves a registry interface to containerd and to other nodes | One DaemonSet; each node serves a registry mirror interface | Manager, scheduler, seed peers and a peer daemon on each node | Agents on each host plus origins, trackers, build-index and proxy; blobs in pluggable storage |
+| Where peers are found | Kubernetes API (pods, optionally EndpointSlices) | Kademlia DHT, with a leader-elected bootstrap | Scheduler chooses parents | Tracker returns peer lists |
+| Where content lives | SIC's own cache directory, filled by the import from containerd's content store (hard-linked when the directory is mounted) | containerd's content on each node | Peer daemon's cache | Agents and origins |
+| If no peer has it | Registry fallback is optional and off by default; with it off the pull fails, which is the point in an air-gapped cluster | 404, and containerd goes to the registry | Scheduler tells the peer to go to the source | Origin (backed by the storage) |
+| Needs besides the DaemonSet | Nothing | Nothing | A control plane to run | A tracker, origin and build-index tier |
+
+What SIC is for, and where it is narrower than the others:
+
+* **A registry that must not be reachable, or must not be trusted with more than it needs.** With `_default` as the only containerd host, SIC is the only path to content, and nothing leaves the cluster unless you allow it per registry. The others are built to speed up or shield pulls that otherwise reach a registry.
+* **Credentials stay with the client.** SIC never holds registry credentials: it passes the registry's `WWW-Authenticate` challenge to containerd and forwards the `Authorization` containerd then sends, and drops it on a cross-origin redirect ("Upstream fallback"). Protected registries ("Upstream fallback", `SIC_PROTECTED_REGISTRIES`) ask the registry per layer before giving private content to a client. The pages of the other projects linked above do not describe how they handle private registries; read their documentation before relying on either.
+* **Tags.** SIC confirms a tag with the registry (a `HEAD`) and fetches by digest, and says what it does when the registry is unreachable ("Tags: staying current, and who is believed").
+* **Where it is narrower.** SIC has no scheduler or piece-level swarming: a node copies a whole blob from one peer, so Dragonfly and Kraken are the better fit for very large artifacts and very large simultaneous fan-out, which they document at far larger scale than SIC has been tested ("Status"). SIC is young (the others are older and, Kraken in production at Uber since 2018 by its own account, longer tested); Spegel is lighter to run if you only want a mirror on top of containerd and have no air-gapped or private-registry requirement.
+
 ## Pull flow
 
 ```text
@@ -189,9 +208,9 @@ All settings are environment variables. A value that cannot be parsed (a duratio
 | `SIC_PEER_TIMEOUT`, `SIC_PEER_BACKOFF`, `SIC_PEER_MAX_TRIES` | `5s`, `30s`, `4` | See "Peer requests". |
 | `SIC_PEER_WATCH` | `true` | Follow pods with a watch instead of listing every 30s. See "Health and metrics". |
 | `SIC_COORDINATE`, `SIC_COORDINATE_WAIT` | `true`, `20s` | One fetch per digest for nodes that miss at the same moment. See "Simultaneous pulls". |
-| `SIC_ENDPOINTSLICE_DISCOVERY` | `false` | List peers from EndpointSlices as well as pods, for clusters of some hundreds of nodes. See "Large clusters". |
-| `NODE_ZONE` | unset | This node's zone: peers in it are asked first. See "Large clusters". |
-| `SIC_DIGEST_GOSSIP`, `SIC_GOSSIP_INTERVAL` | `false`, `3m` | Nodes exchange filters of the blobs they hold, and a miss asks the likely holders first. See "Large clusters". |
+| `SIC_ENDPOINTSLICE_DISCOVERY` | `false` | Experimental. List peers from EndpointSlices as well as pods, for clusters of some hundreds of nodes. See "Large clusters". |
+| `NODE_ZONE` | unset | Experimental. This node's zone: peers in it are asked first. See "Large clusters". |
+| `SIC_DIGEST_GOSSIP`, `SIC_GOSSIP_INTERVAL` | `false`, `3m` | Experimental. Nodes exchange filters of the blobs they hold, and a miss asks the likely holders first. See "Large clusters". |
 | `SIC_UPSTREAM_ENABLED` | `false` | Fetch misses from registries. |
 | `SIC_UPSTREAM_REGISTRIES` | unset | The registries that may be contacted, comma separated. Anything else is refused. |
 | `SIC_UPSTREAM_TIMEOUT` | `30s` | Bounds connecting to a registry, and how long a transfer may go without receiving data (peers and registries alike). |
@@ -219,7 +238,7 @@ Pre-packaged Prometheus alerting rules (`deploy/monitoring/prometheus-rules.yaml
 
 ## Large clusters
 
-Three optional features, all off by default, for clusters where asking peers at random gets expensive.
+Three optional features, all off by default, for clusters where asking peers at random gets expensive. **All three are experimental:** they are tested on kind clusters and a computed cost model, not on a real cluster of the size they are for, and their behaviour or settings may change in a minor release until they are measured there. Do not turn them on for a production cluster without measuring on a copy of it first; the base peer protocol needs none of them.
 
 * **EndpointSlice discovery** (`SIC_ENDPOINTSLICE_DISCOVERY=true`) reads the peers from the EndpointSlices of a Service that selects the SIC pods (`SIC_POD_LABEL_SELECTOR` is the label selector the slices are listed by; a slice carries the labels of its Service, so the Service needs the labels the selector names), watched like pods, instead of from every pod object. It runs next to the pod discovery, whose peers it adds to. The node needs `get`, `list` and `watch` on `endpointslices` in `discovery.k8s.io`, which the sample RBAC does not grant; and `HOST_IP`, so that it leaves itself out.
 * **Zones** (`NODE_ZONE`): peers in this node's zone are asked first, then those whose zone is not known, then the others. A peer's zone is learned from its EndpointSlice endpoint, so it works with EndpointSlice discovery only. The zone of the node itself has to be given: a pod cannot read its node's labels through the downward API, so set it per node pool or from your own tooling.
