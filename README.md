@@ -421,6 +421,7 @@ From 1.3.2 on, the image and the Helm chart of every release are signed with [co
 
 ```bash
 IMAGE=ghcr.io/steadyinfratech/steady-image-cache
+set -euo pipefail
 DIGEST=$(docker buildx imagetools inspect "$IMAGE:v1.3.2" --format '{{printf "%s" .Manifest.Digest}}')
 
 cosign verify \
@@ -429,14 +430,15 @@ cosign verify \
   "$IMAGE@$DIGEST"
 ```
 
-Deploy `$IMAGE@$DIGEST`, not `$IMAGE:v1.3.2`. In `deploy/daemonset.yaml`, use it as the image. In the chart, the image is built as `repository:tag`, so put the tag and the digest together in the tag value (Kubernetes accepts `v1.3.2@sha256:...` and then pulls by the digest), and do it in both places that run SIC, `image.tag` for the main container and `initContainer.image.tag` for the init containers; setting only one leaves the other on the tag you did not verify:
+Deploy only if `cosign verify` exited successfully (it exits non-zero when the signature or the identity does not match, and in a script `set -e` makes that stop the run), and deploy `$IMAGE@$DIGEST`, not `$IMAGE:v1.3.2`. In `deploy/daemonset.yaml`, use it as the image. In the chart, the image is built as `repository:tag`, so put the tag and the digest together in the tag value (Kubernetes accepts `v1.3.2@sha256:...` and then pulls by the digest), and do it in both places that run SIC, `image.tag` for the main container and `initContainer.image.tag` for the init containers; setting only one leaves the other on the tag you did not verify:
 
 ```bash
 helm upgrade --install steady-image-cache ... \
   --set "image.tag=v1.3.2@$DIGEST" \
   --set "initContainer.image.tag=v1.3.2@$DIGEST"
 ```
- The signature is on the digest, so the digest is what the check vouches for. The image index also holds, for each of the two platforms, a software bill of materials (SPDX) and the build's provenance, covered by the same signature (the chart has none); read them from the same digest:
+
+The signature is on the digest, so the digest is what the check vouches for. The image index also holds, for each of the two platforms, a software bill of materials (SPDX) and the build's provenance, covered by the same signature (the chart has none); read them from the same digest:
 
 ```bash
 docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .SBOM }}'
