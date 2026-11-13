@@ -4,7 +4,7 @@
 
 Please do not open a public issue. Use GitHub's private reporting: open the **Security** tab of this repository and choose **Report a vulnerability**. Include the version (`sic --version`), how the cache is deployed, and the steps to reproduce.
 
-The report is acknowledged, and you are kept informed while a fix is prepared. A fix is released as a patch version, with a note in `CHANGELOG.md`.
+The report is acknowledged, and you are kept informed while a fix is prepared. A fix is released as a patch version, with a note in `CHANGELOG.md`. Release images and charts (from 1.3.2) are signed; release images also carry an SBOM. The README's "Verifying a release" shows how to check them.
 
 ## Supported versions
 

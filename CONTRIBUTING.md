@@ -41,13 +41,13 @@ Every pull request runs the checks that apply to the files it changes. What each
 | Workflow | Checks | When |
 |---|---|---|
 | `ci.yml` | `lint`, `test` (race detector, a 20-second run of each fuzz target), `vulncheck` (govulncheck; nothing is accepted: an exception needs an id and a reason in the workflow) | always |
-| `release.yml` | the multi-architecture image builds; on a tag it is published | always, publishes on `v*` tags |
+| `release.yml` | the multi-architecture image builds; on a tag or `main` it is published with an SBOM and provenance, signed with cosign, and the job verifies both | always, publishes on `v*` tags |
 | `deploy.yml` | the sample manifests are valid | `deploy/**` |
 | `e2e.yml` | the three-node kind test, phases 1–4 | code and deployment files |
 | `e2e-containerd.yml` | the same on containerd 1.7 and 2.x nodes | code and deployment files, weekly |
 | `e2e-operations.yml` | roll back to the previous release and forward, mixed versions | code and manifest |
 | `e2e-helm.yml` | the chart on kind with cert-manager: install, init-node, certificate renewal | chart and code |
-| `helm.yml` | chart lint, templating, schema checks, `promtool` on the alert rules; publishes the chart on a tag | chart, monitoring files |
+| `helm.yml` | chart lint, templating, schema checks, `promtool` on the alert rules; publishes and signs the chart on a tag | chart, monitoring files |
 | `e2e-registries.yml` | pulls from real public registries (needs the internet, not a gate for pull requests) | tags, weekly, by hand |
 | `store-benchmark.yml` | the store read benchmark | `internal/store/**` |
 
@@ -66,7 +66,7 @@ Every pull request is reviewed by CodeRabbit. Its findings arrive in four places
 
 ## Dependencies
 
-Dependabot opens one grouped pull request a week each for GitHub Actions (pinned by commit), Go modules and the Dockerfile's base image. Actions are pinned by SHA with a version comment. The containerd client is `github.com/containerd/containerd/v2`; the end-to-end test runs it against containerd 1.7 and 2.x daemons, so a bump of either is checked by CI.
+Dependabot opens one grouped pull request a week each for GitHub Actions (pinned by commit), Go modules and the Dockerfile's base image. Actions are pinned by SHA with a version comment (cosign's installer included; the cosign version it installs is pinned in the workflows too). Signing is keyless and needs `id-token: write` on the publish jobs only. The containerd client is `github.com/containerd/containerd/v2`; the end-to-end test runs it against containerd 1.7 and 2.x daemons, so a bump of either is checked by CI.
 
 ## Releasing
 

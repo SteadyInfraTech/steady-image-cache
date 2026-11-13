@@ -415,6 +415,50 @@ The DaemonSet uses the host network and a fixed port, so a new pod cannot start 
 
 Either way, change the image tag (or digest) in the DaemonSet and nothing else in the same rollout, so that a problem is attributable.
 
+### Verifying a release
+
+From 1.3.2 on, the image and the Helm chart of every release are signed with [cosign](https://docs.sigstore.dev/cosign/) without a key: the signature is made by the release workflow's own GitHub identity, and the certificate says which workflow and which tag. Verify with the identity of *that release's* tag, exactly, not a pattern: a pattern would also accept the signature of another release, and a registry writer could then point one tag at another release's image. Replace `v1.3.2` below by the release you are verifying. A tag can be moved, so resolve it to a digest once, verify that digest, and use only the digest from then on: verifying the tag and then deploying the tag could hand you a different image than the one you checked.
+
+```bash
+IMAGE=ghcr.io/steadyinfratech/steady-image-cache
+set -euo pipefail
+DIGEST=$(docker buildx imagetools inspect "$IMAGE:v1.3.2" --format '{{printf "%s" .Manifest.Digest}}')
+
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/release.yml@refs/tags/v1.3.2 \
+  "$IMAGE@$DIGEST"
+```
+
+Deploy only if `cosign verify` exited successfully (it exits non-zero when the signature or the identity does not match, and in a script `set -e` makes that stop the run), and deploy `$IMAGE@$DIGEST`, not `$IMAGE:v1.3.2`. In `deploy/daemonset.yaml`, use it as the image. In the chart, the image is built as `repository:tag`, so put the tag and the digest together in the tag value (Kubernetes accepts `v1.3.2@sha256:...` and then pulls by the digest), and do it in both places that run SIC, `image.tag` for the main container and `initContainer.image.tag` for the init containers; setting only one leaves the other on the tag you did not verify:
+
+```bash
+helm upgrade --install steady-image-cache ... \
+  --set "image.tag=v1.3.2@$DIGEST" \
+  --set "initContainer.image.tag=v1.3.2@$DIGEST"
+```
+
+The signature is on the digest, so the digest is what the check vouches for. The image index also holds, for each of the two platforms, a software bill of materials (SPDX) and the build's provenance, covered by the same signature (the chart has none); read them from the same digest:
+
+```bash
+docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .SBOM }}'
+docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .Provenance }}'
+```
+
+The chart (its version is the tag without the `v`; the workflow is `helm.yml`) works the same way: resolve the digest once (`crane digest`, or `oras resolve`), verify it with the `helm.yml` identity, and install from the digest (`helm install ... oci://ghcr.io/steadyinfratech/charts/steady-image-cache@$CHART_DIGEST`, which needs a Helm version that accepts digests; otherwise `helm pull` the digest and install the file):
+
+```bash
+CHART=ghcr.io/steadyinfratech/charts/steady-image-cache
+CHART_DIGEST=$(crane digest "$CHART:1.3.2")
+
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/helm.yml@refs/tags/v1.3.2 \
+  "$CHART@$CHART_DIGEST"
+```
+
+Releases before 1.3.2 are not signed. The signing was built and checked with cosign 3.1.4; use a current cosign. A signature proves where an image was built, not that the code is free of defects: it is one input to a decision, next to `govulncheck` in CI and the SBOM.
+
 ## Production notes
 
 SIC verifies every imported or downloaded blob against its SHA-256 digest before accepting it. The containerd store is only accessed through its gRPC API; SIC does not modify containerd content. Its own cache is independent under `/var/lib/steady-image-cache`.

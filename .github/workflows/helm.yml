@@ -82,6 +82,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # keyless signing of the chart, as of the image (release.yml)
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,10 +151,41 @@ jobs:
           echo "$GH_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
 
       - name: Push Helm chart OCI package to GHCR
+        id: push
         env:
           PKG: ${{ steps.package.outputs.pkg }}
           OWNER: ${{ github.repository_owner }}
         run: |
           # GHCR requires lowercase registry paths
           OWNER_LOWER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
-          helm push "$PKG" "oci://ghcr.io/${OWNER_LOWER}/charts"
+          out=$(helm push "$PKG" "oci://ghcr.io/${OWNER_LOWER}/charts" 2>&1)
+          echo "$out"
+          digest=$(sed -n 's/^Digest: //p' <<<"$out" | head -n 1)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "helm push printed no digest" >&2; exit 1; }
+          echo "ref=ghcr.io/${OWNER_LOWER}/charts/$(basename "$PKG" | sed 's/-[0-9][0-9A-Za-z.+-]*\.tgz$//')@${digest}" >> "$GITHUB_OUTPUT"
+
+      # cosign reads Docker's credentials, not Helm's: the login above is for
+      # helm push only, and without this one the chart would be published and
+      # then fail to be signed.
+      - name: Log in to GitHub Container Registry for cosign
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Sign the chart and verify the signature
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/helm.yml@$GITHUB_REF" \
+            "$REF" > /dev/null
+          echo "signed and verified: $REF"
