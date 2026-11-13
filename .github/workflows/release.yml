@@ -153,7 +153,9 @@ jobs:
             jq -e --arg p "$p" '.[$p].SPDX.packages | length > 0' sbom.json > /dev/null \
               || { echo "no SBOM with packages for $p" >&2; exit 1; }
           done
-          docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .Provenance }}' \
-            | jq -e 'length > 0' > /dev/null \
-            || { echo "no provenance" >&2; exit 1; }
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .Provenance }}' > provenance.json
+          for p in linux/amd64 linux/arm64; do
+            jq -e --arg p "$p" '.[$p].SLSA | length > 0' provenance.json > /dev/null \
+              || { echo "no provenance for $p" >&2; exit 1; }
+          done
           echo "SBOM and provenance present for both platforms"

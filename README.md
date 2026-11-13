@@ -417,16 +417,25 @@ Either way, change the image tag (or digest) in the DaemonSet and nothing else i
 
 ### Verifying a release
 
-From 1.3.2 on, the image and the Helm chart of every release are signed with [cosign](https://docs.sigstore.dev/cosign/) without a key: the signature is made by the release workflow's own GitHub identity, and the certificate says which workflow and which tag. Verify the image by the identity of the workflow, not just that "something" signed it:
+From 1.3.2 on, the image and the Helm chart of every release are signed with [cosign](https://docs.sigstore.dev/cosign/) without a key: the signature is made by the release workflow's own GitHub identity, and the certificate says which workflow and which tag. Verify with the identity of *that release's* tag, exactly, not a pattern: a pattern would also accept the signature of another release, and a registry writer could then point one tag at another release's image. Replace `v1.3.2` below by the release you are verifying, in both places:
 
 ```bash
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/SteadyInfraTech/steady-image-cache/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/release.yml@refs/tags/v1.3.2 \
   ghcr.io/steadyinfratech/steady-image-cache:v1.3.2
 ```
 
-For the chart, the same command with `.../workflows/helm\.yml@...` and `ghcr.io/steadyinfratech/charts/steady-image-cache:1.3.2`. The signature is on the digest, so a tag moved afterwards does not carry it. The image index also holds, for each of the two platforms, a software bill of materials (SPDX) and the build's provenance, covered by the same signature:
+For the chart (the chart version is the tag without the `v`; the workflow is `helm.yml`):
+
+```bash
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/helm.yml@refs/tags/v1.3.2 \
+  ghcr.io/steadyinfratech/charts/steady-image-cache:1.3.2
+```
+
+The signature is on the digest, so a tag moved afterwards does not carry it. The image index also holds, for each of the two platforms, a software bill of materials (SPDX) and the build's provenance, covered by the same signature (the chart has none):
 
 ```bash
 docker buildx imagetools inspect ghcr.io/steadyinfratech/steady-image-cache:v1.3.2 --format '{{ json .SBOM }}'
