@@ -1,10 +1,6 @@
 package peer
 
-import (
-	"sort"
-	"strings"
-	"sync"
-)
+import "sync"
 
 // ZoneAwareFinder wraps another Finder and re-orders its candidates so that
 // peers in the same availability zone as this node appear first.
@@ -121,54 +117,3 @@ func (r *ZoneResolver) Zones() map[string]string {
 	}
 	return out
 }
-
-// ZoneStats returns a map from zone name to the number of peers in that zone.
-func (r *ZoneResolver) ZoneStats() map[string]int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make(map[string]int)
-	for _, z := range r.zones {
-		if z != "" {
-			out[z]++
-		}
-	}
-	return out
-}
-
-// ZonesForCandidates returns the sorted, deduplicated set of zones present in
-// a set of candidate peer base URLs.
-func (r *ZoneResolver) ZonesForCandidates(candidates []string) []string {
-	seen := make(map[string]bool)
-	for _, c := range candidates {
-		if z := r.ZoneOf(c); z != "" {
-			seen[z] = true
-		}
-	}
-	zones := make([]string, 0, len(seen))
-	for z := range seen {
-		zones = append(zones, z)
-	}
-	sort.Strings(zones)
-	return zones
-}
-
-// splitBaseHost extracts the host (IP) portion of a base URL like
-// "https://10.0.0.1:5000" for zone lookup when the full base URL is not the
-// map key.
-func splitBaseHost(base string) string {
-	// Strip scheme.
-	s := base
-	if i := strings.Index(s, "://"); i >= 0 {
-		s = s[i+3:]
-	}
-	// Strip port.
-	if i := strings.LastIndex(s, ":"); i >= 0 {
-		s = s[:i]
-	}
-	// Strip brackets for IPv6.
-	s = strings.Trim(s, "[]")
-	return s
-}
-
-// ensure splitBaseHost is reachable from tests.
-var _ = splitBaseHost
