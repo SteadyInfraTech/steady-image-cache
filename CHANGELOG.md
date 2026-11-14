@@ -4,6 +4,8 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- New optional `prepull` DaemonSet in the Helm chart (off while `prepull.image.tag` is empty) and a `sic idle` command for it: puts the next release's image on every node before the upgrade, so that a node whose only registry host is SIC (`_default`) does not have to pull its new SIC image after the old SIC has stopped. README, "Upgrading". Nothing changes unless you set it.
+
 ## 1.3.2 - 2026-11-13
 
 A release that changes what you can verify, not what runs. Upgrading from 1.3.1 needs only the new image (or chart); no setting, metric or API path changes, and no file needs replacing.

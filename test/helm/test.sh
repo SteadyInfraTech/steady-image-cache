@@ -38,6 +38,34 @@ if grep -q "name: sic-init" "$TMP_DIR/no-init.yaml"; then
   exit 1
 fi
 
+echo "=== Testing template: pre-pull ==="
+refute "prepull" "$TMP_DIR/default.yaml"
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml > "$TMP_DIR/prepull.yaml"
+grep -q "name: sic-steady-image-cache-prepull" "$TMP_DIR/prepull.yaml"
+grep -q 'steady-image-cache:v9.9.9' "$TMP_DIR/prepull.yaml"
+grep -q 'args: \["idle"\]' "$TMP_DIR/prepull.yaml"
+# A long nameOverride must not push the label past 63 characters.
+long=$(printf 'a%.0s' $(seq 1 63))
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 --set nameOverride="$long" -s templates/prepull.yaml > "$TMP_DIR/prepull-long.yaml"
+awk '/app.kubernetes.io\/name:/ {v=$2; if (length(v) > 63) bad=1} END {exit bad}' "$TMP_DIR/prepull-long.yaml" \
+  || { echo "FAIL: a pre-pull label value is longer than 63 characters" >&2; exit 1; }
+# It keeps the node affinity of the main DaemonSet, or it would pre-pull on nodes SIC does not run on.
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml \
+  --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=sic-test' \
+  --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=Exists' | grep -q 'sic-test'
+# Pod affinity is not copied (it names SIC's own pods), and a repository override reaches the pre-pull image.
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml --set image.repository=registry.local/sic \
+  --set 'affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey=kubernetes.io/hostname' > "$TMP_DIR/prepull-repo.yaml"
+grep -q 'registry.local/sic:v9.9.9' "$TMP_DIR/prepull-repo.yaml"
+# The init container's image is on another repository here (its own default): it is pre-pulled too.
+grep -q 'name: prepull-init' "$TMP_DIR/prepull-repo.yaml"
+grep -q 'ghcr.io/steadyinfratech/steady-image-cache:v9.9.9' "$TMP_DIR/prepull-repo.yaml"
+# And not when both are the same repository.
+refute 'name: prepull-init' "$TMP_DIR/prepull.yaml"
+refute 'podAntiAffinity' "$TMP_DIR/prepull-repo.yaml"
+# Its pods must not carry the SIC selector label (`app: ...`), or SIC would list them as peers.
+refute '^ *app: ' "$TMP_DIR/prepull.yaml"
+
 echo "=== Testing template: cert-manager enabled ==="
 helm template sic "$CHART_DIR" \
   --set tls.certManager.enabled=true \

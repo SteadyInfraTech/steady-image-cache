@@ -430,7 +430,20 @@ The DaemonSet uses the host network and a fixed port, so a new pod cannot start 
   2. SIC copies containerd's content and image names into its cache when it starts and every `SIC_IMPORT_INTERVAL` (five minutes by default), one blob at a time. Do not go on until `crictl pull` of the exact image reference you will deploy succeeds on a second node of the same architecture that does not have it. `sic_containerd_imported_blobs_total` is not a signal for this: it counts every blob of the whole content store, so it rises for unrelated blobs, and for this image's manifest, before its layers are in SIC.
   3. Pull it on every other node: `crictl pull ghcr.io/steadyinfratech/steady-image-cache:vX.Y.Z`. Each is served by a peer. Asking is capped at `SIC_PEER_MAX_TRIES` peers per miss, so on a cluster larger than that, seed a few nodes per architecture, or load the archive on every node. (Enabling upstream fallback for the registry that holds the image makes steps 1 and 2 unnecessary.)
 
-  A throwaway DaemonSet that uses the new image in an init container is an alternative to `crictl pull` for getting it onto every node without node access, but it depends on the same seeding. Only then change the tag in `deploy/daemonset.yaml` and roll out one node at a time (`maxUnavailable: 1`, the default), watching `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from the same archive.
+  With the Helm chart, the pre-pull DaemonSet does step 3 for you and needs no node access. It takes two upgrades, because Helm does not wait for a DaemonSet in a hook. The first must leave SIC itself exactly as it is: a newer chart brings newer default image tags, so pin the tags you run now and keep your other settings (`--reset-then-reuse-values` needs Helm 3.14 or later; it takes the new chart's defaults, then your last values):
+
+  ```bash
+  helm get manifest "$REL" -n "$NS" > before.yaml
+  helm upgrade "$REL" <chart> --version <new chart version> -n "$NS" --reset-then-reuse-values \
+    --set image.tag=<tag you run now> --set initContainer.image.tag=<tag you run now> \
+    --set prepull.image.tag=<the new release's tag>@$DIGEST
+  helm get manifest "$REL" -n "$NS" > after.yaml
+  diff before.yaml after.yaml   # only the pre-pull DaemonSet (and chart labels) may differ; the SIC DaemonSet's pod template must not
+  ```
+
+  `$DIGEST` is the digest of the new release that you resolved and verified with `cosign verify` ("Verifying a release"); the value is the tag and the digest together, `v1.3.2@sha256:...`, so every node pulls the image you checked, not whatever the tag points to later. The pre-pull image comes from `image.repository` unless you set `prepull.image.repository`, so a mirrored or private repository is used for both. If `initContainer.image.repository` is a different repository (it is a separate setting), the pre-pull DaemonSet runs a second container from that repository with the same tag, so the init container's image is on every node too; set both repositories and both tags to the same verified value for the second upgrade.
+
+  Then wait for the pre-pull DaemonSet, which is named like SIC's own plus `-prepull` (`kubectl get daemonset -n "$NS"`; with `fullnameOverride` that is the override plus `-prepull`): `kubectl rollout status daemonset/<that name> -n "$NS"`. Done means every node has pulled the image, through the old SIC, so it depends on the same seeding of steps 1 and 2. The second upgrade sets `image.tag` and `initContainer.image.tag` to that same value and an empty `prepull.image.tag`, which removes the DaemonSet. The pre-pull pods run `sic idle`, take no resources to speak of, and are not peers (they do not carry SIC's labels). Only then change the tag in `deploy/daemonset.yaml` and roll out one node at a time (`maxUnavailable: 1`, the default), watching `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from the same archive.
 
 Either way, change the image tag (or digest) in the DaemonSet and nothing else in the same rollout, so that a problem is attributable.
 
