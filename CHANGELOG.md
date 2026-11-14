@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Documentation: SIC cannot serve private images of a protected registry while that registry is down, by design, with no "last known good" window, and what to choose instead (README, "Failures"); the chart shares one certificate between all pods, and what per-pod certificates need (README, "TLS").
 - New optional `prepull` DaemonSet in the Helm chart (off while `prepull.image.tag` is empty) and a `sic idle` command for it: puts the next release's image on every node before the upgrade, so that a node whose only registry host is SIC (`_default`) does not have to pull its new SIC image after the old SIC has stopped. README, "Upgrading". Nothing changes unless you set it.
 
 ## 1.3.2 - 2026-11-13
