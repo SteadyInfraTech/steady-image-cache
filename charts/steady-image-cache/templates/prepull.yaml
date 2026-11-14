@@ -36,9 +36,13 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- /* Only where SIC may run. Its pod (anti-)affinity names SIC's own pods and labels, which these do not have. */}}
       {{- with .Values.affinity }}
+      {{- with .nodeAffinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        nodeAffinity:
+          {{- toYaml . | nindent 10 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -49,7 +53,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: prepull
-        image: "{{ .Values.prepull.image.repository }}:{{ .Values.prepull.image.tag }}"
+        image: "{{ default .Values.image.repository .Values.prepull.image.repository }}:{{ .Values.prepull.image.tag }}"
         imagePullPolicy: {{ .Values.prepull.image.pullPolicy }}
         args: ["idle"]
         securityContext:

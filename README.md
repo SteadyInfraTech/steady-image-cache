@@ -436,12 +436,14 @@ The DaemonSet uses the host network and a fixed port, so a new pod cannot start 
   helm get manifest "$REL" -n "$NS" > before.yaml
   helm upgrade "$REL" <chart> --version <new chart version> -n "$NS" --reset-then-reuse-values \
     --set image.tag=<tag you run now> --set initContainer.image.tag=<tag you run now> \
-    --set prepull.image.tag=<the new release's tag>
+    --set prepull.image.tag=<the new release's tag>@$DIGEST
   helm get manifest "$REL" -n "$NS" > after.yaml
   diff before.yaml after.yaml   # only the pre-pull DaemonSet (and chart labels) may differ; the SIC DaemonSet's pod template must not
   ```
 
-  Then wait for the pre-pull DaemonSet, which is named like SIC's own plus `-prepull` (`kubectl get daemonset -n "$NS"`; with `fullnameOverride` that is the override plus `-prepull`): `kubectl rollout status daemonset/<that name> -n "$NS"`. Done means every node has pulled the image, through the old SIC, so it depends on the same seeding of steps 1 and 2. The second upgrade sets the new `image.tag` and `initContainer.image.tag` and an empty `prepull.image.tag`, which removes the DaemonSet. The pre-pull pods run `sic idle`, take no resources to speak of, and are not peers (they do not carry SIC's labels). Only then change the tag in `deploy/daemonset.yaml` and roll out one node at a time (`maxUnavailable: 1`, the default), watching `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from the same archive.
+  `$DIGEST` is the digest of the new release that you resolved and verified with `cosign verify` ("Verifying a release"); the value is the tag and the digest together, `v1.3.2@sha256:...`, so every node pulls the image you checked, not whatever the tag points to later. The pre-pull image comes from `image.repository` unless you set `prepull.image.repository`, so a mirrored or private repository is used for both.
+
+  Then wait for the pre-pull DaemonSet, which is named like SIC's own plus `-prepull` (`kubectl get daemonset -n "$NS"`; with `fullnameOverride` that is the override plus `-prepull`): `kubectl rollout status daemonset/<that name> -n "$NS"`. Done means every node has pulled the image, through the old SIC, so it depends on the same seeding of steps 1 and 2. The second upgrade sets `image.tag` and `initContainer.image.tag` to that same value and an empty `prepull.image.tag`, which removes the DaemonSet. The pre-pull pods run `sic idle`, take no resources to speak of, and are not peers (they do not carry SIC's labels). Only then change the tag in `deploy/daemonset.yaml` and roll out one node at a time (`maxUnavailable: 1`, the default), watching `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from the same archive.
 
 Either way, change the image tag (or digest) in the DaemonSet and nothing else in the same rollout, so that a problem is attributable.
 

@@ -48,6 +48,11 @@ grep -q 'args: \["idle"\]' "$TMP_DIR/prepull.yaml"
 helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml \
   --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=sic-test' \
   --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=Exists' | grep -q 'sic-test'
+# Pod affinity is not copied (it names SIC's own pods), and a repository override reaches the pre-pull image.
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml --set image.repository=registry.local/sic \
+  --set 'affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey=kubernetes.io/hostname' > "$TMP_DIR/prepull-repo.yaml"
+grep -q 'registry.local/sic:v9.9.9' "$TMP_DIR/prepull-repo.yaml"
+refute 'podAntiAffinity' "$TMP_DIR/prepull-repo.yaml"
 # Its pods must not carry the SIC selector label (`app: ...`), or SIC would list them as peers.
 refute '^ *app: ' "$TMP_DIR/prepull.yaml"
 

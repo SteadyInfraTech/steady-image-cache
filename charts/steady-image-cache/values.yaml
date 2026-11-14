@@ -13,7 +13,8 @@ imagePullSecrets: []
 # start, and the old SIC is gone by then.
 prepull:
   image:
-    repository: ghcr.io/steadyinfratech/steady-image-cache
+    # Empty: the same repository as `image.repository`.
+    repository: ""
     tag: ""
     pullPolicy: IfNotPresent
 nameOverride: ""
