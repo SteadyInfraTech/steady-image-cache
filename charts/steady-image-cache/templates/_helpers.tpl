@@ -82,3 +82,11 @@ when it binds every address (or only loopback).
 {{- else -}}{{ $host }}
 {{- end -}}
 {{- end }}
+
+{{/*
+Name label of the pre-pull pods: the chart name cut so that the suffix keeps the
+label value within Kubernetes' 63 characters.
+*/}}
+{{- define "steady-image-cache.prepullLabelName" -}}
+{{- printf "%s-prepull" (include "steady-image-cache.name" . | trunc 55 | trimSuffix "-") }}
+{{- end }}

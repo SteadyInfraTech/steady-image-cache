@@ -44,6 +44,11 @@ helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepu
 grep -q "name: sic-steady-image-cache-prepull" "$TMP_DIR/prepull.yaml"
 grep -q 'steady-image-cache:v9.9.9' "$TMP_DIR/prepull.yaml"
 grep -q 'args: \["idle"\]' "$TMP_DIR/prepull.yaml"
+# A long nameOverride must not push the label past 63 characters.
+long=$(printf 'a%.0s' $(seq 1 63))
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 --set nameOverride="$long" -s templates/prepull.yaml > "$TMP_DIR/prepull-long.yaml"
+awk '/app.kubernetes.io\/name:/ {v=$2; if (length(v) > 63) bad=1} END {exit bad}' "$TMP_DIR/prepull-long.yaml" \
+  || { echo "FAIL: a pre-pull label value is longer than 63 characters" >&2; exit 1; }
 # It keeps the node affinity of the main DaemonSet, or it would pre-pull on nodes SIC does not run on.
 helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml \
   --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=sic-test' \
