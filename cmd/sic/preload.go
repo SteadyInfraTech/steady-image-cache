@@ -32,7 +32,7 @@ func runPreload(args []string) error {
 	file := fs.String("f", "", "file with one image per line (# starts a comment)")
 	admin := fs.String("admin", "", "SIC's admin address (http://127.0.0.1:5001): also report where the bytes came from")
 	parallel := fs.Int("parallel", 4, "blobs fetched at once")
-	plain := fs.Bool("plain-http", false, "talk to SIC without TLS (development only; SIC_INSECURE=true)")
+	plain := fs.Bool("plain-http", false, "talk to SIC without TLS, and send credentials to an http token service (development only; SIC_INSECURE=true)")
 	timeout := fs.Duration("timeout", 30*time.Minute, "give up after this long")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: sic preload [flags] registry/repository[:tag|@digest] ...")
@@ -75,7 +75,7 @@ func runPreload(args []string) error {
 	res, src, err := preload.Run(ctx, preload.Options{
 		Addr: base, Client: client, Platform: *platform,
 		Username: os.Getenv("SIC_PRELOAD_USERNAME"), Password: os.Getenv("SIC_PRELOAD_PASSWORD"),
-		Parallel: *parallel, AdminURL: *admin, Logf: log.Printf,
+		Parallel: *parallel, AdminURL: *admin, Logf: log.Printf, AllowPlainHTTPRealm: *plain,
 	}, images)
 	var blobs int
 	var bytes int64

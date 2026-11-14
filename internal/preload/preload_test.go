@@ -25,6 +25,7 @@ type fakeSIC struct {
 	wantUser string
 	blobs    map[string][]byte
 	bad      string // a blob digest to corrupt
+	tokenKey string // the JSON field of the token answer; default "token"
 }
 
 func newFake(t *testing.T, needAuth bool) (*fakeSIC, string) {
@@ -54,6 +55,10 @@ func newFake(t *testing.T, needAuth bool) (*fakeSIC, string) {
 		u, _, _ := r.BasicAuth()
 		if u != f.wantUser {
 			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		if f.tokenKey == "access_token" {
+			fmt.Fprint(w, `{"access_token":"T"}`)
 			return
 		}
 		fmt.Fprint(w, `{"token":"T"}`)
@@ -117,7 +122,7 @@ func TestPreloadPullsOnlyThePlatformsBlobs(t *testing.T) {
 
 func TestPreloadAnswersATokenChallengeWithTheCallersCredentials(t *testing.T) {
 	f, _ := newFake(t, true)
-	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw"}
+	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw", AllowPlainHTTPRealm: true}
 	if _, _, err := Run(context.Background(), o, []string{"reg.example/team/app:v1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -189,5 +194,63 @@ func TestParseRef(t *testing.T) {
 		if _, err := ParseRef(in); err == nil {
 			t.Errorf("ParseRef(%q) did not fail", in)
 		}
+	}
+}
+
+func TestPreloadAcceptsAnAccessTokenAnswer(t *testing.T) {
+	f, _ := newFake(t, true)
+	f.tokenKey = "access_token"
+	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw", AllowPlainHTTPRealm: true}
+	if _, _, err := Run(context.Background(), o, []string{"reg.example/team/app:v1"}); err != nil {
+		t.Fatalf("a token service that answers access_token was refused: %v", err)
+	}
+}
+
+func TestPreloadSendsNoCredentialsToAPlainHTTPRealm(t *testing.T) {
+	f, _ := newFake(t, true)
+	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw"}
+	_, _, err := Run(context.Background(), o, []string{"reg.example/team/app:v1"})
+	if err == nil || !strings.Contains(err.Error(), "not https") {
+		t.Fatalf("err = %v, want a refusal to send credentials to an http realm", err)
+	}
+}
+
+func TestPreloadFollowsNestedIndexesAndRefusesAnEmptyResult(t *testing.T) {
+	blobs := map[string][]byte{}
+	put := func(v any) ([]byte, string) {
+		b, _ := json.Marshal(v)
+		blobs[dg(b)] = b
+		return b, dg(b)
+	}
+	layer := []byte("only-layer")
+	blobs[dg(layer)] = layer
+	cfg := []byte("{}")
+	blobs[dg(cfg)] = cfg
+	_, img := put(manifest{Config: &descriptor{Digest: dg(cfg)}, Layers: []descriptor{{Digest: dg(layer)}}})
+	plat := &struct{ OS, Architecture, Variant string }{"linux", "amd64", ""}
+	_, inner := put(manifest{Manifests: []descriptor{{Digest: img, Platform: plat}}})
+	outer, _ := put(manifest{Manifests: []descriptor{{Digest: inner, Platform: plat}}})
+	_, empty := put(manifest{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		last := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		switch {
+		case last == "nested":
+			w.Write(outer)
+		case last == "nothing":
+			w.Write(blobs[empty])
+		case blobs[last] != nil:
+			w.Write(blobs[last])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	o := Options{Addr: srv.URL, Client: srv.Client(), Platform: "linux/amd64"}
+	res, _, err := Run(context.Background(), o, []string{"reg.example/team/app:nested"})
+	if err != nil || len(res) != 1 || res[0].Blobs != 2 {
+		t.Fatalf("nested index: %+v, %v; want the image's config and layer", res, err)
+	}
+	if _, _, err := Run(context.Background(), o, []string{"reg.example/team/app:nothing"}); err == nil {
+		t.Fatal("a manifest with no config and no layers was reported as a success")
 	}
 }

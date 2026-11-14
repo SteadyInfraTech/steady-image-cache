@@ -30,6 +30,9 @@ type Options struct {
 	// Username and Password are for a registry's token service. SIC never holds
 	// them; they are used here to get a token that SIC then forwards.
 	Username, Password string
+	// AllowPlainHTTPRealm lets a token service at an http:// address receive the
+	// credentials (development only). By default only https realms do.
+	AllowPlainHTTPRealm bool
 	// Parallel is how many blobs are fetched at once (default 4).
 	Parallel int
 	// AdminURL, when set, is SIC's admin address (http://127.0.0.1:5001); the
@@ -71,12 +74,22 @@ func ParseRef(s string) (Ref, error) {
 		return Ref{}, fmt.Errorf("%q: the first part %q is not a registry host (write docker.io/library/%s for a Docker Hub image)", s, reg, s)
 	}
 	ref := Ref{Registry: reg, Reference: "latest"}
+	// repo[:tag][@digest]. With both, the digest is the reference and the tag
+	// is only a comment on it.
+	var digest string
 	if j := strings.Index(rest, "@"); j >= 0 {
-		ref.Repo, ref.Reference = rest[:j], rest[j+1:]
-	} else if j := strings.LastIndex(rest, ":"); j >= 0 && !strings.Contains(rest[j:], "/") {
-		ref.Repo, ref.Reference = rest[:j], rest[j+1:]
-	} else {
-		ref.Repo = rest
+		rest, digest = rest[:j], rest[j+1:]
+	}
+	repo, tag := rest, ""
+	if j := strings.LastIndex(rest, ":"); j >= 0 && !strings.Contains(rest[j:], "/") {
+		repo, tag = rest[:j], rest[j+1:]
+	}
+	ref.Repo = repo
+	switch {
+	case digest != "":
+		ref.Reference = digest
+	case tag != "":
+		ref.Reference = tag
 	}
 	if ref.Repo == "" || ref.Reference == "" {
 		return Ref{}, fmt.Errorf("%q: empty repository or reference", s)
@@ -170,7 +183,12 @@ func (r *runner) image(ctx context.Context, s string) (Result, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return Result{}, fmt.Errorf("manifest: %w", err)
 	}
-	if len(m.Manifests) > 0 { // an index: take the one for this platform
+	// An index names manifests per platform, and may itself name indexes: go
+	// down until a manifest that names a config and layers.
+	for depth := 0; len(m.Manifests) > 0; depth++ {
+		if depth == 4 {
+			return Result{}, errors.New("indexes nested more than four deep")
+		}
 		d, err := r.pick(m.Manifests)
 		if err != nil {
 			return Result{}, err
@@ -182,6 +200,9 @@ func (r *runner) image(ctx context.Context, s string) (Result, error) {
 		if err := json.Unmarshal(body, &m); err != nil {
 			return Result{}, fmt.Errorf("manifest %s: %w", d, err)
 		}
+	}
+	if m.Config == nil && len(m.Layers) == 0 {
+		return Result{}, fmt.Errorf("manifest %s names no config and no layers (an artifact this tool does not pull)", mdigest)
 	}
 	var blobs []descriptor
 	if m.Config != nil {
@@ -334,6 +355,16 @@ func (r *runner) token(ctx context.Context, challenge, scope string) (string, er
 	} else {
 		q.Set("scope", scope)
 	}
+	realm, err := url.Parse(p["realm"])
+	if err != nil || realm.Host == "" {
+		return "", fmt.Errorf("the registry's token realm %q is not a URL", p["realm"])
+	}
+	// A challenge comes from the registry (through SIC), and the credentials go
+	// where it says: only to an https realm, unless plain http is allowed for
+	// development.
+	if realm.Scheme != "https" && !(realm.Scheme == "http" && r.o.AllowPlainHTTPRealm) {
+		return "", fmt.Errorf("the registry's token realm %q is not https; credentials are not sent to it", p["realm"])
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p["realm"]+"?"+q.Encode(), nil)
 	if err != nil {
 		return "", err
@@ -349,7 +380,10 @@ func (r *runner) token(ctx context.Context, challenge, scope string) (string, er
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("token service answered %d", resp.StatusCode)
 	}
-	var t struct{ Token, AccessToken string }
+	var t struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&t); err != nil {
 		return "", fmt.Errorf("token service: %w", err)
 	}
