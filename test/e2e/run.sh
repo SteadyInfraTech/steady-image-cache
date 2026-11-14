@@ -50,7 +50,7 @@ KEEP=${KEEP:-}
 NODE_IMAGE=${NODE_IMAGE:-}
 EXPECT_CONTAINERD=${EXPECT_CONTAINERD:-}
 MODE=${MODE:-local}
-case $MODE in local|registries|operations) ;; *) echo "MODE must be local, registries or operations" >&2; exit 1 ;; esac
+case $MODE in local|registries|operations|pilot) ;; *) echo "MODE must be local, registries, operations or pilot" >&2; exit 1 ;; esac
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
 SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
@@ -267,6 +267,86 @@ registries_phase() {
   log "pass: ${checked[*]} over the registry's own token service, then shared between nodes"
 }
 
+# preload_on NODE IMAGE: `sic preload` in NODE's SIC pod. Sets PL_BYTES (what it
+# pulled), PL_PEERS and PL_REG (where the node's bytes came from over all the
+# attempts, from the node's own counters).
+# Returns 2 when the registry throttled; anything else wrong is a failure.
+preload_on() {
+  local node=$1 img=$2 pod out try p0 u0
+  pod=$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$node" -o name | head -n 1)
+  [ -n "$pod" ] || fail "no SIC pod on $node"
+  # The baseline is taken once, before the first attempt: a throttled attempt may
+  # already have moved bytes, and they count.
+  p0=$(metric_strict "$node" sic_bytes_from_peers_total)
+  u0=$(metric_strict "$node" sic_bytes_from_upstream_total)
+  for try in 1 2 3; do
+    if out=$(kubectl -n kube-system exec "$pod" -c sic -- /sic preload \
+        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key "$img" 2>&1); then
+      echo "$out"
+      PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
+      [ -n "$PL_BYTES" ] || fail "could not read the preload report: $out"
+      PL_PEERS=$(( $(metric_strict "$node" sic_bytes_from_peers_total) - p0 ))
+      PL_REG=$(( $(metric_strict "$node" sic_bytes_from_upstream_total) - u0 ))
+      return 0
+    fi
+    echo "$out"
+    # An explicit 429 from the registry (preload prints it as ": 429 Too Many
+    # Requests"), not any line that happens to mention a rate limit.
+    if grep -qE ': 429 Too Many Requests' <<<"$out"; then
+      echo "preload of $img on $node was throttled (attempt $try of 3)"
+      [ "$try" = 3 ] || sleep $((try * 20))
+    else
+      fail "sic preload of $img on $node failed"
+    fi
+  done
+  return 2
+}
+
+# pilot_phase: the measurement the project is for, on two nodes. A real image
+# from a public registry is preloaded on one node (the registry serves it), then
+# on the other (the first node should): how many registry bytes were not needed.
+# It is a measurement on kind with the images named by PILOT_IMAGES, not a
+# result for a cluster; with N nodes the share saved tends to (N-1)/N.
+pilot_phase() {
+  log "pilot: upstream on for public registries"
+  kubectl -n kube-system set env daemonset/steady-image-cache \
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
+  kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+  both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
+  wait_for "both workers to see all their peers" 90 both_see_peers
+
+  local img rc a_reg a_bytes pct checked=() skipped=() summary=()
+  for img in ${PILOT_IMAGES:-public.ecr.aws/docker/library/python:3.12}; do
+    log "pilot: $img on $A (from the registry), then on $B (from $A)"
+    preload_on "$A" "$img" && rc=0 || rc=$?
+    if [ "$rc" != 0 ]; then skipped+=("$img"); continue; fi
+    a_reg=$PL_REG; a_bytes=$PL_BYTES
+    [ "$a_reg" -gt 0 ] || fail "$img: $A took no bytes from a registry, so it was not cold"
+    preload_on "$B" "$img" && rc=0 || rc=$?
+    if [ "$rc" != 0 ]; then skipped+=("$img"); continue; fi
+    [ "$PL_REG" = 0 ] || fail "$img: $B took $PL_REG bytes from a registry, though $A had the image"
+    # B needs what A needed: layers an earlier image in the list already put on
+    # both nodes are in neither count, so compare with A's registry bytes, not with
+    # the image's size.
+    [ "$PL_PEERS" -ge "$a_reg" ] || fail "$img: $B took $PL_PEERS bytes from peers, though $A took $a_reg bytes from the registry for the same image"
+    pct=$(( 100 * PL_PEERS / (PL_PEERS + PL_REG) ))
+    summary+=("$img: $A took $a_reg bytes from the registry; $B took $PL_PEERS bytes from $A and $PL_REG from a registry, so $pct% of $B's bytes were not fetched from the registry (image of $a_bytes bytes)")
+    checked+=("$img")
+  done
+  [ "$(metric "$B" sic_verify_errors_total)" = 0 ] || fail "$B had verification errors"
+  [ "$(metric "$B" sic_peer_errors_total)" = 0 ] || fail "$B had peer errors"
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    echo "::warning::skipped, because the registry was rate limiting: ${skipped[*]}"
+  fi
+  [ "${#checked[@]}" -gt 0 ] || fail "every registry was rate limiting; nothing was measured (${skipped[*]})"
+  local l
+  for l in "${summary[@]}"; do
+    echo "pilot result: $l"
+    [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $l" >> "$GITHUB_STEP_SUMMARY"
+  done
+  log "pilot passed: ${checked[*]}"
+}
+
 # previous_image: the image of the newest release older than the one the sample
 # DaemonSet names (releases are the v1.2.3 tags; pre-releases do not count).
 previous_image() {
@@ -454,6 +534,7 @@ kubectl -n kube-system set env daemonset/steady-image-cache SIC_IMPORT_INTERVAL=
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 
 if [ "$MODE" = registries ]; then registries_phase; exit 0; fi
+if [ "$MODE" = pilot ]; then pilot_phase; exit 0; fi
 
 log "an image that only node $A has"
 mkdir "$WORK/app"
@@ -505,9 +586,24 @@ echo "imported blobs on $A: $(metric "$A" sic_containerd_imported_blobs_total); 
 # Not just any four (kind's own images are linked too): this image's manifest is a link.
 docker exec "$A" test -L "/var/lib/steady-image-cache/blobs/sha256/${DIGEST#sha256:}" || fail "$A holds the manifest $DIGEST as a copy, not a link to containerd's file"
 
-log "pull on $B by digest, through SIC"
+log "sic preload on $B: the image comes from $A before anything pulls it"
 before_peer=$(metric "$B" sic_peer_hits_total)
 before_local=$(metric "$A" sic_local_hits_total)
+# The command of the SIC image itself, run in B's pod with the pod's own
+# certificate (a node's certificate is accepted as a client's).
+POD_B=$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$B" -o name | head -n 1)
+[ -n "$POD_B" ] || fail "no SIC pod on $B"
+preload_out=$(kubectl -n kube-system exec "$POD_B" -c sic -- /sic preload \
+  -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -admin http://127.0.0.1:5001 "$APP@$DIGEST" 2>&1) \
+  || fail "sic preload failed on $B: $preload_out"
+echo "$preload_out"
+grep -q '^preloaded 1 of 1 images: [1-9][0-9]* blobs' <<<"$preload_out" || fail "sic preload did not report the image: $preload_out"
+peers_bytes=$(sed -n 's/^this node took \([0-9]*\) bytes from peers and \([0-9]*\) bytes from registries.*/\1/p' <<<"$preload_out")
+reg_bytes=$(sed -n 's/^this node took \([0-9]*\) bytes from peers and \([0-9]*\) bytes from registries.*/\2/p' <<<"$preload_out")
+[ "${peers_bytes:-0}" -gt 0 ] || fail "preload took no bytes from peers: $preload_out"
+[ "${reg_bytes:-1}" = 0 ] || fail "preload took bytes from a registry: $preload_out"
+
+log "pull on $B by digest, through SIC (everything is already in its cache)"
 docker exec "$B" crictl pull "$APP@$DIGEST"
 
 after_peer=$(metric "$B" sic_peer_hits_total)
