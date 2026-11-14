@@ -74,6 +74,12 @@ func main() {
 		fmt.Println(version.String())
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "preload" {
+		if err := runPreload(os.Args[2:]); err != nil {
+			log.Fatalf("preload: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "idle" {
 		// Does nothing until stopped. The image has no shell or sleep, and the
 		// chart's pre-pull DaemonSet needs a container that stays up.
