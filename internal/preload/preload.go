@@ -362,7 +362,7 @@ func (r *runner) token(ctx context.Context, challenge, scope string) (string, er
 	// A challenge comes from the registry (through SIC), and the credentials go
 	// where it says: only to an https realm, unless plain http is allowed for
 	// development.
-	if realm.Scheme != "https" && !(realm.Scheme == "http" && r.o.AllowPlainHTTPRealm) {
+	if realm.Scheme != "https" && (realm.Scheme != "http" || !r.o.AllowPlainHTTPRealm) {
 		return "", fmt.Errorf("the registry's token realm %q is not https; credentials are not sent to it", p["realm"])
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p["realm"]+"?"+q.Encode(), nil)
