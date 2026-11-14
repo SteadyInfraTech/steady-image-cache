@@ -52,6 +52,11 @@ helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepu
 helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml --set image.repository=registry.local/sic \
   --set 'affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey=kubernetes.io/hostname' > "$TMP_DIR/prepull-repo.yaml"
 grep -q 'registry.local/sic:v9.9.9' "$TMP_DIR/prepull-repo.yaml"
+# The init container's image is on another repository here (its own default): it is pre-pulled too.
+grep -q 'name: prepull-init' "$TMP_DIR/prepull-repo.yaml"
+grep -q 'ghcr.io/steadyinfratech/steady-image-cache:v9.9.9' "$TMP_DIR/prepull-repo.yaml"
+# And not when both are the same repository.
+refute 'name: prepull-init' "$TMP_DIR/prepull.yaml"
 refute 'podAntiAffinity' "$TMP_DIR/prepull-repo.yaml"
 # Its pods must not carry the SIC selector label (`app: ...`), or SIC would list them as peers.
 refute '^ *app: ' "$TMP_DIR/prepull.yaml"

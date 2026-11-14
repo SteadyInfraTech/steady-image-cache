@@ -52,8 +52,9 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
+      {{- $repo := default .Values.image.repository .Values.prepull.image.repository }}
       - name: prepull
-        image: "{{ default .Values.image.repository .Values.prepull.image.repository }}:{{ .Values.prepull.image.tag }}"
+        image: "{{ $repo }}:{{ .Values.prepull.image.tag }}"
         imagePullPolicy: {{ .Values.prepull.image.pullPolicy }}
         args: ["idle"]
         securityContext:
@@ -69,4 +70,24 @@ spec:
             memory: 8Mi
           limits:
             memory: 32Mi
+      {{- /* The init container may come from another repository; the node needs that image too before the old SIC goes. */}}
+      {{- if and .Values.initContainer.enabled (ne .Values.initContainer.image.repository $repo) }}
+      - name: prepull-init
+        image: "{{ .Values.initContainer.image.repository }}:{{ .Values.prepull.image.tag }}"
+        imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+        args: ["idle"]
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            memory: 32Mi
+      {{- end }}
 {{- end }}
