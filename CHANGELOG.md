@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Eviction cost is now measured (`TestEvictScanCost`, run with `SIC_EVICT_COST=1`) and stated in the README, "Cache size and eviction": 298 ms for 100 000 blobs, once per 5% of growth. No code change: the measurement did not justify an index.
 - New optional `prepull` DaemonSet in the Helm chart (off while `prepull.image.tag` is empty) and a `sic idle` command for it: puts the next release's image on every node before the upgrade, so that a node whose only registry host is SIC (`_default`) does not have to pull its new SIC image after the old SIC has stopped. README, "Upgrading". Nothing changes unless you set it.
 
 ## 1.3.2 - 2026-11-13
