@@ -268,26 +268,31 @@ registries_phase() {
 }
 
 # preload_on NODE IMAGE: `sic preload` in NODE's SIC pod. Sets PL_BYTES (what it
-# pulled), PL_PEERS and PL_REG (where the node's bytes came from meanwhile).
+# pulled), PL_PEERS and PL_REG (where the node's bytes came from over all the
+# attempts, from the node's own counters).
 # Returns 2 when the registry throttled; anything else wrong is a failure.
 preload_on() {
-  local node=$1 img=$2 pod out line try
+  local node=$1 img=$2 pod out try p0 u0
   pod=$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$node" -o name | head -n 1)
   [ -n "$pod" ] || fail "no SIC pod on $node"
+  # The baseline is taken once, before the first attempt: a throttled attempt may
+  # already have moved bytes, and they count.
+  p0=$(metric_strict "$node" sic_bytes_from_peers_total)
+  u0=$(metric_strict "$node" sic_bytes_from_upstream_total)
   for try in 1 2 3; do
     if out=$(kubectl -n kube-system exec "$pod" -c sic -- /sic preload \
-        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -admin http://127.0.0.1:5001 "$img" 2>&1); then
+        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key "$img" 2>&1); then
       echo "$out"
-      line=$(grep '^preloaded ' <<<"$out")
-      PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$line")
-      line=$(grep '^this node took ' <<<"$out")
-      PL_PEERS=$(sed -n 's/^this node took \([0-9]*\) bytes from peers and \([0-9]*\) bytes.*/\1/p' <<<"$line")
-      PL_REG=$(sed -n 's/^this node took \([0-9]*\) bytes from peers and \([0-9]*\) bytes.*/\2/p' <<<"$line")
-      [ -n "$PL_BYTES" ] && [ -n "$PL_PEERS" ] && [ -n "$PL_REG" ] || fail "could not read the preload report: $out"
+      PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
+      [ -n "$PL_BYTES" ] || fail "could not read the preload report: $out"
+      PL_PEERS=$(( $(metric_strict "$node" sic_bytes_from_peers_total) - p0 ))
+      PL_REG=$(( $(metric_strict "$node" sic_bytes_from_upstream_total) - u0 ))
       return 0
     fi
     echo "$out"
-    if grep -qiE '429|too many requests|toomanyrequests|rate limit' <<<"$out"; then
+    # An explicit 429 from the registry (preload prints it as ": 429 Too Many
+    # Requests"), not any line that happens to mention a rate limit.
+    if grep -qE ': 429 Too Many Requests' <<<"$out"; then
       echo "preload of $img on $node was throttled (attempt $try of 3)"
       [ "$try" = 3 ] || sleep $((try * 20))
     else
@@ -320,7 +325,10 @@ pilot_phase() {
     preload_on "$B" "$img" && rc=0 || rc=$?
     if [ "$rc" != 0 ]; then skipped+=("$img"); continue; fi
     [ "$PL_REG" = 0 ] || fail "$img: $B took $PL_REG bytes from a registry, though $A had the image"
-    [ "$PL_PEERS" -ge "$PL_BYTES" ] || fail "$img: $B took $PL_PEERS bytes from peers for an image of $PL_BYTES bytes"
+    # B needs what A needed: layers an earlier image in the list already put on
+    # both nodes are in neither count, so compare with A's registry bytes, not with
+    # the image's size.
+    [ "$PL_PEERS" -ge "$a_reg" ] || fail "$img: $B took $PL_PEERS bytes from peers, though $A took $a_reg bytes from the registry for the same image"
     pct=$(( 100 * PL_PEERS / (PL_PEERS + PL_REG) ))
     summary+=("$img: $A took $a_reg bytes from the registry; $B took $PL_PEERS bytes from $A and $PL_REG from a registry, so $pct% of $B's bytes were not fetched from the registry (image of $a_bytes bytes)")
     checked+=("$img")
