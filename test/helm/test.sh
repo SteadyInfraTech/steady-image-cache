@@ -44,6 +44,10 @@ helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepu
 grep -q "name: sic-steady-image-cache-prepull" "$TMP_DIR/prepull.yaml"
 grep -q 'steady-image-cache:v9.9.9' "$TMP_DIR/prepull.yaml"
 grep -q 'args: \["idle"\]' "$TMP_DIR/prepull.yaml"
+# It keeps the node affinity of the main DaemonSet, or it would pre-pull on nodes SIC does not run on.
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml \
+  --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=sic-test' \
+  --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=Exists' | grep -q 'sic-test'
 # Its pods must not carry the SIC selector label (`app: ...`), or SIC would list them as peers.
 refute '^ *app: ' "$TMP_DIR/prepull.yaml"
 
