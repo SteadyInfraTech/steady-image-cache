@@ -303,7 +303,7 @@ func (r *runner) get(ctx context.Context, ref Ref, path, accept string) (*http.R
 		}
 		challenge := resp.Header.Get("WWW-Authenticate")
 		status := resp.StatusCode
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()
 		if status != http.StatusUnauthorized || attempt == 1 {
 			return nil, fmt.Errorf("%s: %s", path, strconv.Itoa(status)+" "+http.StatusText(status))
