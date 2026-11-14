@@ -38,6 +38,15 @@ if grep -q "name: sic-init" "$TMP_DIR/no-init.yaml"; then
   exit 1
 fi
 
+echo "=== Testing template: pre-pull ==="
+refute "prepull" "$TMP_DIR/default.yaml"
+helm template sic "$CHART_DIR" --set prepull.image.tag=v9.9.9 -s templates/prepull.yaml > "$TMP_DIR/prepull.yaml"
+grep -q "name: sic-steady-image-cache-prepull" "$TMP_DIR/prepull.yaml"
+grep -q 'steady-image-cache:v9.9.9' "$TMP_DIR/prepull.yaml"
+grep -q 'args: \["idle"\]' "$TMP_DIR/prepull.yaml"
+# Its pods must not carry the SIC selector label (`app: ...`), or SIC would list them as peers.
+refute '^ *app: ' "$TMP_DIR/prepull.yaml"
+
 echo "=== Testing template: cert-manager enabled ==="
 helm template sic "$CHART_DIR" \
   --set tls.certManager.enabled=true \

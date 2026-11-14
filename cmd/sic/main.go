@@ -74,6 +74,14 @@ func main() {
 		fmt.Println(version.String())
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "idle" {
+		// Does nothing until stopped. The image has no shell or sleep, and the
+		// chart's pre-pull DaemonSet needs a container that stays up.
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		<-ctx.Done()
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "init-node" {
 		if err := runInitNode(); err != nil {
 			log.Fatalf("init-node: %v", err)

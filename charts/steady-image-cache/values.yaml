@@ -4,6 +4,18 @@ image:
   tag: "v1.3.2"
 
 imagePullSecrets: []
+
+# prepull puts an image on every node before an upgrade (README, "Upgrading").
+# Off while tag is empty. Set tag to the NEW release, run helm upgrade, wait for
+# the DaemonSet to be ready everywhere, then upgrade again with the new image
+# tags and an empty prepull.image.tag. It matters when SIC is the only registry
+# host (the `_default` configuration): the new pod needs its image before it can
+# start, and the old SIC is gone by then.
+prepull:
+  image:
+    repository: ghcr.io/steadyinfratech/steady-image-cache
+    tag: ""
+    pullPolicy: IfNotPresent
 nameOverride: ""
 fullnameOverride: ""
 

@@ -1,0 +1,64 @@
+{{- if .Values.prepull.image.tag }}
+# Puts an image on every node ahead of an upgrade. It carries labels of its own,
+# not the SIC selector labels: SIC lists its peers by those, and these pods are
+# not peers.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "steady-image-cache.fullname" . }}-prepull
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ include "steady-image-cache.chart" . }}
+    app.kubernetes.io/name: {{ include "steady-image-cache.name" . }}-prepull
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "steady-image-cache.name" . }}-prepull
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "steady-image-cache.name" . }}-prepull
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: prepull
+        image: "{{ .Values.prepull.image.repository }}:{{ .Values.prepull.image.tag }}"
+        imagePullPolicy: {{ .Values.prepull.image.pullPolicy }}
+        args: ["idle"]
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            memory: 32Mi
+{{- end }}
