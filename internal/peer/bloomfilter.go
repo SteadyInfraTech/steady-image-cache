@@ -87,15 +87,6 @@ func (f *countingFilter) Add(key string) {
 	}
 }
 
-// Remove decrements the counters for key. Counters clamp at 0.
-func (f *countingFilter) Remove(key string) {
-	for _, pos := range hashPositions(key) {
-		if c := f.get(pos); c > 0 {
-			f.set(pos, c-1)
-		}
-	}
-}
-
 // Test reports whether key is probably in the set (may false-positive, never
 // false-negative).
 func (f *countingFilter) Test(key string) bool {
@@ -106,9 +97,6 @@ func (f *countingFilter) Test(key string) bool {
 	}
 	return true
 }
-
-// reset clears the filter.
-func (f *countingFilter) reset() { f.data = [filterBits / 2]byte{} }
 
 // marshalBinary serialises the filter as its raw nibble-packed bytes.
 // The result is always filterBits/2 bytes (65 536 bytes for filterBits=131 072).
@@ -190,21 +178,6 @@ func (idx *DigestIndex) Rebuild(digests []string) {
 	idx.mu.Unlock()
 }
 
-// AddSelf adds a single digest to the self filter (called when a blob is
-// stored, before the next full rebuild).
-func (idx *DigestIndex) AddSelf(digest string) {
-	idx.mu.Lock()
-	idx.self.Add(digest)
-	idx.mu.Unlock()
-}
-
-// RemoveSelf removes a single digest from the self filter (called on eviction).
-func (idx *DigestIndex) RemoveSelf(digest string) {
-	idx.mu.Lock()
-	idx.self.Remove(digest)
-	idx.mu.Unlock()
-}
-
 // SelfBytes serialises the self filter for gossip.
 func (idx *DigestIndex) SelfBytes() []byte {
 	idx.mu.RLock()
@@ -223,14 +196,6 @@ func (idx *DigestIndex) UpdatePeer(base string, data []byte) bool {
 	idx.popcount[base] = f.estimateCount()
 	idx.mu.Unlock()
 	return true
-}
-
-// RemovePeer deletes the filter for a peer that has left the cluster.
-func (idx *DigestIndex) RemovePeer(base string) {
-	idx.mu.Lock()
-	delete(idx.peers, base)
-	delete(idx.popcount, base)
-	idx.mu.Unlock()
 }
 
 // Holders returns the subset of candidates that probably hold digest, ranked
@@ -308,20 +273,6 @@ func (idx *DigestIndex) hasPeer(base string) bool {
 	return ok
 }
 
-// PopCount returns the estimated number of distinct items in a peer's filter.
-func (idx *DigestIndex) PopCount(base string) int {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return idx.popcount[base]
-}
-
-// SelfTest reports whether the local node's own filter says it holds digest.
-func (idx *DigestIndex) SelfTest(digest string) bool {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return idx.self.Test(digest)
-}
-
 // PeerCount returns the number of peers for which a filter is held.
 func (idx *DigestIndex) PeerCount() int {
 	idx.mu.RLock()
@@ -344,14 +295,6 @@ func FilterSize() int { return filterBits / 2 }
 
 // FilterPopBits returns the total number of counter slots (for sizing metrics).
 func FilterPopBits() int { return filterBits }
-
-// Fingerprint returns a 64-bit FNV-1a fingerprint of the filter bytes, used
-// to detect whether a peer's filter has changed since the last exchange.
-func (idx *DigestIndex) Fingerprint() uint64 {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return fingerprintOf(idx.self.data[:])
-}
 
 // Snapshot returns the serialised self filter and its fingerprint, read under
 // one lock: the pair always describes the same state of the filter.
