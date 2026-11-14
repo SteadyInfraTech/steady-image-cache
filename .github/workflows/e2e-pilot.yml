@@ -1,0 +1,39 @@
+name: End-to-end (pilot measurement)
+
+# The measurement the project is for, on two nodes: a real image is preloaded
+# on one node from a public registry and then on the other, and the run prints
+# how many of the second node's bytes were not fetched from the registry (the
+# job summary has it). Needs the internet, so it does not gate pull requests:
+# it runs weekly, by hand, and on pull requests that change this workflow or the
+# test script. PILOT_IMAGES (space separated) replaces the default image.
+
+on:
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - ".github/workflows/e2e-pilot.yml"
+  schedule:
+    - cron: "29 4 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.27.0
+
+      - name: Measure what a second node does not take from the registry
+        run: MODE=pilot test/e2e/run.sh
