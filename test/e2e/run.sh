@@ -158,6 +158,14 @@ cluster_metric() {
 # from_cluster NODE: blobs NODE got without the registry, from a peer or from
 # its own cache. A blob can already be on a node that coordinated its fetch for
 # another one, so a pull there counts a local hit where a peer hit was expected.
+# metric_strict NODE NAME: like metric, but a failed scrape or a counter that is
+# not there is an error, not a zero. For assertions that the value is zero.
+metric_strict() {
+  local out
+  out=$(docker exec "$1" curl -fsS http://127.0.0.1:5001/metrics) || fail "could not scrape the metrics of $1"
+  awk -v n="$2" '$1==n {print $2; found=1} END {exit !found}' <<<"$out" || fail "$1 does not report $2"
+}
+
 # report_bytes LABEL NODE: what NODE took in from peers and from registries, in
 # bytes, to the log and (on CI) the job summary. This is the number the project
 # is for: bytes that did not have to come from the registry.
@@ -517,8 +525,8 @@ grep -q "$APP@$DIGEST" <<<"$images_on_b" || fail "$B does not have the image aft
 [ "$(metric "$B" sic_peer_errors_total)" = 0 ] || fail "$B had peer errors"
 [ "$(metric "$B" sic_verify_errors_total)" = 0 ] || fail "$B had verification errors"
 report_bytes "phase 1" "$B"
-[ "$(metric "$B" sic_bytes_from_peers_total)" -gt 0 ] || fail "$B took no bytes from peers, though it pulled the image through them"
-[ "$(metric "$B" sic_bytes_from_upstream_total)" = 0 ] || fail "$B took bytes from a registry"
+[ "$(metric_strict "$B" sic_bytes_from_peers_total)" -gt 0 ] || fail "$B took no bytes from peers, though it pulled the image through them"
+[ "$(metric_strict "$B" sic_bytes_from_upstream_total)" = 0 ] || fail "$B took bytes from a registry"
 
 log "phase 1 passed: $B pulled the image from $A through SIC"
 
