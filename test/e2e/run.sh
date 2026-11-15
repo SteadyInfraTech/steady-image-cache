@@ -327,10 +327,17 @@ pilot_phase() {
   kubectl -n kube-system set env daemonset/steady-image-cache \
     SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=false
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
-  both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
-  wait_for "both workers to see all their peers" 90 both_see_peers
+  # Every worker except A and B: they are preloaded after B, one at a time.
+  local others=() w
+  for w in "${NODES[@]}"; do
+    case $w in *-control-plane|"$A"|"$B") ;; *) others+=("$w") ;; esac
+  done
+  local workers=("$A" "$B" "${others[@]}")
+  all_see_peers() { local n; for n in "${workers[@]}"; do sees_all_peers "$n" || return 1; done; }
+  wait_for "every worker to see all its peers" 120 all_see_peers
 
   local img rc a_reg a_bytes pct checked=() skipped=() summary=() cold=1
+  local peers_total reg_total stopped
   for img in ${PILOT_IMAGES:-public.ecr.aws/docker/library/python:3.12}; do
     log "pilot: $img on $A (from the registry), then on $B (from $A)"
     preload_on "$A" "$img" && rc=0 || rc=$?
@@ -353,13 +360,29 @@ pilot_phase() {
     cold=0
     pct=$(( 100 * PL_PEERS / (PL_PEERS + PL_REG) ))
     summary+=("$img: $A took $a_reg bytes from the registry; $B took $PL_PEERS bytes from $A and $PL_REG from a registry, so $pct% of $B's bytes were not fetched from the registry (image of $a_bytes bytes)")
+    # The other workers, one after another: each must take everything from
+    # peers, none from a registry.
+    peers_total=$PL_PEERS reg_total=$a_reg stopped=0
+    for w in "${others[@]}"; do
+      preload_on "$w" "$img" && rc=0 || rc=$?
+      if [ "$rc" != 0 ]; then stopped=1; skipped+=("$img on $w"); break; fi
+      [ "$PL_REG" = 0 ] || fail "$img: $w took $PL_REG bytes from a registry, though other nodes had the image"
+      [ "$PL_PEERS" -gt 0 ] || fail "$img: $w took no bytes from peers"
+      peers_total=$(( peers_total + PL_PEERS ))
+    done
+    if [ "${#others[@]}" -gt 0 ] && [ "$stopped" = 0 ]; then
+      pct=$(( 100 * peers_total / (peers_total + reg_total) ))
+      summary+=("$img on ${#workers[@]} workers, one after another: $reg_total bytes from the registry in all, $peers_total bytes from peers, so $pct% of the workers' bytes were not fetched from the registry (the most possible with ${#workers[@]} nodes is $(( 100 * (${#workers[@]} - 1) / ${#workers[@]} ))%)")
+    fi
     checked+=("$img")
   done
   local verr perr
-  verr=$(metric_strict "$B" sic_verify_errors_total) || fail "could not read the verification error counter of $B"
-  perr=$(metric_strict "$B" sic_peer_errors_total) || fail "could not read the peer error counter of $B"
-  [ "$verr" = 0 ] || fail "$B had verification errors"
-  [ "$perr" = 0 ] || fail "$B had peer errors"
+  for w in "${workers[@]:1}"; do
+    verr=$(metric_strict "$w" sic_verify_errors_total) || fail "could not read the verification error counter of $w"
+    perr=$(metric_strict "$w" sic_peer_errors_total) || fail "could not read the peer error counter of $w"
+    [ "$verr" = 0 ] || fail "$w had verification errors"
+    [ "$perr" = 0 ] || fail "$w had peer errors"
+  done
   if [ "${#skipped[@]}" -gt 0 ]; then
     echo "::warning::skipped, because the registry was rate limiting: ${skipped[*]}"
   fi
@@ -369,7 +392,54 @@ pilot_phase() {
     echo "pilot result: $l"
     [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $l" >> "$GITHUB_STEP_SUMMARY"
   done
+  if [ "${#others[@]}" -gt 0 ]; then pilot_concurrent "${workers[@]}"; fi
   log "pilot passed: ${checked[*]}"
+}
+
+# pilot_concurrent NODE...: a rollout, as far as kind can show one: a second
+# image is preloaded on every worker at the same moment, with coordination on
+# (the default: one node fetches a blob from the registry and the others take it
+# from it). Nothing is known beforehand about who fetches what, so the check is
+# loose: the workers together must take less from the registries than if each
+# had gone there itself, and nobody may see a verification error. The numbers are
+# printed either way.
+pilot_concurrent() {
+  local img=${PILOT_CONCURRENT_IMAGE:-public.ecr.aws/docker/library/python:3.11-slim}
+  local nodes=("$@") n i f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes=0 pct
+  log "pilot: $img on ${#nodes[@]} workers at once, coordination on"
+  kubectl -n kube-system set env daemonset/steady-image-cache \
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=true
+  kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+  all_see() { for n in "${nodes[@]}"; do sees_all_peers "$n" || return 1; done; }
+  wait_for "every worker to see all its peers" 120 all_see
+  i=0
+  for n in "${nodes[@]}"; do
+    f=$WORK/concurrent.$i; rm -f "$f"; files+=("$f")
+    # A failure inside the subshell ends it without writing the result file.
+    ( preload_on "$n" "$img" && rc=0 || rc=$?; echo "$rc $PL_BYTES $PL_PEERS $PL_REG" > "$f" ) &
+    pids+=($!); i=$((i + 1))
+  done
+  for i in "${pids[@]}"; do wait "$i" || true; done
+  for i in "${!nodes[@]}"; do
+    [ -s "${files[$i]}" ] || fail "the preload of $img on ${nodes[$i]} failed"
+    read -r rc b pe re < "${files[$i]}"
+    if [ "$rc" != 0 ]; then
+      echo "::warning::skipped the concurrent preload, because the registry was rate limiting"
+      return 0
+    fi
+    bytes=$b; peers_total=$(( peers_total + pe )); reg_total=$(( reg_total + re ))
+  done
+  [ "$reg_total" -gt 0 ] || fail "$img: no bytes came from a registry, so the nodes were not cold"
+  pct=$(( 100 * peers_total / (peers_total + reg_total) ))
+  local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry)"
+  echo "pilot result: $line"
+  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $line" >> "$GITHUB_STEP_SUMMARY"
+  [ "$reg_total" -lt $(( ${#nodes[@]} * bytes )) ] || fail "$img: the workers took $reg_total bytes from the registries, as many as if each had fetched the image itself ($(( ${#nodes[@]} * bytes )))"
+  local w v
+  for w in "${nodes[@]}"; do
+    v=$(metric_strict "$w" sic_verify_errors_total) || fail "could not read the verification error counter of $w"
+    [ "$v" = 0 ] || fail "$w had verification errors"
+  done
 }
 
 # previous_image: the image of the newest release older than the one the sample
@@ -505,7 +575,15 @@ docker build --build-arg VERSION=e2e -t "$SIC_IMAGE" "$ROOT"
 
 log "create the kind cluster $CLUSTER"
 kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
-kind create cluster --name "$CLUSTER" --config "$ROOT/test/e2e/kind-config.yaml" --kubeconfig "$KUBECONFIG" --wait 120s ${NODE_IMAGE:+--image "$NODE_IMAGE"}
+KIND_CONFIG=$ROOT/test/e2e/kind-config.yaml
+# The pilot can run on more workers (PILOT_WORKERS, at least 2): with more than
+# two nodes the saving is (N-1)/N and a node has several holders to choose from.
+if [ "$MODE" = pilot ] && [ "${PILOT_WORKERS:-2}" -gt 2 ]; then
+  KIND_CONFIG=$WORK/kind-config.yaml
+  cp "$ROOT/test/e2e/kind-config.yaml" "$KIND_CONFIG"
+  for _ in $(seq 3 "$PILOT_WORKERS"); do echo "- role: worker" >> "$KIND_CONFIG"; done
+fi
+kind create cluster --name "$CLUSTER" --config "$KIND_CONFIG" --kubeconfig "$KUBECONFIG" --wait 120s ${NODE_IMAGE:+--image "$NODE_IMAGE"}
 mapfile -t NODES < <(kind get nodes --name "$CLUSTER")
 A=$CLUSTER-worker
 B=$CLUSTER-worker2
