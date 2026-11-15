@@ -143,6 +143,8 @@ The cache no longer grows until the disk is full. When a download would leave le
 
 An evicted tag still resolves; the manifest is fetched again from a peer when somebody asks. Image names and their digests in `aliases.json` are removed only to keep the record to 50,000 names: past that, the ones confirmed longest ago (and those only imported from containerd) go first, and a name that was dropped resolves again only once something supplies it: the registry (with upstream fallback on), a peer, or a later containerd import. Until then a pull by that tag fails, even if its manifest is still cached.
 
+Cost of an eviction: it reads the blob directory, stats every file and sorts them, then removes about 5% (the slack), so it runs once per 5% of growth, not once per download. Measured on a CI runner with 1 KiB blobs (`SIC_EVICT_COST=1 go test ./internal/store -run TestEvictScanCost -v`): 10 000 blobs 24 ms, 50 000 blobs 135 ms, 100 000 blobs 298 ms. A download that needs room waits for it, but no other request does. An in-memory index of sizes and last use would remove that wait at the price of keeping it correct against files that change on disk; it is not worth it below hundreds of thousands of blobs, and none has been added.
+
 ## Upstream fallback
 
 Set `SIC_UPSTREAM_ENABLED=true` and list the registries SIC may contact in `SIC_UPSTREAM_REGISTRIES` (comma separated, e.g. `docker.io,ghcr.io`). The registry is taken from the `?ns=` parameter of the request; a registry that is not listed is refused. Upstream connections are verified against the system CA roots (the peer CA is only used between SIC nodes). The image carries the public roots of its build image, so Docker Hub, GHCR and the like work as they are.
