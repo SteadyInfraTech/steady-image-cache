@@ -19,6 +19,11 @@ on:
 permissions:
   contents: read
 
+# One run per ref: two runs at once would share the registries' rate limit.
+concurrency:
+  group: e2e-pilot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pilot:
     runs-on: ubuntu-latest

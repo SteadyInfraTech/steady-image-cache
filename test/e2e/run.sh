@@ -273,8 +273,14 @@ registries_phase() {
 # Returns 2 when the registry throttled; anything else wrong is a failure.
 preload_on() {
   local node=$1 img=$2 pod out try p0 u0 p1 u1
-  pod=$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$node" -o name | head -n 1)
-  [ -n "$pod" ] || fail "no SIC pod on $node"
+  PL_BYTES="" PL_PEERS="" PL_REG=""
+  # A running pod that is not being deleted (a pod replaced by the rollout can
+  # still be listed while it terminates).
+  pod=$(kubectl -n kube-system get pods -l app=steady-image-cache \
+    --field-selector "spec.nodeName=$node,status.phase=Running" \
+    -o jsonpath='{range .items[?(@.metadata.deletionTimestamp==null)]}{.metadata.name}{"\n"}{end}' | head -n 1)
+  [ -n "$pod" ] || fail "no running SIC pod on $node"
+  pod=pod/$pod
   # The baseline is taken once, before the first attempt: a throttled attempt may
   # already have moved bytes, and they count.
   p0=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
@@ -284,7 +290,7 @@ preload_on() {
         -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key "$img" 2>&1); then
       echo "$out"
       PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
-      [ -n "$PL_BYTES" ] || fail "could not read the preload report: $out"
+      [ -n "$PL_BYTES" ] || fail "could not read the preload report (\"preloaded 0 of 1\" means the image was not preloaded): $out"
       p1=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
       u1=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
       PL_PEERS=$(( p1 - p0 ))
@@ -317,7 +323,7 @@ pilot_phase() {
   both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
   wait_for "both workers to see all their peers" 90 both_see_peers
 
-  local img rc a_reg a_bytes pct checked=() skipped=() summary=()
+  local img rc a_reg a_bytes pct checked=() skipped=() summary=() cold=1
   for img in ${PILOT_IMAGES:-public.ecr.aws/docker/library/python:3.12}; do
     log "pilot: $img on $A (from the registry), then on $B (from $A)"
     preload_on "$A" "$img" && rc=0 || rc=$?
@@ -332,15 +338,21 @@ pilot_phase() {
     # registry byte count of A can include a retried transfer, and later images
     # may share layers with earlier ones): there it must be the image's size.
     [ "$PL_PEERS" -gt 0 ] || fail "$img: $B took no bytes from peers"
-    if [ "${#checked[@]}" = 0 ] && [ "$PL_PEERS" -lt "$PL_BYTES" ]; then
-      fail "$img: $B took $PL_PEERS bytes from peers for an image of $PL_BYTES bytes"
+    # "cold" holds until one image has been measured on both nodes: an earlier
+    # image that was skipped may have left layers on A, B or both.
+    if [ "$cold" = 1 ] && [ "$PL_PEERS" -lt "$PL_BYTES" ]; then
+      fail "$img: $B took $PL_PEERS bytes from peers for an image of $PL_BYTES bytes (A: $a_bytes)"
     fi
+    cold=0
     pct=$(( 100 * PL_PEERS / (PL_PEERS + PL_REG) ))
     summary+=("$img: $A took $a_reg bytes from the registry; $B took $PL_PEERS bytes from $A and $PL_REG from a registry, so $pct% of $B's bytes were not fetched from the registry (image of $a_bytes bytes)")
     checked+=("$img")
   done
-  [ "$(metric "$B" sic_verify_errors_total)" = 0 ] || fail "$B had verification errors"
-  [ "$(metric "$B" sic_peer_errors_total)" = 0 ] || fail "$B had peer errors"
+  local verr perr
+  verr=$(metric_strict "$B" sic_verify_errors_total) || fail "could not read the verification error counter of $B"
+  perr=$(metric_strict "$B" sic_peer_errors_total) || fail "could not read the peer error counter of $B"
+  [ "$verr" = 0 ] || fail "$B had verification errors"
+  [ "$perr" = 0 ] || fail "$B had peer errors"
   if [ "${#skipped[@]}" -gt 0 ]; then
     echo "::warning::skipped, because the registry was rate limiting: ${skipped[*]}"
   fi
