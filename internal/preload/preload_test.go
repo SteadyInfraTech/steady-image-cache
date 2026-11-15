@@ -287,13 +287,51 @@ func TestPreloadRealmKeepsItsOwnQueryAndRefusesRedirectsToHTTP(t *testing.T) {
 	}
 }
 
-func TestPreloadChoosesThePlatformInsideAnIndexWithoutOne(t *testing.T) {
+func TestPreloadCandidatesAreThePlatformsThenIndexesWithoutOne(t *testing.T) {
 	r := &runner{o: Options{Platform: "linux/amd64"}}
-	d, err := r.pick([]descriptor{{MediaType: "application/vnd.oci.image.index.v1+json", Digest: "sha256:inner"}})
-	if err != nil || d != "sha256:inner" {
-		t.Fatalf("pick = %q, %v; want the nested index to be followed", d, err)
+	amd := &struct{ OS, Architecture, Variant string }{"linux", "amd64", ""}
+	idx := "application/vnd.oci.image.index.v1+json"
+	got := r.candidates([]descriptor{
+		{MediaType: idx, Digest: "sha256:nested"},
+		{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: "sha256:plain"},
+		{Digest: "sha256:exact", Platform: amd},
+	})
+	if len(got) != 2 || got[0] != "sha256:exact" || got[1] != "sha256:nested" {
+		t.Fatalf("candidates = %v, want the exact platform first, then the index without one; never a plain manifest", got)
 	}
-	if _, err := r.pick([]descriptor{{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: "sha256:x"}}); err == nil {
-		t.Fatal("a manifest without a platform was taken for the platform's")
+}
+
+func TestPreloadSearchesEveryNestedIndexForThePlatform(t *testing.T) {
+	blobs := map[string][]byte{}
+	put := func(v any) ([]byte, string) {
+		b, _ := json.Marshal(v)
+		blobs[dg(b)] = b
+		return b, dg(b)
+	}
+	layer, cfg := []byte("layer"), []byte("{}")
+	blobs[dg(layer)], blobs[dg(cfg)] = layer, cfg
+	_, img := put(manifest{Config: &descriptor{Digest: dg(cfg)}, Layers: []descriptor{{Digest: dg(layer)}}})
+	amd := &struct{ OS, Architecture, Variant string }{"linux", "amd64", ""}
+	arm := &struct{ OS, Architecture, Variant string }{"linux", "arm64", ""}
+	idx := "application/vnd.oci.image.index.v1+json"
+	_, armOnly := put(manifest{Manifests: []descriptor{{Digest: img, Platform: arm}}})
+	_, hasAmd := put(manifest{Manifests: []descriptor{{Digest: img, Platform: amd}}})
+	outer, _ := put(manifest{Manifests: []descriptor{{MediaType: idx, Digest: armOnly}, {MediaType: idx, Digest: hasAmd}}})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		last := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if last == "v1" {
+			w.Write(outer)
+			return
+		}
+		if b := blobs[last]; b != nil {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	res, _, err := Run(context.Background(), Options{Addr: srv.URL, Client: srv.Client(), Platform: "linux/amd64"}, []string{"reg.example/team/app:v1"})
+	if err != nil || len(res) != 1 || res[0].Blobs != 2 {
+		t.Fatalf("%+v, %v; want the amd64 image found in the second nested index", res, err)
 	}
 }

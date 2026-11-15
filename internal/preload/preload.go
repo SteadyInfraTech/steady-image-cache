@@ -186,21 +186,8 @@ func (r *runner) image(ctx context.Context, s string) (Result, error) {
 	}
 	// An index names manifests per platform, and may itself name indexes: go
 	// down until a manifest that names a config and layers.
-	for depth := 0; len(m.Manifests) > 0; depth++ {
-		if depth == 4 {
-			return Result{}, errors.New("indexes nested more than four deep")
-		}
-		d, err := r.pick(m.Manifests)
-		if err != nil {
-			return Result{}, err
-		}
-		if body, mdigest, err = r.getManifest(ctx, ref, d); err != nil {
-			return Result{}, err
-		}
-		m = manifest{}
-		if err := json.Unmarshal(body, &m); err != nil {
-			return Result{}, fmt.Errorf("manifest %s: %w", d, err)
-		}
+	if m, mdigest, err = r.resolve(ctx, ref, m, mdigest, 0); err != nil {
+		return Result{}, err
 	}
 	if m.Config == nil && len(m.Layers) == 0 {
 		return Result{}, fmt.Errorf("manifest %s names no config and no layers (an artifact this tool does not pull)", mdigest)
@@ -242,22 +229,58 @@ func (r *runner) image(ctx context.Context, s string) (Result, error) {
 	return res, nil
 }
 
-func (r *runner) pick(ms []descriptor) (string, error) {
-	want := r.o.Platform
+// candidates are the entries of an index that may lead to the platform's
+// manifest: those of the platform itself first, then indexes that name no
+// platform (the OCI image spec shows an index naming another index this way);
+// the platform is chosen inside them.
+func (r *runner) candidates(ms []descriptor) []string {
+	var out []string
 	for _, d := range ms {
-		if d.Platform != nil && d.Platform.OS+"/"+d.Platform.Architecture == want {
-			return d.Digest, nil
+		if d.Platform != nil && d.Platform.OS+"/"+d.Platform.Architecture == r.o.Platform {
+			out = append(out, d.Digest)
 		}
 	}
-	// An index may name another index without a platform of its own (the OCI
-	// image spec shows this): the platform is chosen inside it.
 	for _, d := range ms {
 		if d.Platform == nil && (d.MediaType == "application/vnd.oci.image.index.v1+json" ||
 			d.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json") {
-			return d.Digest, nil
+			out = append(out, d.Digest)
 		}
 	}
-	return "", fmt.Errorf("the index has no manifest for %s", want)
+	return out
+}
+
+// resolve goes down from m through indexes to a manifest that is not one. An
+// entry that leads nowhere does not end the search while others are left.
+func (r *runner) resolve(ctx context.Context, ref Ref, m manifest, mdigest string, depth int) (manifest, string, error) {
+	if len(m.Manifests) == 0 {
+		return m, mdigest, nil
+	}
+	if depth >= 4 {
+		return manifest{}, "", errors.New("indexes nested more than four deep")
+	}
+	cands := r.candidates(m.Manifests)
+	if len(cands) == 0 {
+		return manifest{}, "", fmt.Errorf("the index has no manifest for %s", r.o.Platform)
+	}
+	var last error
+	for _, d := range cands {
+		body, dg, err := r.getManifest(ctx, ref, d)
+		if err != nil {
+			last = err
+			continue
+		}
+		var child manifest
+		if err := json.Unmarshal(body, &child); err != nil {
+			last = fmt.Errorf("manifest %s: %w", d, err)
+			continue
+		}
+		got, gd, err := r.resolve(ctx, ref, child, dg, depth+1)
+		if err == nil {
+			return got, gd, nil
+		}
+		last = err
+	}
+	return manifest{}, "", last
 }
 
 func (r *runner) getManifest(ctx context.Context, ref Ref, reference string) ([]byte, string, error) {
