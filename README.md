@@ -392,7 +392,7 @@ A production-ready Helm chart is provided under `charts/steady-image-cache` and 
 ```bash
 # Install directly from GitHub Container Registry (OCI):
 helm install steady-image-cache oci://ghcr.io/steadyinfratech/charts/steady-image-cache \
-  --version 1.3.2 \
+  --version 1.3.3 \
   --namespace kube-system \
   --set initContainer.enabled=true \
   --set config.upstreamEnabled=true \
@@ -410,7 +410,7 @@ helm install steady-image-cache ./charts/steady-image-cache \
 
 `deploy/daemonset.yaml` is a starting point, not a finished product; it needs the TLS secret `steady-image-cache-tls` and an image reference you have chosen. What it does, and why:
 
-* **Image.** The manifest names the release image `ghcr.io/steadyinfratech/steady-image-cache:v1.3.2`; pin the tag you have tested, or an `@sha256:` digest. (`:main` is the branch build and is not meant for production; `:latest` follows the newest release.) Images are published for `linux/amd64` and `linux/arm64`. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
+* **Image.** The manifest names the release image `ghcr.io/steadyinfratech/steady-image-cache:v1.3.3`; pin the tag you have tested, or an `@sha256:` digest. (`:main` is the branch build and is not meant for production; `:latest` follows the newest release.) Images are published for `linux/amd64` and `linux/arm64`. `imagePullPolicy` stays `IfNotPresent` (see Bootstrap).
 * **Root, with nothing else.** The container runs as root only because containerd's socket is normally `root:root 0660`. It drops every capability, cannot gain privileges, has a read-only root file system and the runtime's default seccomp profile. If you turn the containerd import off (`SIC_CONTAINERD_IMPORT=false`) it needs no socket and can run as a non-root user that owns the cache directory.
 * **Resources.** Requests of 50m CPU and 64Mi memory; a memory limit of 512Mi to catch a leak. There is no CPU limit on purpose: hashing a layer is bursty, and throttling only makes pulls slower.
 * **Probes.** Readiness uses `/readyz` and liveness `/healthz`, both on the plain-HTTP admin port, because kubelet cannot present the client certificate the main port wants. The liveness probe waits for a minute of failures before restarting: a restart interrupts transfers under way.
@@ -445,7 +445,7 @@ The DaemonSet uses the host network and a fixed port, so a new pod cannot start 
   diff before.yaml after.yaml   # only the pre-pull DaemonSet (and chart labels) may differ; the SIC DaemonSet's pod template must not
   ```
 
-  `$DIGEST` is the digest of the new release that you resolved and verified with `cosign verify` ("Verifying a release"); the value is the tag and the digest together, `v1.3.2@sha256:...`, so every node pulls the image you checked, not whatever the tag points to later. The pre-pull image comes from `image.repository` unless you set `prepull.image.repository`, so a mirrored or private repository is used for both. If `initContainer.image.repository` is a different repository (it is a separate setting), the pre-pull DaemonSet runs a second container from that repository with the same tag, so the init container's image is on every node too; set both repositories and both tags to the same verified value for the second upgrade.
+  `$DIGEST` is the digest of the new release that you resolved and verified with `cosign verify` ("Verifying a release"); the value is the tag and the digest together, `v1.3.3@sha256:...`, so every node pulls the image you checked, not whatever the tag points to later. The pre-pull image comes from `image.repository` unless you set `prepull.image.repository`, so a mirrored or private repository is used for both. If `initContainer.image.repository` is a different repository (it is a separate setting), the pre-pull DaemonSet runs a second container from that repository with the same tag, so the init container's image is on every node too; set both repositories and both tags to the same verified value for the second upgrade.
 
   Then wait for the pre-pull DaemonSet, which is named like SIC's own plus `-prepull` (`kubectl get daemonset -n "$NS"`; with `fullnameOverride` that is the override plus `-prepull`): `kubectl rollout status daemonset/<that name> -n "$NS"`. Done means every node has pulled the image, through the old SIC, so it depends on the same seeding of steps 1 and 2. The second upgrade sets `image.tag` and `initContainer.image.tag` to that same value and an empty `prepull.image.tag`, which removes the DaemonSet. The pre-pull pods run `sic idle`, take no resources to speak of, and are not peers (they do not carry SIC's labels). Only then change the tag in `deploy/daemonset.yaml` and roll out one node at a time (`maxUnavailable: 1`, the default), watching `sic_peers` and the pull errors on the first node before going on. A node that is already stuck without the image can be given it with `ctr -n k8s.io images import` from the same archive.
 
@@ -471,25 +471,25 @@ It does not pin anything: a preloaded blob is eligible for eviction like any oth
 
 ### Verifying a release
 
-From 1.3.2 on, the image and the Helm chart of every release are signed with [cosign](https://docs.sigstore.dev/cosign/) without a key: the signature is made by the release workflow's own GitHub identity, and the certificate says which workflow and which tag. Verify with the identity of *that release's* tag, exactly, not a pattern: a pattern would also accept the signature of another release, and a registry writer could then point one tag at another release's image. Replace `v1.3.2` below by the release you are verifying. A tag can be moved, so resolve it to a digest once, verify that digest, and use only the digest from then on: verifying the tag and then deploying the tag could hand you a different image than the one you checked.
+From 1.3.2 on, the image and the Helm chart of every release are signed with [cosign](https://docs.sigstore.dev/cosign/) without a key: the signature is made by the release workflow's own GitHub identity, and the certificate says which workflow and which tag. Verify with the identity of *that release's* tag, exactly, not a pattern: a pattern would also accept the signature of another release, and a registry writer could then point one tag at another release's image. Replace `v1.3.3` below by the release you are verifying. A tag can be moved, so resolve it to a digest once, verify that digest, and use only the digest from then on: verifying the tag and then deploying the tag could hand you a different image than the one you checked.
 
 ```bash
 IMAGE=ghcr.io/steadyinfratech/steady-image-cache
 set -euo pipefail
-DIGEST=$(docker buildx imagetools inspect "$IMAGE:v1.3.2" --format '{{printf "%s" .Manifest.Digest}}')
+DIGEST=$(docker buildx imagetools inspect "$IMAGE:v1.3.3" --format '{{printf "%s" .Manifest.Digest}}')
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/release.yml@refs/tags/v1.3.2 \
+  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/release.yml@refs/tags/v1.3.3 \
   "$IMAGE@$DIGEST"
 ```
 
-Deploy only if `cosign verify` exited successfully (it exits non-zero when the signature or the identity does not match, and in a script `set -e` makes that stop the run), and deploy `$IMAGE@$DIGEST`, not `$IMAGE:v1.3.2`. In `deploy/daemonset.yaml`, use it as the image. In the chart, the image is built as `repository:tag`, so put the tag and the digest together in the tag value (Kubernetes accepts `v1.3.2@sha256:...` and then pulls by the digest), and do it in both places that run SIC, `image.tag` for the main container and `initContainer.image.tag` for the init containers; setting only one leaves the other on the tag you did not verify:
+Deploy only if `cosign verify` exited successfully (it exits non-zero when the signature or the identity does not match, and in a script `set -e` makes that stop the run), and deploy `$IMAGE@$DIGEST`, not `$IMAGE:v1.3.3`. In `deploy/daemonset.yaml`, use it as the image. In the chart, the image is built as `repository:tag`, so put the tag and the digest together in the tag value (Kubernetes accepts `v1.3.3@sha256:...` and then pulls by the digest), and do it in both places that run SIC, `image.tag` for the main container and `initContainer.image.tag` for the init containers; setting only one leaves the other on the tag you did not verify:
 
 ```bash
 helm upgrade --install steady-image-cache ... \
-  --set "image.tag=v1.3.2@$DIGEST" \
-  --set "initContainer.image.tag=v1.3.2@$DIGEST"
+  --set "image.tag=v1.3.3@$DIGEST" \
+  --set "initContainer.image.tag=v1.3.3@$DIGEST"
 ```
 
 The signature is on the digest, so the digest is what the check vouches for. The image index also holds, for each of the two platforms, a software bill of materials (SPDX) and the build's provenance, covered by the same signature (the chart has none); read them from the same digest:
@@ -503,11 +503,11 @@ The chart (its version is the tag without the `v`; the workflow is `helm.yml`) w
 
 ```bash
 CHART=ghcr.io/steadyinfratech/charts/steady-image-cache
-CHART_DIGEST=$(crane digest "$CHART:1.3.2")
+CHART_DIGEST=$(crane digest "$CHART:1.3.3")
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/helm.yml@refs/tags/v1.3.2 \
+  --certificate-identity https://github.com/SteadyInfraTech/steady-image-cache/.github/workflows/helm.yml@refs/tags/v1.3.3 \
   "$CHART@$CHART_DIGEST"
 ```
 

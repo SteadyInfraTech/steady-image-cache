@@ -4,6 +4,10 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+## 1.3.3 - 2026-11-15
+
+New tools and measurements around rollouts; nothing that runs changes. Upgrading from 1.3.2 needs only the new image (or chart); no setting, metric or API path changes, and no file needs replacing. The new `prepull` DaemonSet and `sic preload` do nothing unless you use them.
+
 - New CI job "pilot" (`e2e-pilot.yml`, weekly and by hand): preloads a real public image on one kind node and then on the other and prints how many of the second node's bytes were not fetched from the registry (README, "Status"). Tests only.
 - New `sic preload` command: pulls images through this node's SIC before a rollout, checks every blob, and with `-admin` reports the bytes taken from peers and from registries (README, "Preloading an image before a rollout"). Nothing changes unless you run it.
 - New optional `prepull` DaemonSet in the Helm chart (off while `prepull.image.tag` is empty) and a `sic idle` command for it: puts the next release's image on every node before the upgrade, so that a node whose only registry host is SIC (`_default`) does not have to pull its new SIC image after the old SIC has stopped. README, "Upgrading". Nothing changes unless you set it.
