@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- The cost of choosing whom to ask on a miss is now measured (`BenchmarkPeerOrder`) and stated in the README, "Peer requests": 120 µs at 5 000 peers, so no change to the code. The README also puts the two-node limit of the pilot measurement next to the number. No code change.
 - `sic preload` now also reads registry credentials from the `auths` of the Docker config file (`-docker-config`, `$DOCKER_CONFIG`, `~/.docker/config.json`), per registry, next to `SIC_PRELOAD_USERNAME`/`SIC_PRELOAD_PASSWORD` (which win for their registry). Credential helpers and stores are not supported. Nothing changes unless such a file exists where the command runs (README, "Preloading an image before a rollout"). Closes #129.
 ## 1.3.3 - 2026-11-15
 
