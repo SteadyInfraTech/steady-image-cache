@@ -122,7 +122,7 @@ func TestPreloadPullsOnlyThePlatformsBlobs(t *testing.T) {
 
 func TestPreloadAnswersATokenChallengeWithTheCallersCredentials(t *testing.T) {
 	f, _ := newFake(t, true)
-	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw", AllowPlainHTTPRealm: true}
+	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw", CredentialRegistry: "reg.example", AllowPlainHTTPRealm: true}
 	if _, _, err := Run(context.Background(), o, []string{"reg.example/team/app:v1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestParseRef(t *testing.T) {
 func TestPreloadAcceptsAnAccessTokenAnswer(t *testing.T) {
 	f, _ := newFake(t, true)
 	f.tokenKey = "access_token"
-	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw", AllowPlainHTTPRealm: true}
+	o := Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", Username: "bot", Password: "pw", CredentialRegistry: "reg.example", AllowPlainHTTPRealm: true}
 	if _, _, err := Run(context.Background(), o, []string{"reg.example/team/app:v1"}); err != nil {
 		t.Fatalf("a token service that answers access_token was refused: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestPreloadRealmKeepsItsOwnQueryAndRefusesRedirectsToHTTP(t *testing.T) {
 	}))
 	defer tok.Close()
 	r := &runner{o: Options{AllowPlainHTTPRealm: true}, tokens: map[string]string{}}
-	got, err := r.token(context.Background(), `Bearer realm="`+tok.URL+`/t?tenant=blue",service="reg"`, "repository:a/b:pull")
+	got, err := r.token(context.Background(), `Bearer realm="`+tok.URL+`/t?tenant=blue",service="reg"`, "repository:a/b:pull", "reg.example")
 	if err != nil || got != "T" {
 		t.Fatalf("token = %q, %v", got, err)
 	}
@@ -367,5 +367,41 @@ func TestPreloadReportsNoSourcesWhenACounterWentBackwards(t *testing.T) {
 	}
 	if src.Known || src.FromPeers != 0 || src.FromRegistries != 0 {
 		t.Fatalf("sources = %+v, want unknown after a counter went backwards", src)
+	}
+}
+
+func TestPreloadSendsCredentialsOnlyForTheirRegistry(t *testing.T) {
+	var auth string
+	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"token":"T"}`)
+	}))
+	defer tok.Close()
+	ch := `Bearer realm="` + tok.URL + `/t",service="s"`
+	r := &runner{o: Options{Username: "u", Password: "p", CredentialRegistry: "Registry-1.docker.io", AllowPlainHTTPRealm: true}}
+	if _, err := r.token(context.Background(), ch, "repository:a/b:pull", "docker.io"); err != nil || auth == "" {
+		t.Fatalf("the registry's own pull got no credentials (%q, %v); docker.io and registry-1.docker.io are one registry", auth, err)
+	}
+	auth = ""
+	if _, err := r.token(context.Background(), ch, "repository:a/b:pull", "evil.example"); err != nil {
+		t.Fatal(err)
+	}
+	if auth != "" {
+		t.Fatalf("credentials for one registry were sent while pulling from another: %q", auth)
+	}
+	r.o.CredentialRegistry = ""
+	if _, err := r.token(context.Background(), ch, "repository:a/b:pull", "docker.io"); err != nil || auth != "" {
+		t.Fatalf("credentials were sent with no registry named for them (%q, %v)", auth, err)
+	}
+}
+
+func TestParseBearerKeepsCommasInQuotedValues(t *testing.T) {
+	p, ok := parseBearer(`Bearer realm="https://auth.example/token?a=1,2&b=\"x\"",service="reg, one",scope="repository:a/b:pull,push"`)
+	if !ok || p["realm"] != `https://auth.example/token?a=1,2&b="x"` || p["service"] != "reg, one" || p["scope"] != "repository:a/b:pull,push" {
+		t.Fatalf("parseBearer = %v, %v", p, ok)
+	}
+	p, ok = parseBearer(`Bearer realm=https://a/t,service=s`)
+	if !ok || p["realm"] != "https://a/t" || p["service"] != "s" {
+		t.Fatalf("unquoted values: %v, %v", p, ok)
 	}
 }

@@ -34,6 +34,9 @@ type Options struct {
 	// AllowPlainHTTPRealm lets a token service at an http:// address receive the
 	// credentials (development only). By default only https realms do.
 	AllowPlainHTTPRealm bool
+	// CredentialRegistry is the registry Username and Password are for; they are
+	// never sent while pulling from another one (and not at all if it is empty).
+	CredentialRegistry string
 	// Parallel is how many blobs are fetched at once (default 4).
 	Parallel int
 	// AdminURL, when set, is SIC's admin address (http://127.0.0.1:5001); the
@@ -367,7 +370,7 @@ func (r *runner) get(ctx context.Context, ref Ref, path, accept string) (*http.R
 		if status != http.StatusUnauthorized || attempt == 1 {
 			return nil, fmt.Errorf("%s: %s", path, strconv.Itoa(status)+" "+http.StatusText(status))
 		}
-		newTok, err := r.token(ctx, challenge, scope)
+		newTok, err := r.token(ctx, challenge, scope, ref.Registry)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
@@ -379,7 +382,7 @@ func (r *runner) get(ctx context.Context, ref Ref, path, accept string) (*http.R
 }
 
 // token answers a Bearer challenge with the registry's token service.
-func (r *runner) token(ctx context.Context, challenge, scope string) (string, error) {
+func (r *runner) token(ctx context.Context, challenge, scope, registry string) (string, error) {
 	p, ok := parseBearer(challenge)
 	if !ok {
 		return "", fmt.Errorf("the registry wants authentication this tool cannot answer (%q)", challenge)
@@ -413,7 +416,10 @@ func (r *runner) token(ctx context.Context, challenge, scope string) (string, er
 	if err != nil {
 		return "", err
 	}
-	if r.o.Username != "" {
+	// The credentials are for one registry. A token realm is named by whoever
+	// answers for the registry, so they are sent only while pulling from the
+	// registry they were given for.
+	if r.o.Username != "" && r.o.CredentialRegistry != "" && NormalizeRegistry(registry) == NormalizeRegistry(r.o.CredentialRegistry) {
 		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(r.o.Username+":"+r.o.Password)))
 	}
 	// The credentials must not follow a redirect to a transport the check above
@@ -450,17 +456,50 @@ func parseBearer(h string) (map[string]string, bool) {
 		return nil, false
 	}
 	p := map[string]string{}
-	for _, part := range strings.Split(rest, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if ok {
-			p[k] = strings.Trim(v, `"`)
+	// key=value pairs separated by commas; a value may be a quoted string, in
+	// which a comma is part of the value and a backslash escapes the next byte.
+	for i := 0; i < len(rest); {
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == ',') {
+			i++
 		}
+		j := i
+		for j < len(rest) && rest[j] != '=' && rest[j] != ',' {
+			j++
+		}
+		if j >= len(rest) || rest[j] != '=' {
+			i = j
+			continue
+		}
+		key := strings.TrimSpace(rest[i:j])
+		i = j + 1
+		var val strings.Builder
+		if i < len(rest) && rest[i] == '"' {
+			i++
+			for i < len(rest) && rest[i] != '"' {
+				if rest[i] == '\\' && i+1 < len(rest) {
+					i++
+				}
+				val.WriteByte(rest[i])
+				i++
+			}
+			i++ // the closing quote
+		} else {
+			for i < len(rest) && rest[i] != ',' {
+				val.WriteByte(rest[i])
+				i++
+			}
+		}
+		p[key] = strings.TrimSpace(val.String())
 	}
 	return p, p["realm"] != ""
 }
 
 // counters reads the two byte counters from the admin address.
 func (r *runner) counters(ctx context.Context) (peers, upstream int64, err error) {
+	// A stuck admin address must not hold up the preload: this read has a
+	// deadline of its own, and its failure only makes the sources unknown.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(r.o.AdminURL, "/")+"/metrics", nil)
 	if err != nil {
 		return 0, 0, err
@@ -505,4 +544,14 @@ func (r *runner) tokenRedirect(rq *http.Request, via []*http.Request) error {
 		return fmt.Errorf("the token service redirected to %s, which is not https", rq.URL.Redacted())
 	}
 	return nil
+}
+
+// NormalizeRegistry makes two spellings of one registry compare equal.
+func NormalizeRegistry(r string) string {
+	r = strings.ToLower(strings.TrimSpace(r))
+	switch r {
+	case "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com":
+		return "docker.io"
+	}
+	return r
 }
