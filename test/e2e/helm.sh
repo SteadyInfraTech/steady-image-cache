@@ -209,11 +209,14 @@ serves() {
 # (config and layers). The import loop indexes them after the manifest, so
 # serving the manifest alone is not enough to pull from A's cache.
 serves_all() {
-  local d=$1 blob
+  local d=$1 m blobs blob
   serves "$d" || return 1
-  for blob in $(docker exec "$A" curl -fsS --cacert /etc/steady-image-cache/ca.crt \
-      --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
-      "https://127.0.0.1:5000/v2/e2e/app/manifests/$d?ns=registry.example.test" | grep -o 'sha256:[0-9a-f]\{64\}' | sort -u); do
+  m=$(docker exec "$A" curl -fsS --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/app/manifests/$d?ns=registry.example.test") || return 1
+  blobs=$(jq -r '.config.digest, .layers[].digest' <<<"$m" | sort -u) || return 1
+  [ -n "$blobs" ] || return 1
+  for blob in $blobs; do
     docker exec "$A" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
       --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
       "https://127.0.0.1:5000/v2/e2e/app/blobs/$blob?ns=registry.example.test" || return 1
