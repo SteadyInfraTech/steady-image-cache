@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- Tests for the EndpointSlice discovery client (listing, watch, bookmarks, "410 gone", a refused watch, poke, broken events, service account files), for the digest-filter ranking (`Classify`, `Holders`, `SelfBytes`) and for the gossip loop. The `peer` package goes from 64% to 90% statement coverage. Tests only: nothing that runs changes, and the features stay experimental.
 - `sic preload` now also reads registry credentials from the `auths` of the Docker config file (`-docker-config`, `$DOCKER_CONFIG`, `~/.docker/config.json`), per registry, next to `SIC_PRELOAD_USERNAME`/`SIC_PRELOAD_PASSWORD` (which win for their registry). Credential helpers and stores are not supported. Nothing changes unless such a file exists where the command runs (README, "Preloading an image before a rollout"). Closes #129.
 ## 1.3.3 - 2026-11-15
 
