@@ -37,6 +37,11 @@ type Options struct {
 	// CredentialRegistry is the registry Username and Password are for; they are
 	// never sent while pulling from another one (and not at all if it is empty).
 	CredentialRegistry string
+	// Lookup, if set, gives the user name and password for a registry (for
+	// example from a Docker config file); it is asked only for a registry that
+	// Username/CredentialRegistry do not cover, and the same rules apply: https
+	// realms only, and only the registry's own credentials.
+	Lookup func(registry string) (user, pass string)
 	// Parallel is how many blobs are fetched at once (default 4).
 	Parallel int
 	// AdminURL, when set, is SIC's admin address (http://127.0.0.1:5001); the
@@ -419,8 +424,14 @@ func (r *runner) token(ctx context.Context, challenge, scope, registry string) (
 	// The credentials are for one registry. A token realm is named by whoever
 	// answers for the registry, so they are sent only while pulling from the
 	// registry they were given for.
+	user, pass := "", ""
 	if r.o.Username != "" && r.o.CredentialRegistry != "" && NormalizeRegistry(registry) == NormalizeRegistry(r.o.CredentialRegistry) {
-		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(r.o.Username+":"+r.o.Password)))
+		user, pass = r.o.Username, r.o.Password
+	} else if r.o.Lookup != nil {
+		user, pass = r.o.Lookup(registry)
+	}
+	if user != "" {
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+pass)))
 	}
 	// The credentials must not follow a redirect to a transport the check above
 	// refused: Go would forward them from https to http on the same host.

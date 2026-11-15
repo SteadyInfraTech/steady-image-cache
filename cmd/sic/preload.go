@@ -35,9 +35,10 @@ func runPreload(args []string) error {
 	plain := fs.Bool("plain-http", false, "talk to SIC without TLS, and send credentials to an http token service (development only; SIC_INSECURE=true)")
 	timeout := fs.Duration("timeout", 30*time.Minute, "give up after this long")
 	credReg := fs.String("credential-registry", "", "the registry SIC_PRELOAD_USERNAME/PASSWORD are for (default: the registry of the images, if they all share one)")
+	dockerCfg := fs.String("docker-config", "", "Docker config file to read registry credentials from (default: $DOCKER_CONFIG/config.json or ~/.docker/config.json)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: sic preload [flags] registry/repository[:tag|@digest] ...")
-		fmt.Fprintln(os.Stderr, "Registry credentials, if the registry needs them: SIC_PRELOAD_USERNAME and SIC_PRELOAD_PASSWORD in the environment.")
+		fmt.Fprintln(os.Stderr, "Registry credentials, if a registry needs them: the \"auths\" of the Docker config file, or SIC_PRELOAD_USERNAME and SIC_PRELOAD_PASSWORD in the environment.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -65,6 +66,20 @@ func runPreload(args []string) error {
 		}
 	}
 
+	// Credentials of the Docker config, per registry. A missing default file is
+	// fine; a file named with -docker-config must be readable.
+	lookup, helpers, err := preload.DockerCredentials(firstNonEmpty(*dockerCfg, preload.DockerConfigPath()))
+	if err != nil {
+		if *dockerCfg != "" {
+			return fmt.Errorf("docker config: %w", err)
+		}
+		log.Printf("preload: the Docker config is not used: %v", err)
+		lookup = nil
+	}
+	if helpers {
+		log.Printf("preload: the Docker config names a credential helper or store, which is not supported; only its \"auths\" entries are used")
+	}
+
 	client := &http.Client{Timeout: 0}
 	base := *addr
 	switch {
@@ -88,7 +103,7 @@ func runPreload(args []string) error {
 
 	res, src, err := preload.Run(ctx, preload.Options{
 		Addr: base, Client: client, Platform: *platform,
-		Username: user, Password: pass, CredentialRegistry: credRegistry,
+		Username: user, Password: pass, CredentialRegistry: credRegistry, Lookup: lookup,
 		Parallel: *parallel, AdminURL: *admin, Logf: log.Printf, AllowPlainHTTPRealm: *plain,
 	}, images)
 	var blobs int
@@ -163,4 +178,11 @@ func commonRegistry(images []string) string {
 		reg = r
 	}
 	return reg
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
