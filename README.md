@@ -447,6 +447,24 @@ The DaemonSet uses the host network and a fixed port, so a new pod cannot start 
 
 Either way, change the image tag (or digest) in the DaemonSet and nothing else in the same rollout, so that a problem is attributable.
 
+### Preloading an image before a rollout (`sic preload`)
+
+`sic preload` pulls images through this node's own SIC, so the cache already holds them when a rollout asks. It uses the registry API as containerd does (with `?ns=` naming the registry), so single-flight, peer fetches, protected-registry checks, the disk reserve and verification all apply; it adds no other way into the cache. Run it on a node, or in a Job with the node's certificate files mounted:
+
+```bash
+sic preload registry.example.com/team/app:v1.4.0 ghcr.io/org/worker@sha256:...
+sic preload -f images.txt -admin http://127.0.0.1:5001 -platform linux/arm64
+```
+
+* **Names must include the registry** (`docker.io/library/nginx:1.27`, not `nginx:1.27`): SIC has to be told which registry the content is of.
+* **Platform:** for a multi-platform image only the manifest for `-platform` (the node's by default) and its blobs are pulled.
+* **Certificates:** it connects as a client, with the files `sic init-node` leaves on the node (`/etc/steady-image-cache/ca.crt`, `tls.crt`, `tls.key`; flags `-ca`, `-cert`, `-key`, and `-server-name` if the certificate names SIC differently). `-plain-http` is for `SIC_INSECURE=true` only.
+* **Credentials:** SIC never holds them. If the registry answers with a token challenge, set `SIC_PRELOAD_USERNAME` and `SIC_PRELOAD_PASSWORD` in the environment (not on the command line); the token is fetched by the command and forwarded by SIC, as with containerd. For a protected registry this is the only way it can work. Docker's credential store is not read yet.
+* **Where the bytes came from:** with `-admin`, it prints what the node took from peers and from registries while it ran (the two byte counters of "Health and metrics"). That is also the registry-bytes-saved number for a real rollout: preload on one node, then on the others.
+* It checks every blob against its digest, runs `-parallel` (4) blobs at a time, and exits non-zero if any image failed.
+
+It does not pin anything: a preloaded blob is eligible for eviction like any other once it is a minute old, so run it shortly before the rollout, not days.
+
 ### Verifying a release
 
 From 1.3.2 on, the image and the Helm chart of every release are signed with [cosign](https://docs.sigstore.dev/cosign/) without a key: the signature is made by the release workflow's own GitHub identity, and the certificate says which workflow and which tag. Verify with the identity of *that release's* tag, exactly, not a pattern: a pattern would also accept the signature of another release, and a registry writer could then point one tag at another release's image. Replace `v1.3.2` below by the release you are verifying. A tag can be moved, so resolve it to a digest once, verify that digest, and use only the digest from then on: verifying the tag and then deploying the tag could hand you a different image than the one you checked.

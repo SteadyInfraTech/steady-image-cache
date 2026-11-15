@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- New `sic preload` command: pulls images through this node's SIC before a rollout, checks every blob, and with `-admin` reports the bytes taken from peers and from registries (README, "Preloading an image before a rollout"). Nothing changes unless you run it.
 - New optional `prepull` DaemonSet in the Helm chart (off while `prepull.image.tag` is empty) and a `sic idle` command for it: puts the next release's image on every node before the upgrade, so that a node whose only registry host is SIC (`_default`) does not have to pull its new SIC image after the old SIC has stopped. README, "Upgrading". Nothing changes unless you set it.
 
 ## 1.3.2 - 2026-11-13

@@ -505,9 +505,24 @@ echo "imported blobs on $A: $(metric "$A" sic_containerd_imported_blobs_total); 
 # Not just any four (kind's own images are linked too): this image's manifest is a link.
 docker exec "$A" test -L "/var/lib/steady-image-cache/blobs/sha256/${DIGEST#sha256:}" || fail "$A holds the manifest $DIGEST as a copy, not a link to containerd's file"
 
-log "pull on $B by digest, through SIC"
+log "sic preload on $B: the image comes from $A before anything pulls it"
 before_peer=$(metric "$B" sic_peer_hits_total)
 before_local=$(metric "$A" sic_local_hits_total)
+# The command of the SIC image itself, run in B's pod with the pod's own
+# certificate (a node's certificate is accepted as a client's).
+POD_B=$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$B" -o name | head -n 1)
+[ -n "$POD_B" ] || fail "no SIC pod on $B"
+preload_out=$(kubectl -n kube-system exec "$POD_B" -c sic -- /sic preload \
+  -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -admin http://127.0.0.1:5001 "$APP@$DIGEST" 2>&1) \
+  || fail "sic preload failed on $B: $preload_out"
+echo "$preload_out"
+grep -q '^preloaded 1 of 1 images: [1-9][0-9]* blobs' <<<"$preload_out" || fail "sic preload did not report the image: $preload_out"
+peers_bytes=$(sed -n 's/^this node took \([0-9]*\) bytes from peers and \([0-9]*\) bytes from registries.*/\1/p' <<<"$preload_out")
+reg_bytes=$(sed -n 's/^this node took \([0-9]*\) bytes from peers and \([0-9]*\) bytes from registries.*/\2/p' <<<"$preload_out")
+[ "${peers_bytes:-0}" -gt 0 ] || fail "preload took no bytes from peers: $preload_out"
+[ "${reg_bytes:-1}" = 0 ] || fail "preload took bytes from a registry: $preload_out"
+
+log "pull on $B by digest, through SIC (everything is already in its cache)"
 docker exec "$B" crictl pull "$APP@$DIGEST"
 
 after_peer=$(metric "$B" sic_peer_hits_total)
