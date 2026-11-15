@@ -124,3 +124,5 @@ jobs:
           # pull_request_target the action resolves them from the event.
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
+          sticky_summary: 'true'
+          checkpoint_range: 'true'
