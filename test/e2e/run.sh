@@ -278,7 +278,7 @@ preload_on() {
   # still be listed while it terminates).
   pod=$(kubectl -n kube-system get pods -l app=steady-image-cache \
     --field-selector "spec.nodeName=$node,status.phase=Running" \
-    -o jsonpath='{range .items[?(@.metadata.deletionTimestamp==null)]}{.metadata.name}{"\n"}{end}' | head -n 1)
+    -o custom-columns=NAME:.metadata.name,DEL:.metadata.deletionTimestamp --no-headers | awk '$2 == "<none>" { print $1; exit }')
   [ -n "$pod" ] || fail "no running SIC pod on $node"
   pod=pod/$pod
   # The baseline is taken once, before the first attempt: a throttled attempt may
