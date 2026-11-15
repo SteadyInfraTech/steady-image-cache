@@ -50,7 +50,7 @@ KEEP=${KEEP:-}
 NODE_IMAGE=${NODE_IMAGE:-}
 EXPECT_CONTAINERD=${EXPECT_CONTAINERD:-}
 MODE=${MODE:-local}
-case $MODE in local|registries|operations) ;; *) echo "MODE must be local, registries or operations" >&2; exit 1 ;; esac
+case $MODE in local|registries|operations|pilot) ;; *) echo "MODE must be local, registries, operations or pilot" >&2; exit 1 ;; esac
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
 SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
@@ -206,7 +206,7 @@ wait_for() {
 registries_phase() {
   log "registries: upstream on for public registries, no private CA"
   kubectl -n kube-system set env daemonset/steady-image-cache \
-    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=false
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
   both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
   wait_for "both workers to see all their peers" 90 both_see_peers
@@ -265,6 +265,111 @@ registries_phase() {
   fi
   [ "${#checked[@]}" -gt 0 ] || fail "every registry was rate limiting; nothing was checked (${skipped[*]})"
   log "pass: ${checked[*]} over the registry's own token service, then shared between nodes"
+}
+
+# preload_on NODE IMAGE: `sic preload` in NODE's SIC pod. Sets PL_BYTES (what it
+# pulled), PL_PEERS and PL_REG (where the node's bytes came from over all the
+# attempts, from the node's own counters).
+# Returns 2 when the registry throttled; anything else wrong is a failure.
+preload_on() {
+  local node=$1 img=$2 pod out try p0 u0 p1 u1 throttled=0
+  PL_BYTES="" PL_PEERS="" PL_REG=""
+  # A running pod that is not being deleted (a pod replaced by the rollout can
+  # still be listed while it terminates).
+  pod=$(kubectl -n kube-system get pods -l app=steady-image-cache \
+    --field-selector "spec.nodeName=$node,status.phase=Running" \
+    -o custom-columns=NAME:.metadata.name,DEL:.metadata.deletionTimestamp --no-headers | awk '$2 == "<none>" { print $1; exit }')
+  [ -n "$pod" ] || fail "no running SIC pod on $node"
+  pod=pod/$pod
+  # The baseline is taken once, before the first attempt: a throttled attempt may
+  # already have moved bytes, and they count.
+  p0=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
+  u0=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
+  for try in 1 2 3; do
+    if out=$(kubectl -n kube-system exec "$pod" -c sic -- /sic preload \
+        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -admin http://127.0.0.1:5001 -timeout 15m "$img" 2>&1); then
+      echo "$out"
+      PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
+      [ -n "$PL_BYTES" ] || fail "could not read the preload report (\"preloaded 0 of 1\" means the image was not preloaded): $out"
+      p1=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
+      u1=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
+      # A counter that went backwards means the pod restarted meanwhile.
+      [ "$p1" -ge "$p0" ] && [ "$u1" -ge "$u0" ] || fail "the byte counters of $node went backwards (SIC restarted during the preload?)"
+      PL_PEERS=$(( p1 - p0 ))
+      PL_REG=$(( u1 - u0 ))
+      return 0
+    fi
+    echo "$out"
+    # An explicit 429 from the registry (preload prints it as ": 429 Too Many
+    # Requests"), not any line that happens to mention a rate limit.
+    # Any other failure (a TLS or DNS blip, a 5xx) is retried too, but if the
+    # last attempt failed for another reason than throttling, the run fails.
+    if grep -qE ': 429 Too Many Requests|token service answered 429' <<<"$out"; then
+      throttled=1
+      echo "preload of $img on $node was throttled (attempt $try of 3)"
+    else
+      throttled=0
+      echo "preload of $img on $node failed (attempt $try of 3)"
+    fi
+    [ "$try" = 3 ] || sleep $((try * 20))
+  done
+  [ "$throttled" = 1 ] || fail "sic preload of $img on $node failed 3 times"
+  return 2
+}
+
+# pilot_phase: the measurement the project is for, on two nodes. A real image
+# from a public registry is preloaded on one node (the registry serves it), then
+# on the other (the first node should): how many registry bytes were not needed.
+# It is a measurement on kind with the images named by PILOT_IMAGES, not a
+# result for a cluster; with N nodes the share saved tends to (N-1)/N.
+pilot_phase() {
+  log "pilot: upstream on for public registries, coordination off (a coordinator would fetch for the other node and the split would depend on who it is)"
+  kubectl -n kube-system set env daemonset/steady-image-cache \
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=false
+  kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
+  both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
+  wait_for "both workers to see all their peers" 90 both_see_peers
+
+  local img rc a_reg a_bytes pct checked=() skipped=() summary=() cold=1
+  for img in ${PILOT_IMAGES:-public.ecr.aws/docker/library/python:3.12}; do
+    log "pilot: $img on $A (from the registry), then on $B (from $A)"
+    preload_on "$A" "$img" && rc=0 || rc=$?
+    if [ "$rc" != 0 ]; then skipped+=("$img"); continue; fi
+    a_reg=$PL_REG; a_bytes=$PL_BYTES
+    [ "$a_reg" -gt 0 ] || fail "$img: $A took no bytes from a registry, so it was not cold"
+    preload_on "$B" "$img" && rc=0 || rc=$?
+    if [ "$rc" != 0 ]; then skipped+=("$img"); continue; fi
+    [ "$PL_REG" = 0 ] || fail "$img: $B took $PL_REG bytes from a registry, though $A had the image"
+    # B must not go to a registry. How many bytes it needs from A is known
+    # exactly only for the first image, when neither node holds anything (the
+    # registry byte count of A can include a retried transfer, and later images
+    # may share layers with earlier ones): there it must be the image's size.
+    [ "$PL_PEERS" -gt 0 ] || fail "$img: $B took no bytes from peers"
+    # "cold" holds until one image has been measured on both nodes: an earlier
+    # image that was skipped may have left layers on A, B or both.
+    if [ "$cold" = 1 ] && [ "$PL_PEERS" -lt "$PL_BYTES" ]; then
+      fail "$img: $B took $PL_PEERS bytes from peers for an image of $PL_BYTES bytes (A: $a_bytes)"
+    fi
+    cold=0
+    pct=$(( 100 * PL_PEERS / (PL_PEERS + PL_REG) ))
+    summary+=("$img: $A took $a_reg bytes from the registry; $B took $PL_PEERS bytes from $A and $PL_REG from a registry, so $pct% of $B's bytes were not fetched from the registry (image of $a_bytes bytes)")
+    checked+=("$img")
+  done
+  local verr perr
+  verr=$(metric_strict "$B" sic_verify_errors_total) || fail "could not read the verification error counter of $B"
+  perr=$(metric_strict "$B" sic_peer_errors_total) || fail "could not read the peer error counter of $B"
+  [ "$verr" = 0 ] || fail "$B had verification errors"
+  [ "$perr" = 0 ] || fail "$B had peer errors"
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    echo "::warning::skipped, because the registry was rate limiting: ${skipped[*]}"
+  fi
+  [ "${#checked[@]}" -gt 0 ] || fail "nothing was measured (skipped: ${skipped[*]:-none}; check PILOT_IMAGES)"
+  local l
+  for l in "${summary[@]}"; do
+    echo "pilot result: $l"
+    [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $l" >> "$GITHUB_STEP_SUMMARY"
+  done
+  log "pilot passed: ${checked[*]}"
 }
 
 # previous_image: the image of the newest release older than the one the sample
@@ -454,6 +559,7 @@ kubectl -n kube-system set env daemonset/steady-image-cache SIC_IMPORT_INTERVAL=
 kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
 
 if [ "$MODE" = registries ]; then registries_phase; exit 0; fi
+if [ "$MODE" = pilot ]; then pilot_phase; exit 0; fi
 
 log "an image that only node $A has"
 mkdir "$WORK/app"
