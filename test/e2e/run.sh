@@ -272,7 +272,7 @@ registries_phase() {
 # attempts, from the node's own counters).
 # Returns 2 when the registry throttled; anything else wrong is a failure.
 preload_on() {
-  local node=$1 img=$2 pod out try p0 u0 p1 u1
+  local node=$1 img=$2 pod out try p0 u0 p1 u1 throttled=0
   PL_BYTES="" PL_PEERS="" PL_REG=""
   # A running pod that is not being deleted (a pod replaced by the rollout can
   # still be listed while it terminates).
@@ -287,7 +287,7 @@ preload_on() {
   u0=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
   for try in 1 2 3; do
     if out=$(kubectl -n kube-system exec "$pod" -c sic -- /sic preload \
-        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -timeout 15m "$img" 2>&1); then
+        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -admin http://127.0.0.1:5001 -timeout 15m "$img" 2>&1); then
       echo "$out"
       PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
       [ -n "$PL_BYTES" ] || fail "could not read the preload report (\"preloaded 0 of 1\" means the image was not preloaded): $out"
@@ -302,13 +302,18 @@ preload_on() {
     echo "$out"
     # An explicit 429 from the registry (preload prints it as ": 429 Too Many
     # Requests"), not any line that happens to mention a rate limit.
+    # Any other failure (a TLS or DNS blip, a 5xx) is retried too, but if the
+    # last attempt failed for another reason than throttling, the run fails.
     if grep -qE ': 429 Too Many Requests|token service answered 429' <<<"$out"; then
+      throttled=1
       echo "preload of $img on $node was throttled (attempt $try of 3)"
-      [ "$try" = 3 ] || sleep $((try * 20))
     else
-      fail "sic preload of $img on $node failed"
+      throttled=0
+      echo "preload of $img on $node failed (attempt $try of 3)"
     fi
+    [ "$try" = 3 ] || sleep $((try * 20))
   done
+  [ "$throttled" = 1 ] || fail "sic preload of $img on $node failed 3 times"
   return 2
 }
 
