@@ -287,12 +287,14 @@ preload_on() {
   u0=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
   for try in 1 2 3; do
     if out=$(kubectl -n kube-system exec "$pod" -c sic -- /sic preload \
-        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key "$img" 2>&1); then
+        -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key -timeout 15m "$img" 2>&1); then
       echo "$out"
       PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
       [ -n "$PL_BYTES" ] || fail "could not read the preload report (\"preloaded 0 of 1\" means the image was not preloaded): $out"
       p1=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
       u1=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
+      # A counter that went backwards means the pod restarted meanwhile.
+      [ "$p1" -ge "$p0" ] && [ "$u1" -ge "$u0" ] || fail "the byte counters of $node went backwards (SIC restarted during the preload?)"
       PL_PEERS=$(( p1 - p0 ))
       PL_REG=$(( u1 - u0 ))
       return 0
@@ -318,7 +320,7 @@ preload_on() {
 pilot_phase() {
   log "pilot: upstream on for public registries, coordination off (a coordinator would fetch for the other node and the split would depend on who it is)"
   kubectl -n kube-system set env daemonset/steady-image-cache \
-    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=false
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
   both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
   wait_for "both workers to see all their peers" 90 both_see_peers
@@ -356,7 +358,7 @@ pilot_phase() {
   if [ "${#skipped[@]}" -gt 0 ]; then
     echo "::warning::skipped, because the registry was rate limiting: ${skipped[*]}"
   fi
-  [ "${#checked[@]}" -gt 0 ] || fail "every registry was rate limiting; nothing was measured (${skipped[*]})"
+  [ "${#checked[@]}" -gt 0 ] || fail "nothing was measured (skipped: ${skipped[*]:-none}; check PILOT_IMAGES)"
   local l
   for l in "${summary[@]}"; do
     echo "pilot result: $l"
