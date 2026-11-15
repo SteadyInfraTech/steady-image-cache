@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- `sic preload` now also reads registry credentials from the `auths` of the Docker config file (`-docker-config`, `$DOCKER_CONFIG`, `~/.docker/config.json`), per registry, next to `SIC_PRELOAD_USERNAME`/`SIC_PRELOAD_PASSWORD` (which win for their registry). Credential helpers and stores are not supported. Nothing changes unless such a file exists where the command runs (README, "Preloading an image before a rollout"). Closes #129.
 ## 1.3.3 - 2026-11-15
 
 New tools and measurements around rollouts; nothing that runs changes. Upgrading from 1.3.2 needs only the new image (or chart); no setting, metric or API path changes, and no file needs replacing. The new `prepull` DaemonSet and `sic preload` do nothing unless you use them.
