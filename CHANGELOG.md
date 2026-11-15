@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- New CI job "pilot" (`e2e-pilot.yml`, weekly and by hand): preloads a real public image on one kind node and then on the other and prints how many of the second node's bytes were not fetched from the registry (README, "Status"). Tests only.
 - New `sic preload` command: pulls images through this node's SIC before a rollout, checks every blob, and with `-admin` reports the bytes taken from peers and from registries (README, "Preloading an image before a rollout"). Nothing changes unless you run it.
 - New optional `prepull` DaemonSet in the Helm chart (off while `prepull.image.tag` is empty) and a `sic idle` command for it: puts the next release's image on every node before the upgrade, so that a node whose only registry host is SIC (`_default`) does not have to pull its new SIC image after the old SIC has stopped. README, "Upgrading". Nothing changes unless you set it.
 - Eviction cost is now measured (`TestEvictScanCost`, run with `SIC_EVICT_COST=1`) and stated in the README, "Cache size and eviction": 298 ms for 100 000 blobs, once per 5% of growth. No code change: the measurement did not justify an index.
