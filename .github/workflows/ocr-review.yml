@@ -1,7 +1,7 @@
 # OpenCodeReview - GitHub Actions PR Auto-Review Demo
 #
 # Demonstrates invoking the reusable action for both automatic PR review
-# (pull_request_target: opened/synchronize/reopened) and on-demand re-review
+# (pull_request_target: opened/reopened/ready_for_review) and on-demand re-review
 # via comments starting with '/open-code-review' or '@open-code-review'.
 #
 # Required secrets/vars (Settings -> Secrets and variables -> Actions):
@@ -58,7 +58,10 @@ on:
   # available even for PRs from forks. This is safe because the reusable
   # action only reads the diff and does not execute any code from the PR.
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # No "synchronize": a full LLM review on every push repeats the same findings
+    # and costs tokens each time. Re-review on demand with a "/open-code-review"
+    # comment (handled by the issue_comment trigger below).
+    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
 
