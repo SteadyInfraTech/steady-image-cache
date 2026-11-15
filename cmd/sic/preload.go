@@ -34,6 +34,7 @@ func runPreload(args []string) error {
 	parallel := fs.Int("parallel", 4, "blobs fetched at once")
 	plain := fs.Bool("plain-http", false, "talk to SIC without TLS, and send credentials to an http token service (development only; SIC_INSECURE=true)")
 	timeout := fs.Duration("timeout", 30*time.Minute, "give up after this long")
+	credReg := fs.String("credential-registry", "", "the registry SIC_PRELOAD_USERNAME/PASSWORD are for (default: the registry of the images, if they all share one)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: sic preload [flags] registry/repository[:tag|@digest] ...")
 		fmt.Fprintln(os.Stderr, "Registry credentials, if the registry needs them: SIC_PRELOAD_USERNAME and SIC_PRELOAD_PASSWORD in the environment.")
@@ -53,6 +54,15 @@ func runPreload(args []string) error {
 	if len(images) == 0 {
 		fs.Usage()
 		return fmt.Errorf("no images given")
+	}
+
+	user, pass := os.Getenv("SIC_PRELOAD_USERNAME"), os.Getenv("SIC_PRELOAD_PASSWORD")
+	credRegistry := *credReg
+	if user != "" && credRegistry == "" {
+		credRegistry = commonRegistry(images)
+		if credRegistry == "" {
+			log.Printf("preload: the images are of more than one registry, so SIC_PRELOAD_USERNAME is not used; say which registry it is for with -credential-registry")
+		}
 	}
 
 	client := &http.Client{Timeout: 0}
@@ -78,7 +88,7 @@ func runPreload(args []string) error {
 
 	res, src, err := preload.Run(ctx, preload.Options{
 		Addr: base, Client: client, Platform: *platform,
-		Username: os.Getenv("SIC_PRELOAD_USERNAME"), Password: os.Getenv("SIC_PRELOAD_PASSWORD"),
+		Username: user, Password: pass, CredentialRegistry: credRegistry,
 		Parallel: *parallel, AdminURL: *admin, Logf: log.Printf, AllowPlainHTTPRealm: *plain,
 	}, images)
 	var blobs int
@@ -135,4 +145,22 @@ func clientTLS(caPath, certPath, keyPath, serverName string) (*tls.Config, error
 		return nil, fmt.Errorf("load the client certificate: %w", err)
 	}
 	return &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{c}, ServerName: serverName, MinVersion: tls.VersionTLS12}, nil
+}
+
+// commonRegistry is the registry all the images are of, or "" if they differ or
+// one does not parse.
+func commonRegistry(images []string) string {
+	var reg string
+	for _, img := range images {
+		ref, err := preload.ParseRef(img)
+		if err != nil {
+			return ""
+		}
+		r := preload.NormalizeRegistry(ref.Registry)
+		if reg != "" && r != reg {
+			return ""
+		}
+		reg = r
+	}
+	return reg
 }
