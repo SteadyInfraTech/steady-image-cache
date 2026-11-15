@@ -205,12 +205,29 @@ serves() {
     --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
     "https://127.0.0.1:5000/v2/e2e/app/manifests/$1?ns=registry.example.test"
 }
+# serves_all DIGEST: A's SIC answers for the manifest and for every blob it names
+# (config and layers). The import loop indexes them after the manifest, so
+# serving the manifest alone is not enough to pull from A's cache.
+serves_all() {
+  local d=$1 m blobs blob
+  serves "$d" || return 1
+  m=$(docker exec "$A" curl -fsS --cacert /etc/steady-image-cache/ca.crt \
+    --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+    "https://127.0.0.1:5000/v2/e2e/app/manifests/$d?ns=registry.example.test") || return 1
+  blobs=$(jq -r '.config.digest, .layers[].digest' <<<"$m" | sort -u) || return 1
+  [ -n "$blobs" ] || return 1
+  for blob in $blobs; do
+    docker exec "$A" curl -fsS -o /dev/null -I --cacert /etc/steady-image-cache/ca.crt \
+      --cert /etc/steady-image-cache/tls.crt --key /etc/steady-image-cache/tls.key \
+      "https://127.0.0.1:5000/v2/e2e/app/blobs/$blob?ns=registry.example.test" || return 1
+  done
+}
 pull_through_sic() { # pull_through_sic TAG
   local d before after
   make_app "$1"
   d=$(digest_of "$1")
   [[ $d == sha256:* ]] || fail "no digest for $APP:$1 on $A (got '$d')"
-  wait_for "$A's SIC to serve $1" 90 serves "$d"
+  wait_for "$A's SIC to serve $1, with every blob it names" 90 serves_all "$d"
   both() { sees_all_peers "$A" && sees_all_peers "$B"; }
   wait_for "both workers to see all their peers" 90 both
   before=$(metric "$B" sic_peer_hits_total)
