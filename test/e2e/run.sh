@@ -206,7 +206,7 @@ wait_for() {
 registries_phase() {
   log "registries: upstream on for public registries, no private CA"
   kubectl -n kube-system set env daemonset/steady-image-cache \
-    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=false
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
   both_see_peers() { sees_all_peers "$A" && sees_all_peers "$B"; }
   wait_for "both workers to see all their peers" 90 both_see_peers
@@ -272,27 +272,29 @@ registries_phase() {
 # attempts, from the node's own counters).
 # Returns 2 when the registry throttled; anything else wrong is a failure.
 preload_on() {
-  local node=$1 img=$2 pod out try p0 u0
+  local node=$1 img=$2 pod out try p0 u0 p1 u1
   pod=$(kubectl -n kube-system get pods -l app=steady-image-cache --field-selector "spec.nodeName=$node" -o name | head -n 1)
   [ -n "$pod" ] || fail "no SIC pod on $node"
   # The baseline is taken once, before the first attempt: a throttled attempt may
   # already have moved bytes, and they count.
-  p0=$(metric_strict "$node" sic_bytes_from_peers_total)
-  u0=$(metric_strict "$node" sic_bytes_from_upstream_total)
+  p0=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
+  u0=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
   for try in 1 2 3; do
     if out=$(kubectl -n kube-system exec "$pod" -c sic -- /sic preload \
         -ca /tls/ca.crt -cert /tls/tls.crt -key /tls/tls.key "$img" 2>&1); then
       echo "$out"
       PL_BYTES=$(sed -n 's/^preloaded 1 of 1 images: [0-9]* blobs, \([0-9]*\) bytes/\1/p' <<<"$out")
       [ -n "$PL_BYTES" ] || fail "could not read the preload report: $out"
-      PL_PEERS=$(( $(metric_strict "$node" sic_bytes_from_peers_total) - p0 ))
-      PL_REG=$(( $(metric_strict "$node" sic_bytes_from_upstream_total) - u0 ))
+      p1=$(metric_strict "$node" sic_bytes_from_peers_total) || fail "could not read the byte counters of $node"
+      u1=$(metric_strict "$node" sic_bytes_from_upstream_total) || fail "could not read the byte counters of $node"
+      PL_PEERS=$(( p1 - p0 ))
+      PL_REG=$(( u1 - u0 ))
       return 0
     fi
     echo "$out"
     # An explicit 429 from the registry (preload prints it as ": 429 Too Many
     # Requests"), not any line that happens to mention a rate limit.
-    if grep -qE ': 429 Too Many Requests' <<<"$out"; then
+    if grep -qE ': 429 Too Many Requests|token service answered 429' <<<"$out"; then
       echo "preload of $img on $node was throttled (attempt $try of 3)"
       [ "$try" = 3 ] || sleep $((try * 20))
     else
@@ -308,7 +310,7 @@ preload_on() {
 # It is a measurement on kind with the images named by PILOT_IMAGES, not a
 # result for a cluster; with N nodes the share saved tends to (N-1)/N.
 pilot_phase() {
-  log "pilot: upstream on for public registries"
+  log "pilot: upstream on for public registries, coordination off (a coordinator would fetch for the other node and the split would depend on who it is)"
   kubectl -n kube-system set env daemonset/steady-image-cache \
     SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io"
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
@@ -325,10 +327,14 @@ pilot_phase() {
     preload_on "$B" "$img" && rc=0 || rc=$?
     if [ "$rc" != 0 ]; then skipped+=("$img"); continue; fi
     [ "$PL_REG" = 0 ] || fail "$img: $B took $PL_REG bytes from a registry, though $A had the image"
-    # B needs what A needed: layers an earlier image in the list already put on
-    # both nodes are in neither count, so compare with A's registry bytes, not with
-    # the image's size.
-    [ "$PL_PEERS" -ge "$a_reg" ] || fail "$img: $B took $PL_PEERS bytes from peers, though $A took $a_reg bytes from the registry for the same image"
+    # B must not go to a registry. How many bytes it needs from A is known
+    # exactly only for the first image, when neither node holds anything (the
+    # registry byte count of A can include a retried transfer, and later images
+    # may share layers with earlier ones): there it must be the image's size.
+    [ "$PL_PEERS" -gt 0 ] || fail "$img: $B took no bytes from peers"
+    if [ "${#checked[@]}" = 0 ] && [ "$PL_PEERS" -lt "$PL_BYTES" ]; then
+      fail "$img: $B took $PL_PEERS bytes from peers for an image of $PL_BYTES bytes"
+    fi
     pct=$(( 100 * PL_PEERS / (PL_PEERS + PL_REG) ))
     summary+=("$img: $A took $a_reg bytes from the registry; $B took $PL_PEERS bytes from $A and $PL_REG from a registry, so $pct% of $B's bytes were not fetched from the registry (image of $a_bytes bytes)")
     checked+=("$img")
