@@ -89,6 +89,8 @@ config:
   importInterval: 5m
 
 tls:
+  # One Secret for all pods (with certManager, one Certificate): every node holds
+  # the same key. See the README, "TLS", for per-pod certificates.
   secretName: "steady-image-cache-tls"
   serverName: "steady-image-cache"
   certManager:
