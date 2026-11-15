@@ -254,3 +254,46 @@ func TestPreloadFollowsNestedIndexesAndRefusesAnEmptyResult(t *testing.T) {
 		t.Fatal("a manifest with no config and no layers was reported as a success")
 	}
 }
+
+func TestPreloadRealmKeepsItsOwnQueryAndRefusesRedirectsToHTTP(t *testing.T) {
+	var seen string
+	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.RawQuery
+		fmt.Fprint(w, `{"token":"T"}`)
+	}))
+	defer tok.Close()
+	r := &runner{o: Options{AllowPlainHTTPRealm: true}, tokens: map[string]string{}}
+	got, err := r.token(context.Background(), `Bearer realm="`+tok.URL+`/t?tenant=blue",service="reg"`, "repository:a/b:pull")
+	if err != nil || got != "T" {
+		t.Fatalf("token = %q, %v", got, err)
+	}
+	for _, want := range []string{"tenant=blue", "service=reg", "scope=repository%3Aa%2Fb%3Apull"} {
+		if !strings.Contains(seen, want) || strings.Count(seen, "?") != 0 {
+			t.Fatalf("the token service was asked %q, want %s once and no second '?'", seen, want)
+		}
+	}
+	// A redirect to plain http is refused unless plain http is allowed.
+	plain, _ := http.NewRequest(http.MethodGet, "http://auth.example/t", nil)
+	secure, _ := http.NewRequest(http.MethodGet, "https://auth.example/t", nil)
+	strict := &runner{o: Options{Username: "u", Password: "p"}}
+	if strict.tokenRedirect(plain, nil) == nil {
+		t.Fatal("a redirect from an https token realm to http was followed")
+	}
+	if strict.tokenRedirect(secure, nil) != nil {
+		t.Fatal("a redirect to https was refused")
+	}
+	if (&runner{o: Options{AllowPlainHTTPRealm: true}}).tokenRedirect(plain, nil) != nil {
+		t.Fatal("a redirect to http was refused though plain http is allowed")
+	}
+}
+
+func TestPreloadChoosesThePlatformInsideAnIndexWithoutOne(t *testing.T) {
+	r := &runner{o: Options{Platform: "linux/amd64"}}
+	d, err := r.pick([]descriptor{{MediaType: "application/vnd.oci.image.index.v1+json", Digest: "sha256:inner"}})
+	if err != nil || d != "sha256:inner" {
+		t.Fatalf("pick = %q, %v; want the nested index to be followed", d, err)
+	}
+	if _, err := r.pick([]descriptor{{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: "sha256:x"}}); err == nil {
+		t.Fatal("a manifest without a platform was taken for the platform's")
+	}
+}

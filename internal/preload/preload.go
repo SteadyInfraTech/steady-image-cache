@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Options configures a run.
@@ -244,10 +245,15 @@ func (r *runner) image(ctx context.Context, s string) (Result, error) {
 func (r *runner) pick(ms []descriptor) (string, error) {
 	want := r.o.Platform
 	for _, d := range ms {
-		if d.Platform == nil {
-			continue
+		if d.Platform != nil && d.Platform.OS+"/"+d.Platform.Architecture == want {
+			return d.Digest, nil
 		}
-		if d.Platform.OS+"/"+d.Platform.Architecture == want {
+	}
+	// An index may name another index without a platform of its own (the OCI
+	// image spec shows this): the platform is chosen inside it.
+	for _, d := range ms {
+		if d.Platform == nil && (d.MediaType == "application/vnd.oci.image.index.v1+json" ||
+			d.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json") {
 			return d.Digest, nil
 		}
 	}
@@ -365,14 +371,23 @@ func (r *runner) token(ctx context.Context, challenge, scope string) (string, er
 	if realm.Scheme != "https" && (realm.Scheme != "http" || !r.o.AllowPlainHTTPRealm) {
 		return "", fmt.Errorf("the registry's token realm %q is not https; credentials are not sent to it", p["realm"])
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p["realm"]+"?"+q.Encode(), nil)
+	// The realm may carry parameters of its own; keep them and add ours.
+	rq := realm.Query()
+	for k, v := range q {
+		rq[k] = v
+	}
+	realm.RawQuery = rq.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm.String(), nil)
 	if err != nil {
 		return "", err
 	}
 	if r.o.Username != "" {
 		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(r.o.Username+":"+r.o.Password)))
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// The credentials must not follow a redirect to a transport the check above
+	// refused: Go would forward them from https to http on the same host.
+	tc := &http.Client{Timeout: time.Minute, CheckRedirect: r.tokenRedirect}
+	resp, err := tc.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("token service: %w", err)
 	}
@@ -445,4 +460,16 @@ func (r *runner) counters(ctx context.Context) (peers, upstream int64, err error
 		return 0, 0, errors.New("the byte counters are not in the metrics")
 	}
 	return peers, upstream, nil
+}
+
+// tokenRedirect is the redirect policy of the token request: the same
+// transport rule as for the realm itself.
+func (r *runner) tokenRedirect(rq *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if rq.URL.Scheme != "https" && (rq.URL.Scheme != "http" || !r.o.AllowPlainHTTPRealm) {
+		return fmt.Errorf("the token service redirected to %s, which is not https", rq.URL.Redacted())
+	}
+	return nil
 }
