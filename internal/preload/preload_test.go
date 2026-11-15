@@ -190,7 +190,7 @@ func TestParseRef(t *testing.T) {
 			t.Errorf("ParseRef(%q) = %+v, %v; want %+v", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"nginx", "nginx:1", "team/app:v1", "reg.example/", ""} {
+	for _, in := range []string{"nginx", "nginx:1", "team/app:v1", "reg.example/", "", "reg.example/app:", "reg.example/app@", "reg.example/app:v1@"} {
 		if _, err := ParseRef(in); err == nil {
 			t.Errorf("ParseRef(%q) did not fail", in)
 		}
@@ -333,5 +333,39 @@ func TestPreloadSearchesEveryNestedIndexForThePlatform(t *testing.T) {
 	res, _, err := Run(context.Background(), Options{Addr: srv.URL, Client: srv.Client(), Platform: "linux/amd64"}, []string{"reg.example/team/app:v1"})
 	if err != nil || len(res) != 1 || res[0].Blobs != 2 {
 		t.Fatalf("%+v, %v; want the amd64 image found in the second nested index", res, err)
+	}
+}
+
+func TestParseBearerAcceptsAnySchemeCase(t *testing.T) {
+	for _, h := range []string{`Bearer realm="https://a/t",service="s"`, `bearer realm="https://a/t",service="s"`, `BEARER realm="https://a/t",service="s"`} {
+		p, ok := parseBearer(h)
+		if !ok || p["realm"] != "https://a/t" || p["service"] != "s" {
+			t.Errorf("parseBearer(%q) = %v, %v", h, p, ok)
+		}
+	}
+	if _, ok := parseBearer(`Basic realm="x"`); ok {
+		t.Error("a Basic challenge was taken for a Bearer one")
+	}
+}
+
+func TestPreloadReportsNoSourcesWhenACounterWentBackwards(t *testing.T) {
+	f, _ := newFake(t, false)
+	calls := 0
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		peers, up := 600, 1000
+		if calls > 1 { // SIC restarted: counters begin again
+			peers, up = 10, 0
+		}
+		fmt.Fprintf(w, "sic_bytes_from_peers_total %d\nsic_bytes_from_upstream_total %d\n", peers, up)
+	}))
+	defer admin.Close()
+	_, src, err := Run(context.Background(), Options{Addr: f.srv.URL, Client: f.srv.Client(), Platform: "linux/amd64", AdminURL: admin.URL},
+		[]string{"reg.example/team/app:v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.Known || src.FromPeers != 0 || src.FromRegistries != 0 {
+		t.Fatalf("sources = %+v, want unknown after a counter went backwards", src)
 	}
 }

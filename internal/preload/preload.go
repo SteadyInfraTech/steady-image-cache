@@ -78,18 +78,24 @@ func ParseRef(s string) (Ref, error) {
 	// repo[:tag][@digest]. With both, the digest is the reference and the tag
 	// is only a comment on it.
 	var digest string
+	hasDigest, hasTag := false, false
 	if j := strings.Index(rest, "@"); j >= 0 {
-		rest, digest = rest[:j], rest[j+1:]
+		rest, digest, hasDigest = rest[:j], rest[j+1:], true
 	}
 	repo, tag := rest, ""
 	if j := strings.LastIndex(rest, ":"); j >= 0 && !strings.Contains(rest[j:], "/") {
-		repo, tag = rest[:j], rest[j+1:]
+		repo, tag, hasTag = rest[:j], rest[j+1:], true
 	}
 	ref.Repo = repo
+	// A suffix that is there but empty ("app:" or "app@") is a mistake, not a
+	// request for latest.
+	if (hasDigest && digest == "") || (hasTag && tag == "") {
+		return Ref{}, fmt.Errorf("%q: an empty tag or digest", s)
+	}
 	switch {
-	case digest != "":
+	case hasDigest:
 		ref.Reference = digest
-	case tag != "":
+	case hasTag:
 		ref.Reference = tag
 	}
 	if ref.Repo == "" || ref.Reference == "" {
@@ -164,6 +170,9 @@ func Run(ctx context.Context, o Options, images []string) ([]Result, Sources, er
 	if src.Known {
 		if p, u, err := r.counters(ctx); err == nil {
 			src.FromPeers, src.FromRegistries = p-before[0], u-before[1]
+			if src.FromPeers < 0 || src.FromRegistries < 0 { // SIC restarted meanwhile
+				src = Sources{}
+			}
 		} else {
 			src.Known = false
 		}
@@ -435,8 +444,9 @@ func (r *runner) token(ctx context.Context, challenge, scope string) (string, er
 }
 
 func parseBearer(h string) (map[string]string, bool) {
-	rest, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok {
+	// The scheme name is case-insensitive (RFC 9110).
+	scheme, rest, ok := strings.Cut(strings.TrimSpace(h), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return nil, false
 	}
 	p := map[string]string{}

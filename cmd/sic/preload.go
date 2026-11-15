@@ -57,9 +57,13 @@ func runPreload(args []string) error {
 
 	client := &http.Client{Timeout: 0}
 	base := *addr
-	if *plain {
+	switch {
+	case *plain:
 		base = strings.Replace(base, "https://", "http://", 1)
-	} else {
+	case !strings.HasPrefix(base, "https://"):
+		return fmt.Errorf("-addr %q is not https; for a SIC without TLS (development only) add -plain-http", base)
+	}
+	if !*plain {
 		cfg, err := clientTLS(*ca, *cert, *key, *serverName)
 		if err != nil {
 			return err
