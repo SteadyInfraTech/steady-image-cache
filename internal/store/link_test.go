@@ -255,6 +255,39 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 	}
 }
 
+
+func TestStatReportsMissingWhileBlobIsBeingWritten(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("partial, not yet verified")
+	d := digestOf([]byte("the complete blob"))
+	p := blobPath(root, d)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	unlock := s.lockBlob(d)
+	defer unlock()
+	if err := os.WriteFile(p, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := s.Stat(d)
+	if fi != nil {
+		t.Fatalf("Stat returned file info for an in-progress blob: %+v", fi)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat error = %v, want os.ErrNotExist", err)
+	}
+	if !strings.Contains(err.Error(), "still being written") {
+		t.Fatalf("Stat error = %v, want the still-being-written distinction", err)
+	}
+}
+
+
 func TestDanglingLinkIsRemovedOnStat(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
