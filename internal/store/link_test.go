@@ -255,6 +255,33 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 	}
 }
 
+ 
+func TestStatReturnsVerifiedBlobWhileRedundantWriteIsInProgress(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("already verified content")
+	d := digestOf(body)
+	if _, err := s.PutVerified(d, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second Put for the same digest holds the writer lock while checking
+	// the existing file. Stat must preserve the verified cache hit.
+	unlock := s.lockBlob(d)
+	defer unlock()
+
+	fi, err := s.Stat(d)
+	if err != nil {
+		t.Fatalf("Stat missed a verified blob during a redundant write: %v", err)
+	}
+	if fi == nil || fi.Size() != int64(len(body)) {
+		t.Fatalf("Stat info = %v, want size %d", fi, len(body))
+	}
+}
+
 func TestStatReportsMissingWhileBlobIsBeingWritten(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
