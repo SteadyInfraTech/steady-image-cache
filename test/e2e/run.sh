@@ -407,9 +407,11 @@ pilot_concurrent() {
   local img=${PILOT_CONCURRENT_IMAGE:-public.ecr.aws/docker/library/python:3.11-slim}
   local nodes=("$@") n idx pid f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes="" throttled=() pct
   log "pilot: $img on ${#nodes[@]} workers at once, coordination on"
+  # SIC_COORDINATE_ANONYMOUS_TOKEN only exists from the release that adds it; an
+  # older SIC ignores an environment variable it does not know.
   kubectl -n kube-system set env daemonset/steady-image-cache \
     SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=true \
-    SIC_COORDINATE_ANONYMOUS_TOKEN=true # ignored by a SIC without the setting
+    SIC_COORDINATE_ANONYMOUS_TOKEN=true
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
   all_see() { for n in "${nodes[@]}"; do sees_all_peers "$n" || return 1; done; }
   wait_for "every worker to see all its peers" 120 all_see
@@ -442,10 +444,12 @@ pilot_concurrent() {
     [ "$v" = 0 ] || fail "$w had verification errors"
     v=$(metric_strict "$w" sic_peer_errors_total) || fail "could not read the peer error counter of $w"
     [ "$v" = 0 ] || fail "$w had $v peer errors"
-    # Informational only: a missing counter reads as 0 instead of failing the run.
-    coord_hits=$(( coord_hits + $(metric "$w" sic_coordinator_hits_total) ))
-    coord_served=$(( coord_served + $(metric "$w" sic_coordinator_served_total) ))
-    coord_fallbacks=$(( coord_fallbacks + $(metric "$w" sic_coordinator_fallbacks_total) ))
+    # Informational only: a node whose counters cannot be read counts as 0 (the
+    # strict read prints why to the log) and does not fail the run.
+    for c in hits served fallbacks; do
+      v=$(metric_strict "$w" "sic_coordinator_${c}_total") || { echo "::warning::no coordinator ${c} counter from $w"; v=0; }
+      eval "coord_$c=\$(( coord_$c + v ))"
+    done
   done
   if [ "${#throttled[@]}" -gt 0 ]; then
     echo "::warning::the concurrent preload was throttled by the registry on: ${throttled[*]}; it was not measured"
