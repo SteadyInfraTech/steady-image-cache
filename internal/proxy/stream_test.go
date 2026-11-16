@@ -456,7 +456,7 @@ func TestStreamingDownloadSurvivesLeaderClientCancellation(t *testing.T) {
 	}
 	release()
 
-	got := append(followerFirst, make([]byte, 0)...)
+	got := followerFirst
 	rest, err := io.ReadAll(follower.Body)
 	follower.Body.Close()
 	if err != nil {
@@ -469,7 +469,9 @@ func TestStreamingDownloadSurvivesLeaderClientCancellation(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("upstream was asked %d times, want exactly one", calls.Load())
 	}
-	if _, err := a.st.Open(d); err != nil {
+	cached, err := a.st.Open(d)
+	if err != nil {
 		t.Fatalf("verified blob was not retained in the cache: %v", err)
 	}
+	cached.Close()
 }
