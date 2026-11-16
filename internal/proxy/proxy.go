@@ -1379,15 +1379,25 @@ func (p *Proxy) fetchPeers(in info, path, d string) fetchResult {
 func (p *Proxy) tryPeer(in info, c *http.Client, base, path, d string, hdr map[string]string, slowOK bool) (res fetchResult, done bool) {
 	hdr, ranged := resumeHeader(in.dl, hdr)
 	resp, e := p.get(in.ctx, c, p.peerURL(base, path, in.ns), hdr)
+	viaCoordinator := hdr[CoordHeader] != ""
 	if e != nil {
 		if slowOK && isSlowStart(e) {
+			if viaCoordinator {
+				p.warn("coordinator:slow:"+base, "coordinator %s did not start answering for %s within %v; fetching without it", base, d, p.coordWait)
+			}
 			return fetchResult{}, false // slow to start is not down
+		}
+		if viaCoordinator {
+			p.warn("coordinator:error:"+base, "coordinator %s could not be asked for %s: %v; fetching without it", base, d, e)
 		}
 		p.peerFailed(base, e)
 		return fetchResult{}, false
 	}
 	if !answered(resp, ranged) {
 		resp.Body.Close()
+		if viaCoordinator {
+			p.warn("coordinator:status:"+base+":"+strconv.Itoa(resp.StatusCode), "coordinator %s answered %s for %s; fetching without it", base, resp.Status, d)
+		}
 		p.peerAnswered(base, resp)
 		return fetchResult{}, false
 	}

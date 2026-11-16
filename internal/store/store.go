@@ -595,7 +595,32 @@ func (s *Store) Stat(d string) (os.FileInfo, error) {
 	if e != nil {
 		return nil, e
 	}
-	return os.Stat(p)
+	// A writer holds this lock for the whole download. Never wait for it:
+	// streaming callers use Stat to check that an unfinished blob is not
+	// visible, and must not have to wait for the download to finish.
+	unlock, locked := s.tryRLockBlob(d)
+	if !locked {
+		// As in Open, a complete file that was already verified remains
+		// available while a redundant copy is being checked. A new or
+		// unverified file is still a miss; do not clean up without the lock.
+		if fi, err := os.Stat(p); err == nil {
+			s.verifiedMu.Lock()
+			known, ok := s.verified[d]
+			s.verifiedMu.Unlock()
+			if ok && known == stampOf(fi) {
+				return fi, nil
+			}
+		}
+		return nil, fmt.Errorf("blob %s is still being written: %w", d, os.ErrNotExist)
+	}
+	defer unlock()
+	fi, err := os.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		// A containerd GC may have removed the target of an imported symlink.
+		// Treat that as a cache miss and remove the stale directory entry.
+		dropDanglingLink(p)
+	}
+	return fi, err
 }
 
 // PutVerified stores the content of r under digest d. The content only becomes
