@@ -1,8 +1,8 @@
 package store
 
 import (
-	"errors"
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
