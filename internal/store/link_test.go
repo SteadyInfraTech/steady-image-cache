@@ -255,7 +255,6 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 	}
 }
 
-
 func TestStatReportsMissingWhileBlobIsBeingWritten(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
@@ -286,7 +285,6 @@ func TestStatReportsMissingWhileBlobIsBeingWritten(t *testing.T) {
 		t.Fatalf("Stat error = %v, want the still-being-written distinction", err)
 	}
 }
-
 
 func TestDanglingLinkIsRemovedOnStat(t *testing.T) {
 	root := t.TempDir()
