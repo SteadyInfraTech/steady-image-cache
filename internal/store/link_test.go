@@ -253,3 +253,28 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 		t.Fatalf("Used = %d after a good scan, want %d", s.Used(), len(body))
 	}
 }
+
+
+func TestDanglingLinkIsRemovedOnStat(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("containerd collected this layer")
+	d := digestOf(body)
+	target := extFile(t, body)
+	if err := s.LinkExternal(d, target, int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Stat(d); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat error = %v, want os.ErrNotExist", err)
+	}
+	if _, err := os.Lstat(blobPath(root, d)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dangling cache link remains after Stat: %v", err)
+	}
+}
