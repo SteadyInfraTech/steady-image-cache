@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func extFile(t *testing.T, body []byte) string {
@@ -255,6 +256,29 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 	}
 }
 
+
+// statWhileWriterLocked calls Stat with a writer lock held and fails promptly
+// if Stat waits for that writer instead of using its non-blocking lookup.
+func statWhileWriterLocked(t *testing.T, s *Store, d string) (os.FileInfo, error) {
+	t.Helper()
+	type result struct {
+		fi  os.FileInfo
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		fi, err := s.Stat(d)
+		done <- result{fi: fi, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.fi, r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stat blocked behind an in-progress writer")
+		return nil, nil
+	}
+}
+
 func TestStatReturnsVerifiedBlobWhileRedundantWriteIsInProgress(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
@@ -272,7 +296,7 @@ func TestStatReturnsVerifiedBlobWhileRedundantWriteIsInProgress(t *testing.T) {
 	unlock := s.lockBlob(d)
 	defer unlock()
 
-	fi, err := s.Stat(d)
+	fi, err := statWhileWriterLocked(t, s, d)
 	if err != nil {
 		t.Fatalf("Stat missed a verified blob during a redundant write: %v", err)
 	}
@@ -300,7 +324,7 @@ func TestStatReportsMissingWhileBlobIsBeingWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fi, err := s.Stat(d)
+	fi, err := statWhileWriterLocked(t, s, d)
 	if fi != nil {
 		t.Fatalf("Stat returned file info for an in-progress blob: %+v", fi)
 	}
