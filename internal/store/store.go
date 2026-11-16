@@ -595,10 +595,15 @@ func (s *Store) Stat(d string) (os.FileInfo, error) {
 	if e != nil {
 		return nil, e
 	}
-	unlock := s.lockBlob(d)
-	defer unlock()
+	// A writer holds this lock for the whole download. Never wait for it:
+	// streaming callers use Stat to check that an unfinished blob is not
+	// visible, and must not have to wait for the download to finish.
+	unlock, locked := s.tryRLockBlob(d)
+	if locked {
+		defer unlock()
+	}
 	fi, err := os.Stat(p)
-	if errors.Is(err, os.ErrNotExist) {
+	if locked && errors.Is(err, os.ErrNotExist) {
 		// A containerd GC may have removed the target of an imported symlink.
 		// Treat that as a cache miss and remove the stale directory entry.
 		dropDanglingLink(p)
