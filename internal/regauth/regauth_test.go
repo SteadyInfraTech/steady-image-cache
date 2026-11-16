@@ -101,3 +101,10 @@ func TestAnonymousTokenRefusesWhatItShouldNot(t *testing.T) {
 		t.Fatalf("a redirect from the realm: %v", err)
 	}
 }
+
+func TestParseBearerOfATruncatedChallenge(t *testing.T) {
+	p, ok := ParseBearer(`Bearer realm="https://auth.example/token",service="never closed`)
+	if !ok || p["realm"] != "https://auth.example/token" || p["service"] != "never closed" {
+		t.Fatalf("%v, %v", p, ok)
+	}
+}

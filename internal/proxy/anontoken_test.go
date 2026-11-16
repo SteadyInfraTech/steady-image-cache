@@ -36,7 +36,7 @@ func newTokenService(t *testing.T, token string) *tokenService {
 
 func enableAnonymousTokens(nodes []*node, ts *tokenService) {
 	for _, n := range nodes {
-		n.p.anon = newAnonTokens(time.Now)
+		n.p.anon = newAnonTokens(time.Now, nil)
 		c := *ts.Client()
 		c.CheckRedirect = noRedirect
 		n.p.anon.client = &c
@@ -136,7 +136,7 @@ func TestCoordinatorWithoutTheSettingDoesNotAskATokenService(t *testing.T) {
 func TestAnonymousTokensAreCachedPerScopeAndExpire(t *testing.T) {
 	ts := newTokenService(t, "T")
 	now := time.Unix(1000, 0)
-	a := newAnonTokens(func() time.Time { return now })
+	a := newAnonTokens(func() time.Time { return now }, nil)
 	c := *ts.Client()
 	c.CheckRedirect = noRedirect
 	a.client = &c
@@ -170,7 +170,7 @@ func TestAnonymousTokensAreCachedPerScopeAndExpire(t *testing.T) {
 
 func TestAnonymousTokenCacheIsBounded(t *testing.T) {
 	ts := newTokenService(t, "T")
-	a := newAnonTokens(time.Now)
+	a := newAnonTokens(time.Now, nil)
 	c := *ts.Client()
 	c.CheckRedirect = noRedirect
 	a.client = &c
@@ -182,5 +182,47 @@ func TestAnonymousTokenCacheIsBounded(t *testing.T) {
 	defer a.mu.Unlock()
 	if len(a.tokens) > maxAnonTokens {
 		t.Fatalf("%d tokens kept", len(a.tokens))
+	}
+}
+
+// A token that lives for less than the time worth keeping is used once and not
+// cached, so it is never reused past its real expiry.
+func TestShortLivedAnonymousTokensAreNotCached(t *testing.T) {
+	asks := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asks++
+		fmt.Fprint(w, `{"token":"T","expires_in":8}`)
+	}))
+	defer srv.Close()
+	a := newAnonTokens(time.Now, nil)
+	c := *srv.Client()
+	c.CheckRedirect = noRedirect
+	a.client = &c
+	in := info{ctx: t.Context()}
+	ch := fmt.Sprintf(`Bearer realm="%s/t",service="s",scope="r:a:pull"`, srv.URL)
+	for range 2 {
+		if tok, _, ok := a.get(in, "reg", ch); !ok || tok != "T" {
+			t.Fatalf("%q, %v", tok, ok)
+		}
+	}
+	if asks != 2 {
+		t.Fatalf("token service asked %d times, want 2: an 8 s token must not be cached", asks)
+	}
+}
+
+// Only the first Bearer challenge is acted on, so a registry that sends several
+// cannot make a coordinator call several token services for one miss.
+func TestOnlyTheFirstBearerChallengeIsTried(t *testing.T) {
+	_, top, asker, reg, ts, d, _ := anonymousSetup(t, "denied")
+	second := newTokenService(t, "tok")
+	reg.challenges = append(reg.challenges, fmt.Sprintf(`Bearer realm="%s/token",service="reg",scope="repository:lib/app:pull"`, second.URL))
+	enableAnonymousTokens([]*node{top, asker}, ts)
+	host := reg.Listener.Addr().String()
+	get(t, asker.srv.URL+"/v2/lib/app/blobs/"+d+"?ns="+host, "Authorization", "Bearer tok")
+	if second.asks.Load() != 0 {
+		t.Fatalf("the second challenge's token service was asked %d times", second.asks.Load())
+	}
+	if top.m.CoordTokens.Load() != 0 {
+		t.Fatal("a token that was refused was counted as used")
 	}
 }

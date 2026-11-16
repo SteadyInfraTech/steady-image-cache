@@ -45,10 +45,13 @@ type anonTokens struct {
 	tokens map[string]anonToken
 }
 
-func newAnonTokens(now func() time.Time) *anonTokens {
+// newAnonTokens makes the cache; rt is how the token service is reached (the
+// proxy passes the transport it uses for registries, so compression, proxy
+// settings and roots are the same), nil for the default.
+func newAnonTokens(now func() time.Time, rt http.RoundTripper) *anonTokens {
 	return &anonTokens{
 		now:    now,
-		client: &http.Client{Timeout: anonTokenWait, CheckRedirect: noRedirect},
+		client: &http.Client{Transport: rt, Timeout: anonTokenWait, CheckRedirect: noRedirect},
 		tokens: map[string]anonToken{},
 	}
 }
@@ -70,7 +73,10 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 	if err != nil {
 		return "", key, false
 	}
-	ttl = max(ttl*anonTTLPercent/100, minAnonTTL)
+	ttl = ttl * anonTTLPercent / 100
+	if ttl < minAnonTTL {
+		return tok, key, true // too short to be worth keeping: used for this request only
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.tokens) >= maxAnonTokens {
@@ -103,22 +109,28 @@ func (p *Proxy) upstreamBlobGet(in info, host, path string) (resp *http.Response
 	if err != nil || p.anon == nil || !in.anon || in.auth != "" || resp.StatusCode != http.StatusUnauthorized {
 		return resp, ranged, err
 	}
+	// One token request per miss, for the first Bearer challenge the registry
+	// sent: a registry that sends several cannot multiply the calls.
 	var tok, key string
-	var ok bool
+	var ok, tried bool
 	for _, ch := range challengeOf(resp) {
-		if tok, key, ok = p.anon.get(in, host, ch); ok {
-			break
+		if _, bearer := regauth.ParseBearer(ch); !bearer {
+			continue
 		}
+		tok, key, ok = p.anon.get(in, host, ch)
+		tried = true
+		break
 	}
-	if !ok {
+	if !tried || !ok {
 		return resp, ranged, nil
 	}
 	resp.Body.Close()
 	hdr["Authorization"] = "Bearer " + tok
-	p.metrics.CoordTokens.Add(1)
 	resp, err = p.get(in.ctx, p.upstreamClient, "https://"+host+path, hdr)
-	if err == nil && resp.StatusCode == http.StatusUnauthorized {
-		p.anon.forget(key) // not valid for this content: do not keep asking with it
+	if err != nil || resp.StatusCode == http.StatusUnauthorized {
+		p.anon.forget(key) // it did not work (or the registry never answered): do not keep it
+		return resp, ranged, err
 	}
+	p.metrics.CoordTokens.Add(1) // counts the tokens that got a blob request through
 	return resp, ranged, err
 }

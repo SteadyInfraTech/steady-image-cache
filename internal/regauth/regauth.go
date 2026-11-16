@@ -50,7 +50,9 @@ func ParseBearer(h string) (map[string]string, bool) {
 				val.WriteByte(rest[i])
 				i++
 			}
-			i++ // the closing quote
+			if i < len(rest) {
+				i++ // the closing quote
+			}
 		} else {
 			for i < len(rest) && rest[i] != ',' {
 				val.WriteByte(rest[i])
@@ -62,8 +64,8 @@ func ParseBearer(h string) (map[string]string, bool) {
 	return p, p["realm"] != ""
 }
 
-// A token is kept for at most this long, and for at least the minimum, whatever
-// the realm says.
+// DefaultTTL is how long a token lives when the realm does not say; no token is
+// kept longer than maxTTL, whatever the realm says.
 const (
 	DefaultTTL = 60 * time.Second
 	maxTTL     = 10 * time.Minute

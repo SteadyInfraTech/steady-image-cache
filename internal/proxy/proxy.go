@@ -237,7 +237,7 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 	if o.Coordinate {
 		px.self = o.Self
 		if o.CoordAnonymousToken {
-			px.anon = newAnonTokens(px.now)
+			px.anon = newAnonTokens(px.now, upstreamTransport)
 		}
 	}
 	if o.TLS != nil {
