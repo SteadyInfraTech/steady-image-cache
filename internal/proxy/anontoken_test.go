@@ -77,8 +77,8 @@ func TestCoordinatorWithAnAnonymousTokenFetchesForTheAsker(t *testing.T) {
 	if asker.m.UpstreamHits.Load() != 0 || asker.m.BytesFromUpstream.Load() != 0 {
 		t.Fatal("the asking node went to the registry")
 	}
-	if top.m.CoordTokens.Load() != 1 || ts.asks.Load() != 1 {
-		t.Fatalf("tokens used %d, token service asked %d times", top.m.CoordTokens.Load(), ts.asks.Load())
+	if top.m.CoordAnonymousTokens.Load() != 1 || ts.asks.Load() != 1 {
+		t.Fatalf("tokens used %d, token service asked %d times", top.m.CoordAnonymousTokens.Load(), ts.asks.Load())
 	}
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -137,7 +137,7 @@ func TestCoordinatorWithoutTheSettingDoesNotAskATokenService(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	if ts.asks.Load() != 0 || top.m.CoordTokens.Load() != 0 {
+	if ts.asks.Load() != 0 || top.m.CoordAnonymousTokens.Load() != 0 {
 		t.Fatalf("token service asked %d times", ts.asks.Load())
 	}
 }
@@ -231,7 +231,7 @@ func TestOnlyTheFirstBearerChallengeIsTried(t *testing.T) {
 	if second.asks.Load() != 0 {
 		t.Fatalf("the second challenge's token service was asked %d times", second.asks.Load())
 	}
-	if top.m.CoordTokens.Load() != 0 {
+	if top.m.CoordAnonymousTokens.Load() != 0 {
 		t.Fatal("a token that was refused was counted as used")
 	}
 }
@@ -281,5 +281,54 @@ func TestATransportErrorOnTheRetryKeepsTheToken(t *testing.T) {
 	}
 	if len(top.p.anon.tokens) != 1 {
 		t.Fatalf("%d entries", len(top.p.anon.tokens))
+	}
+}
+
+// A full cache loses one entry, the one that expires first, not all of them.
+func TestAFullAnonymousTokenCacheEvictsOneEntry(t *testing.T) {
+	now := time.Unix(1000, 0)
+	a := newAnonTokens(func() time.Time { return now }, nil)
+	for i := 0; i < maxAnonTokens; i++ {
+		a.store(fmt.Sprintf("k%d", i), anonToken{value: "v", expires: now.Add(time.Duration(i+1) * time.Minute)})
+	}
+	a.store("new", anonToken{value: "v", expires: now.Add(time.Hour)})
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.tokens) != maxAnonTokens {
+		t.Fatalf("%d entries, want %d", len(a.tokens), maxAnonTokens)
+	}
+	if _, ok := a.tokens["k0"]; ok {
+		t.Fatal("the entry that expires first was kept")
+	}
+	if _, ok := a.tokens["k1"]; !ok {
+		t.Fatal("a live entry was dropped with it")
+	}
+}
+
+// A refusal and a hiccup are remembered for different times.
+func TestADefiniteRefusalIsRememberedLongerThanAHiccup(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		long bool
+	}{{http.StatusForbidden, true}, {http.StatusUnauthorized, true}, {http.StatusInternalServerError, false}, {http.StatusTooManyRequests, false}} {
+		asks := 0
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			asks++
+			w.WriteHeader(tc.code)
+		}))
+		now := time.Unix(1000, 0)
+		a := newAnonTokens(func() time.Time { return now }, nil)
+		c := *srv.Client()
+		c.CheckRedirect = noRedirect
+		a.client = &c
+		in := info{ctx: t.Context()}
+		ch := fmt.Sprintf(`Bearer realm="%s/t",service="s",scope="r:a:pull"`, srv.URL)
+		a.get(in, "reg", ch)
+		now = now.Add(anonBackoff + time.Second)
+		a.get(in, "reg", ch)
+		srv.Close()
+		if tc.long && asks != 1 || !tc.long && asks != 2 {
+			t.Fatalf("%d: asked %d times after %v", tc.code, asks, anonBackoff+time.Second)
+		}
 	}
 }

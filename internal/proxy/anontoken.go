@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ const (
 	maxAnonTokens  = 256
 	anonTokenWait  = 5 * time.Second  // the whole token request; a blob transfer is not held up longer than this per miss
 	anonDenied     = 60 * time.Second // how long a refused (service, scope) is not asked for again
+	anonBackoff    = 5 * time.Second  // after a failure that says nothing about the right to read: a blip, a 5xx, a 429
 	minAnonTTL     = 10 * time.Second
 	anonTTLPercent = 75 // of what the realm says
 )
@@ -73,7 +75,15 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 	}
 	tok, ttl, err := regauth.AnonymousToken(in.ctx, a.client, challenge)
 	if err != nil {
-		a.store(key, anonToken{denied: true, expires: a.now().Add(anonDenied)})
+		// A definite refusal (the service says no) is remembered for a minute; a
+		// network error, a 5xx or a 429 only for a few seconds, so one hiccup
+		// does not turn anonymous fetching off.
+		wait := anonBackoff
+		var se *regauth.StatusError
+		if errors.As(err, &se) && se.Code >= 400 && se.Code < 500 && se.Code != http.StatusRequestTimeout && se.Code != http.StatusTooManyRequests {
+			wait = anonDenied
+		}
+		a.store(key, anonToken{denied: true, expires: a.now().Add(wait)})
 		return "", key, false
 	}
 	ttl = ttl * anonTTLPercent / 100
@@ -93,8 +103,15 @@ func (a *anonTokens) store(key string, t anonToken) {
 				delete(a.tokens, k)
 			}
 		}
-		if len(a.tokens) >= maxAnonTokens {
-			clear(a.tokens)
+		if len(a.tokens) >= maxAnonTokens { // none expired: drop the one that expires first
+			var oldest string
+			var oldestExp time.Time
+			for k, v := range a.tokens {
+				if oldest == "" || v.expires.Before(oldestExp) {
+					oldest, oldestExp = k, v.expires
+				}
+			}
+			delete(a.tokens, oldest)
 		}
 	}
 	a.tokens[key] = t
@@ -141,6 +158,6 @@ func (p *Proxy) upstreamBlobGet(in info, host, path string) (resp *http.Response
 		p.anon.forget(key) // the registry refused it: an anonymous client may not read this
 		return resp, ranged, nil
 	}
-	p.metrics.CoordTokens.Add(1) // counts the tokens that got a blob request through
+	p.metrics.CoordAnonymousTokens.Add(1) // counts the tokens that got a blob request through
 	return resp, ranged, err
 }

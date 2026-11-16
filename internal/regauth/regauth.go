@@ -75,6 +75,11 @@ const (
 	maxBody    = 64 << 10
 )
 
+// StatusError is a token service that answered something other than 200.
+type StatusError struct{ Code int }
+
+func (e *StatusError) Error() string { return fmt.Sprintf("token service answered %d", e.Code) }
+
 // AnonymousToken asks the realm of a Bearer challenge for a token without any
 // credentials, for the service and scope the challenge names. The realm must be
 // an https URL; the client must not follow redirects (the caller's client
@@ -109,7 +114,7 @@ func AnonymousToken(ctx context.Context, c *http.Client, challenge string) (stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("token service answered %d", resp.StatusCode)
+		return "", 0, &StatusError{Code: resp.StatusCode}
 	}
 	var t struct {
 		Token       string `json:"token"`
