@@ -290,8 +290,8 @@ func TestStatReturnsVerifiedBlobWhileRedundantWriteIsInProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A second Put for the same digest holds the writer lock while checking
-	// the existing file. Stat must preserve the verified cache hit.
+	// Simulate the writer lock held while a redundant Put re-checks an
+	// existing file. Stat must preserve the verified cache hit.
 	unlock := s.lockBlob(d)
 	defer unlock()
 
