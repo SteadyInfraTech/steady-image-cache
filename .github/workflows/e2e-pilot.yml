@@ -3,8 +3,8 @@ name: End-to-end (pilot measurement)
 # The measurement the project is for: a real image is preloaded on one node
 # from a public registry and then on the others (four workers here), and the run
 # prints how many of their bytes were not fetched from the registry (the job
-# summary has it). The control-plane node runs SIC too, so it is one more peer,
-# but it is not measured. A second image is then preloaded on every worker at once, with
+# summary has it). The control-plane node also runs SIC and so is one more peer,
+# though its bytes are not measured. A second image is then preloaded on every worker at once, with
 # coordination on, as a rollout would. Needs the internet, so it does not gate pull requests:
 # it runs weekly, by hand, and on pull requests that change this workflow or the
 # test script. PILOT_IMAGES (space separated) replaces the default image.
