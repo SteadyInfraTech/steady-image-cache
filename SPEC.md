@@ -47,7 +47,7 @@ A normal installation runs one SIC instance on each eligible Kubernetes node.
 
 - **containerd integration:** containerd is configured with a registry `hosts.toml` that directs pulls to the local SIC endpoint. The supplied DaemonSet mounts the containerd socket for import and, where configured, the containerd content directory read-only.
 - **HTTP registry interface:** SIC handles OCI manifest and blob requests from containerd. It honours the registry namespace supplied by containerd (including `?ns=`), and supports the relevant HTTP methods and byte-range behaviour described in the README.
-- **Local content store:** SIC stores content by digest in its own bounded cache directory. Content may be linked to containerd's content files when the content directory is mounted and the file is suitable; otherwise it is copied.
+- **Local content store:** SIC stores content by digest in its own bounded cache directory. Content may be represented in SIC's cache by a symbolic link to an eligible containerd content file when the content directory is mounted; otherwise it is copied through containerd's gRPC content API. This is a symbolic link, not a hard link.
 - **Peer discovery and transfer:** each node discovers Ready, non-terminating SIC pods through the Kubernetes API and requests missing content from eligible peers over the peer HTTP interface.
 - **Optional upstream:** when enabled, SIC contacts only explicitly allowlisted registries over HTTPS.
 - **Containerd importer:** the optional importer reads containerd through its gRPC API, verifies and imports existing content, and imports image-name-to-digest aliases from the configured containerd namespace.
@@ -61,7 +61,7 @@ The project does not require a shared cache volume. Each node owns its local cac
 
 For a registry request, SIC MUST preserve the registry namespace and requested object identity. A namespace supplied by a client MUST NOT be treated as an arbitrary upstream hostname.
 
-For a manifest request, SIC resolves the requested tag or digest according to registry semantics. A tag is checked with the registry when required by the configured source and freshness rules; peers share content by digest, not by assuming that a tag has the same meaning everywhere. A manifest's digest is calculated from its bytes, and a supplied digest or digest header is checked against that content.
+For a manifest request, SIC resolves the requested tag or digest according to registry semantics. When containerd routes tag resolution through SIC (the supplied air-gapped `hosts.toml` grants SIC the `resolve` capability), SIC first uses a locally stored tag-to-digest alias when it is valid under the configured freshness rules. The containerd importer populates aliases from image names in the configured containerd namespace; in upstream-disabled mode these aliases are not revalidated against a registry and remain usable regardless of age. If no local alias is available, an eligible peer may answer the tag request from its own alias and cached manifest. If neither the local node nor a peer knows the tag, resolution fails: with upstream disabled SIC cannot discover a tag that exists only in a registry. A known alias is useful only while its manifest is available locally or from an eligible peer; alias presence alone does not guarantee that the content has not been evicted. When an allowlisted upstream is enabled, tags are confirmed against the registry according to the configured tag TTL, and the registry's digest—not a peer's opinion of a tag—determines which manifest is fetched. Peers share content by digest. A manifest's digest is calculated from its bytes, and a supplied digest or digest header is checked against that content. Note that the supplied `mirror-hosts.toml` intentionally grants only `pull`: in that mode containerd resolves tags against the registry itself and SIC receives digest-addressed content requests.
 
 For a blob request, SIC uses the requested digest as the content identity. A completed object is served from the local cache when it is present and valid. Otherwise SIC tries eligible peers, followed by the optional upstream source if configured. If no source can provide the object, the request fails; SIC MUST NOT silently contact an unconfigured registry.
 
@@ -75,13 +75,13 @@ For simultaneous misses, optional coordination chooses a deterministic coordinat
 
 ### 5.3 Concurrent downloads and streaming
 
-Within one SIC process, concurrent requests for the same missing digest MUST share a single in-flight download.
+Within one SIC process, concurrent requests for the same missing digest MUST share a single in-flight download. The fetch runs independently of the HTTP handler that first requested it: cancellation or disconnect of that client cancels only that client's wait or response stream, not the shared fetch or other clients attached to it. Blob fetches use a cancellation-detached context; individual clients continue to observe their own request contexts. Manifest fetches are similarly detached from an individual client and have a bounded internal fetch timeout.
 
 A blob may be streamed to a client or peer as bytes arrive. Since its digest is not known to be correct until the complete object has arrived, SIC MUST NOT report a successful completed response or publish the completed cache entry until verification passes. The final byte is withheld until that check succeeds. If the source fails or verification fails after response headers have been sent, the response is terminated; clients must treat it as an incomplete transfer and retry.
 
 A request requiring a byte range may wait for the complete object. Cached content supports the HTTP range behaviour documented in the README.
 
-When a source breaks off partway through a blob, SIC may retain the partial bytes for the lifetime of that in-flight download and ask a subsequent source to continue with a range request. The complete assembled object is still verified as a whole. Partial data is not a durable cache entry and is discarded when the download ends or after a process restart.
+When a source breaks off partway through a blob, SIC may retain the partial bytes for the lifetime of that in-flight download and ask a subsequent source to continue with a range request. The complete assembled object is still verified as a whole. Partial data is not a durable cache entry: it is removed when the shared download finishes, whether successfully or unsuccessfully. Temporary partial files left by an unclean process termination are removed when the store next starts. A client disconnect alone does not end the shared download and therefore does not trigger partial-file cleanup.
 
 ### 5.4 Cache integrity and capacity
 
@@ -123,7 +123,7 @@ SIC's cache directory and TLS private keys MUST be writable/readable only by the
 
 The optional importer connects to containerd over its gRPC socket. It MUST NOT modify containerd's content store directly or scrape its private on-disk metadata layout. It imports verified content and image aliases from the configured namespace. A failure for one item SHOULD be recorded without preventing unrelated items from being imported.
 
-When the containerd content directory is mounted read-only, SIC may link eligible content files into its cache rather than keep a second copy. Without that mount, content is copied into SIC's cache. Operators must configure the actual containerd root path for their nodes.
+When the containerd content directory is mounted read-only, SIC may create a symbolic link in its cache to an eligible regular content file rather than keep a second copy. It does not create a hard link, so cross-filesystem `EXDEV` constraints on hard links do not apply. If the source file is absent, unsuitable, or the symbolic link cannot be created, the importer falls back to reading the content through containerd's gRPC API and copying it into SIC's cache. That fallback still requires the cache directory to be writable and the containerd API to be available. Operators must configure the actual containerd root path for their nodes.
 
 The `sic init-node` command provisions the client certificate files and containerd registry host configuration for the registries selected by the operator. Its optional repeat interval supports certificate renewal. A failed update MUST leave the previous usable files in place.
 
@@ -180,7 +180,7 @@ SIC reduces registry traffic when nodes reuse content already present on peers. 
 
 The current implementation asks peers sequentially and limits the number tried by default. Optional digest gossip and zone-aware ordering can improve selection, but they do not turn SIC into a piece-level swarm. Coordination can reduce simultaneous cold-start pulls in some circumstances, but registries that require a token even for public content may prevent a coordinator without the client's credentials from fetching a new object.
 
-The published pilot measurement is deliberately narrow: it is evidence for one tested scenario, not a cluster-wide capacity claim. Before production use, operators MUST test with representative image sizes, concurrency, node count, registry authentication, network topology and failure conditions. In particular, large-cluster behaviour, long-running soak behaviour and abrupt client termination during a download remain areas where the README identifies limited or absent real-cluster evidence.
+The published pilot measurement is deliberately narrow: it is evidence for one tested scenario, not a cluster-wide capacity claim. Before production use, operators MUST test with representative image sizes, concurrency, node count, registry authentication, network topology and failure conditions. Unit tests cover a client disconnecting while a shared blob download continues and completes, but this is not real-cluster failure or load evidence. In particular, large-cluster behaviour, long-running soak behaviour and abrupt pod/process termination during a download remain areas where the README identifies limited or absent real-cluster evidence.
 
 ## 12. Supported platform and release assurance
 
