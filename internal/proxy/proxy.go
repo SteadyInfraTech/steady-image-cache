@@ -94,6 +94,9 @@ type Options struct {
 	// CoordWait is how long the coordinator may take to start delivering.
 	Coordinate bool
 	CoordWait  time.Duration
+	// CoordAnonymousToken lets a coordinator get a token without credentials
+	// from the token service of a registry that wants one (see anontoken.go).
+	CoordAnonymousToken bool
 	// TagTTL is how long a tag keeps pointing at the digest it was last
 	// confirmed to have, when its registry can be asked. Zero: never ask again.
 	TagTTL time.Duration
@@ -139,6 +142,7 @@ type Proxy struct {
 	maxTries             int
 	self                 string
 	coordWait            time.Duration
+	anon                 *anonTokens   // nil unless CoordAnonymousToken
 	writeIdle            time.Duration // see writeIdle; zero means no limit
 	coordClient          *http.Client
 	tagTTL               time.Duration
@@ -232,6 +236,9 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 	}
 	if o.Coordinate {
 		px.self = o.Self
+		if o.CoordAnonymousToken {
+			px.anon = newAnonTokens(px.now)
+		}
 	}
 	if o.TLS != nil {
 		snap := o.TLS.Current()
@@ -476,6 +483,7 @@ type info struct {
 	accept string
 	auth   string
 	dl     *download // the blob download these requests belong to, if any
+	anon   bool      // a coordinator fetching for others may get a token without credentials
 }
 
 func newInfo(r *http.Request) info {
@@ -1565,8 +1573,7 @@ func (p *Proxy) fetchUpstream(in info, path, d string) fetchResult {
 	if !ok {
 		return fetchResult{}
 	}
-	hdr, ranged := resumeHeader(in.dl, map[string]string{"Authorization": in.auth})
-	resp, e := p.get(in.ctx, p.upstreamClient, "https://"+host+path, hdr)
+	resp, ranged, e := p.upstreamBlobGet(in, host, path)
 	if e != nil {
 		p.upstreamFailed(host, e)
 		return fetchResult{}

@@ -160,6 +160,8 @@ spec:
           value: {{ .Values.config.coordinate | quote }}
         - name: SIC_COORDINATE_WAIT
           value: {{ .Values.config.coordWait | quote }}
+        - name: SIC_COORDINATE_ANONYMOUS_TOKEN
+          value: {{ .Values.config.coordAnonymousToken | quote }}
         - name: SIC_PEER_WATCH
           value: {{ .Values.config.peerWatch | quote }}
         - name: SIC_MIN_FREE_BYTES

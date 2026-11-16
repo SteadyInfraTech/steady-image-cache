@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/regauth"
 )
 
 func dg(b []byte) string { s := sha256.Sum256(b); return "sha256:" + hex.EncodeToString(s[:]) }
@@ -338,12 +340,12 @@ func TestPreloadSearchesEveryNestedIndexForThePlatform(t *testing.T) {
 
 func TestParseBearerAcceptsAnySchemeCase(t *testing.T) {
 	for _, h := range []string{`Bearer realm="https://a/t",service="s"`, `bearer realm="https://a/t",service="s"`, `BEARER realm="https://a/t",service="s"`} {
-		p, ok := parseBearer(h)
+		p, ok := regauth.ParseBearer(h)
 		if !ok || p["realm"] != "https://a/t" || p["service"] != "s" {
-			t.Errorf("parseBearer(%q) = %v, %v", h, p, ok)
+			t.Errorf("regauth.ParseBearer(%q) = %v, %v", h, p, ok)
 		}
 	}
-	if _, ok := parseBearer(`Basic realm="x"`); ok {
+	if _, ok := regauth.ParseBearer(`Basic realm="x"`); ok {
 		t.Error("a Basic challenge was taken for a Bearer one")
 	}
 }
@@ -396,11 +398,11 @@ func TestPreloadSendsCredentialsOnlyForTheirRegistry(t *testing.T) {
 }
 
 func TestParseBearerKeepsCommasInQuotedValues(t *testing.T) {
-	p, ok := parseBearer(`Bearer realm="https://auth.example/token?a=1,2&b=\"x\"",service="reg, one",scope="repository:a/b:pull,push"`)
+	p, ok := regauth.ParseBearer(`Bearer realm="https://auth.example/token?a=1,2&b=\"x\"",service="reg, one",scope="repository:a/b:pull,push"`)
 	if !ok || p["realm"] != `https://auth.example/token?a=1,2&b="x"` || p["service"] != "reg, one" || p["scope"] != "repository:a/b:pull,push" {
 		t.Fatalf("parseBearer = %v, %v", p, ok)
 	}
-	p, ok = parseBearer(`Bearer realm=https://a/t,service=s`)
+	p, ok = regauth.ParseBearer(`Bearer realm=https://a/t,service=s`)
 	if !ok || p["realm"] != "https://a/t" || p["service"] != "s" {
 		t.Fatalf("unquoted values: %v, %v", p, ok)
 	}

@@ -70,6 +70,11 @@ config:
   peerMaxTries: 4
   coordinate: true
   coordWait: 20s
+  # A coordinator may ask a registry's token service for a token without
+  # credentials, so that it can fetch public content from registries that want
+  # a token even for that (Docker Hub, public.ecr.aws, ghcr.io). See the README,
+  # "Simultaneous pulls". Off by default: it makes SIC call a token service.
+  coordAnonymousToken: false
   peerWatch: true
   minFreeBytes: 1073741824       # 1 GiB reserve
   minFreePercent: 20             # 20% filesystem reserve
