@@ -256,7 +256,6 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 	}
 }
 
-
 // statWhileWriterLocked calls Stat with a writer lock held and fails promptly
 // if Stat waits for that writer instead of using its non-blocking lookup.
 func statWhileWriterLocked(t *testing.T, s *Store, d string) (os.FileInfo, error) {
