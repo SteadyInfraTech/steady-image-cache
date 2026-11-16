@@ -595,7 +595,15 @@ func (s *Store) Stat(d string) (os.FileInfo, error) {
 	if e != nil {
 		return nil, e
 	}
-	return os.Stat(p)
+	unlock := s.lockBlob(d)
+	defer unlock()
+	fi, err := os.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		// A containerd GC may have removed the target of an imported symlink.
+		// Treat that as a cache miss and remove the stale directory entry.
+		dropDanglingLink(p)
+	}
+	return fi, err
 }
 
 // PutVerified stores the content of r under digest d. The content only becomes
