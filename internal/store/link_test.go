@@ -255,7 +255,6 @@ func TestFailedUsageScanKeepsTheCount(t *testing.T) {
 	}
 }
 
-
 func TestStatReturnsVerifiedBlobWhileRedundantWriteIsInProgress(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
