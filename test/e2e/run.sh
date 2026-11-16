@@ -405,41 +405,51 @@ pilot_phase() {
 # printed either way.
 pilot_concurrent() {
   local img=${PILOT_CONCURRENT_IMAGE:-public.ecr.aws/docker/library/python:3.11-slim}
-  local nodes=("$@") n i f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes=0 pct
+  local nodes=("$@") n idx pid f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes="" throttled=() pct
   log "pilot: $img on ${#nodes[@]} workers at once, coordination on"
   kubectl -n kube-system set env daemonset/steady-image-cache \
     SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=true
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
   all_see() { for n in "${nodes[@]}"; do sees_all_peers "$n" || return 1; done; }
   wait_for "every worker to see all its peers" 120 all_see
-  i=0
+  idx=0
   for n in "${nodes[@]}"; do
-    f=$WORK/concurrent.$i; rm -f "$f"; files+=("$f")
-    # A failure inside the subshell ends it without writing the result file.
+    f=$WORK/concurrent.$idx; rm -f "$f"; files+=("$f")
+    # A failure inside the subshell ends it without writing the result file (the
+    # FAIL line it printed is in the log).
     ( preload_on "$n" "$img" && rc=0 || rc=$?; echo "$rc $PL_BYTES $PL_PEERS $PL_REG" > "$f" ) &
-    pids+=($!); i=$((i + 1))
+    pids+=($!); idx=$((idx + 1))
   done
-  for i in "${pids[@]}"; do wait "$i" || true; done
-  for i in "${!nodes[@]}"; do
-    [ -s "${files[$i]}" ] || fail "the preload of $img on ${nodes[$i]} failed"
-    read -r rc b pe re < "${files[$i]}"
-    if [ "$rc" != 0 ]; then
-      echo "::warning::skipped the concurrent preload, because the registry was rate limiting"
-      return 0
-    fi
+  for pid in "${pids[@]}"; do wait "$pid" || true; done
+  for idx in "${!nodes[@]}"; do
+    [ -s "${files[$idx]}" ] || fail "the preload of $img on ${nodes[$idx]} failed"
+    read -r rc b pe re < "${files[$idx]}"
+    if [ "$rc" != 0 ]; then throttled+=("${nodes[$idx]}"); continue; fi
+    # Every node reports the image's blobs, whoever served them.
+    [ -z "$bytes" ] || [ "$bytes" = "$b" ] || fail "$img: the nodes report different image sizes ($bytes and $b)"
     bytes=$b; peers_total=$(( peers_total + pe )); reg_total=$(( reg_total + re ))
   done
-  [ "$reg_total" -gt 0 ] || fail "$img: no bytes came from a registry, so the nodes were not cold"
-  pct=$(( 100 * peers_total / (peers_total + reg_total) ))
-  local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry)"
-  echo "pilot result: $line"
-  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $line" >> "$GITHUB_STEP_SUMMARY"
-  [ "$reg_total" -lt $(( ${#nodes[@]} * bytes )) ] || fail "$img: the workers took $reg_total bytes from the registries, as many as if each had fetched the image itself ($(( ${#nodes[@]} * bytes )))"
-  local w v
+  # Integrity is checked on every node whatever else happened. Peer errors
+  # (a peer that could not serve a request, which a race under coordination can
+  # cause without any harm) are reported, not failed on.
+  local w v perr_total=0
   for w in "${nodes[@]}"; do
     v=$(metric_strict "$w" sic_verify_errors_total) || fail "could not read the verification error counter of $w"
     [ "$v" = 0 ] || fail "$w had verification errors"
+    v=$(metric_strict "$w" sic_peer_errors_total) || fail "could not read the peer error counter of $w"
+    perr_total=$(( perr_total + v ))
   done
+  if [ "${#throttled[@]}" -gt 0 ]; then
+    echo "::warning::the concurrent preload was throttled by the registry on: ${throttled[*]}; it was not measured"
+    return 0
+  fi
+  [ "$reg_total" -gt 0 ] || fail "$img: no bytes came from a registry, so the nodes were not cold"
+  pct=$(( 100 * peers_total / (peers_total + reg_total) ))
+  local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry; $perr_total peer errors)"
+  echo "pilot result: $line"
+  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $line" >> "$GITHUB_STEP_SUMMARY"
+  if [ "$perr_total" -gt 0 ]; then echo "::warning::$perr_total peer errors during the concurrent preload"; fi
+  [ "$reg_total" -lt $(( ${#nodes[@]} * bytes )) ] || fail "$img: the workers took $reg_total bytes from the registries, as many as if each had fetched the image itself ($(( ${#nodes[@]} * bytes )))"
 }
 
 # previous_image: the image of the newest release older than the one the sample
