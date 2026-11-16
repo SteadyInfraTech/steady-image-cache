@@ -600,9 +600,17 @@ func (s *Store) Stat(d string) (os.FileInfo, error) {
 	// visible, and must not have to wait for the download to finish.
 	unlock, locked := s.tryRLockBlob(d)
 	if !locked {
-		// Do not inspect or clean up the path without the lock. A writer may
-		// still be creating it, or may have renamed an unverified partial file
-		// into place before rejecting it. Report the same miss as Open.
+		// As in Open, a complete file that was already verified remains
+		// available while a redundant copy is being checked. A new or
+		// unverified file is still a miss; do not clean up without the lock.
+		if fi, err := os.Stat(p); err == nil {
+			s.verifiedMu.Lock()
+			known, ok := s.verified[d]
+			s.verifiedMu.Unlock()
+			if ok && known == stampOf(fi) {
+				return fi, nil
+			}
+		}
 		return nil, fmt.Errorf("blob %s is still being written: %w", d, os.ErrNotExist)
 	}
 	defer unlock()
