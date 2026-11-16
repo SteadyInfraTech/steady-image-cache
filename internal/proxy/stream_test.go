@@ -411,7 +411,6 @@ func TestStreamEndsWhenTheDownloadPanics(t *testing.T) {
 	}
 }
 
-
 // A follower that joined a shared download must keep receiving it after the
 // client that started the download disconnects.
 func TestStreamingDownloadSurvivesLeaderClientCancellation(t *testing.T) {
