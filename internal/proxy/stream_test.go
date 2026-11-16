@@ -419,9 +419,25 @@ func TestStreamingDownloadSurvivesLeaderClientCancellation(t *testing.T) {
 	src, release, calls := halfSource(t, body, 10000, false)
 	a := newNode(t, Options{})
 	a.fin.urls.Store(&[]string{src})
-	url := a.srv.URL + "/v2/lib/app/blobs/" + d
 
-	leader, err := http.Get(url)
+	// Observe the leader's handler returning: closing its client body only
+	// initiates a disconnect, and the server may not have noticed it yet.
+	leaderHandlerDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Client") == "leader" {
+			defer close(leaderHandlerDone)
+		}
+		a.p.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	url := srv.URL + "/v2/lib/app/blobs/" + d
+
+	leaderReq, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderReq.Header.Set("X-Test-Client", "leader")
+	leader, err := http.DefaultClient.Do(leaderReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,6 +468,11 @@ func TestStreamingDownloadSurvivesLeaderClientCancellation(t *testing.T) {
 	// continue because the follower is still consuming the same download.
 	if err := leader.Body.Close(); err != nil {
 		t.Fatalf("close leader response: %v", err)
+	}
+	select {
+	case <-leaderHandlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader handler did not observe the client disconnect")
 	}
 	release()
 
