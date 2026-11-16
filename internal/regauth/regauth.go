@@ -16,7 +16,10 @@ import (
 )
 
 // ParseBearer reads a Bearer challenge: its parameters, and whether it names a
-// realm.
+// realm. Values are quoted strings, as registries send them (a realm with a
+// query string is always quoted); an unquoted value ends at the next comma. A
+// challenge without a service or scope gives a token request without them,
+// which a registry refuses for anything but public content.
 func ParseBearer(h string) (map[string]string, bool) {
 	// The scheme name is case-insensitive (RFC 9110).
 	scheme, rest, ok := strings.Cut(strings.TrimSpace(h), " ")

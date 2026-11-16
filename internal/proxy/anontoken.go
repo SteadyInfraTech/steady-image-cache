@@ -28,7 +28,8 @@ import (
 
 const (
 	maxAnonTokens  = 256
-	anonTokenWait  = 10 * time.Second
+	anonTokenWait  = 5 * time.Second  // the whole token request; a blob transfer is not held up longer than this per miss
+	anonDenied     = 60 * time.Second // how long a refused (service, scope) is not asked for again
 	minAnonTTL     = 10 * time.Second
 	anonTTLPercent = 75 // of what the realm says
 )
@@ -36,6 +37,7 @@ const (
 type anonToken struct {
 	value   string
 	expires time.Time
+	denied  bool // the realm or the registry refused an anonymous client: do not ask again until expires
 }
 
 type anonTokens struct {
@@ -67,16 +69,22 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 	t, hit := a.tokens[key]
 	a.mu.Unlock()
 	if hit && a.now().Before(t.expires) {
-		return t.value, key, true
+		return t.value, key, !t.denied
 	}
 	tok, ttl, err := regauth.AnonymousToken(in.ctx, a.client, challenge)
 	if err != nil {
+		a.store(key, anonToken{denied: true, expires: a.now().Add(anonDenied)})
 		return "", key, false
 	}
 	ttl = ttl * anonTTLPercent / 100
 	if ttl < minAnonTTL {
 		return tok, key, true // too short to be worth keeping: used for this request only
 	}
+	a.store(key, anonToken{value: tok, expires: a.now().Add(ttl)})
+	return tok, key, true
+}
+
+func (a *anonTokens) store(key string, t anonToken) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.tokens) >= maxAnonTokens {
@@ -89,15 +97,14 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 			clear(a.tokens)
 		}
 	}
-	a.tokens[key] = anonToken{value: tok, expires: a.now().Add(ttl)}
-	return tok, key, true
+	a.tokens[key] = t
 }
 
-// forget drops a token the registry refused.
+// forget replaces a token the registry refused with a short "denied", so that
+// repeated misses on content an anonymous client may not read do not each ask
+// the token service again (private content is the common case for this).
 func (a *anonTokens) forget(key string) {
-	a.mu.Lock()
-	delete(a.tokens, key)
-	a.mu.Unlock()
+	a.store(key, anonToken{denied: true, expires: a.now().Add(anonDenied)})
 }
 
 // upstreamBlobGet asks the registry for a blob. For a coordinator whose request
@@ -127,9 +134,12 @@ func (p *Proxy) upstreamBlobGet(in info, host, path string) (resp *http.Response
 	resp.Body.Close()
 	hdr["Authorization"] = "Bearer " + tok
 	resp, err = p.get(in.ctx, p.upstreamClient, "https://"+host+path, hdr)
-	if err != nil || resp.StatusCode == http.StatusUnauthorized {
-		p.anon.forget(key) // it did not work (or the registry never answered): do not keep it
-		return resp, ranged, err
+	if err != nil {
+		return resp, ranged, err // the registry never answered: the token may be fine
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		p.anon.forget(key) // the registry refused it: an anonymous client may not read this
+		return resp, ranged, nil
 	}
 	p.metrics.CoordTokens.Add(1) // counts the tokens that got a blob request through
 	return resp, ranged, err

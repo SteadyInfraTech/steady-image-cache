@@ -110,12 +110,21 @@ func TestCoordinatorWhoseAnonymousTokenIsRefusedLeavesItToTheAsker(t *testing.T)
 	if ts.asks.Load() != 1 {
 		t.Fatalf("token service asked %d times", ts.asks.Load())
 	}
-	// The refused token is not kept: the next request asks the service again.
+	// A refusal is remembered for a while: the next miss on content an anonymous
+	// client may not read does not ask the token service again.
 	top.p.anon.mu.Lock()
-	n := len(top.p.anon.tokens)
+	var denied int
+	for _, v := range top.p.anon.tokens {
+		if v.denied {
+			denied++
+		}
+	}
 	top.p.anon.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("%d refused tokens are still cached", n)
+	if denied != 1 {
+		t.Fatalf("%d denied entries, want 1", denied)
+	}
+	if _, _, ok := top.p.anon.get(info{ctx: t.Context()}, host, reg.challenges[0]); ok || ts.asks.Load() != 1 {
+		t.Fatalf("a refused (service, scope) was asked for again: ok %v, %d asks", ok, ts.asks.Load())
 	}
 }
 
@@ -224,5 +233,53 @@ func TestOnlyTheFirstBearerChallengeIsTried(t *testing.T) {
 	}
 	if top.m.CoordTokens.Load() != 0 {
 		t.Fatal("a token that was refused was counted as used")
+	}
+}
+
+// A realm that errors is remembered too, so a flaky or refusing token service
+// is not hit on every miss.
+func TestARealmThatFailsIsNotAskedAgainForAWhile(t *testing.T) {
+	asks := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asks++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	now := time.Unix(1000, 0)
+	a := newAnonTokens(func() time.Time { return now }, nil)
+	c := *srv.Client()
+	c.CheckRedirect = noRedirect
+	a.client = &c
+	in := info{ctx: t.Context()}
+	ch := fmt.Sprintf(`Bearer realm="%s/t",service="s",scope="r:a:pull"`, srv.URL)
+	for range 3 {
+		if _, _, ok := a.get(in, "reg", ch); ok {
+			t.Fatal("a failing realm gave a token")
+		}
+	}
+	if asks != 1 {
+		t.Fatalf("the realm was asked %d times, want 1", asks)
+	}
+	now = now.Add(anonDenied + time.Second)
+	a.get(in, "reg", ch)
+	if asks != 2 {
+		t.Fatalf("a denial outlived its time (%d asks)", asks)
+	}
+}
+
+// A transport failure on the second request says nothing about the token.
+func TestATransportErrorOnTheRetryKeepsTheToken(t *testing.T) {
+	_, top, asker, reg, _, d, _ := anonymousSetup(t, "tok")
+	host := reg.Listener.Addr().String()
+	get(t, asker.srv.URL+"/v2/lib/app/blobs/"+d+"?ns="+host, "Authorization", "Bearer tok")
+	top.p.anon.mu.Lock()
+	defer top.p.anon.mu.Unlock()
+	for k, v := range top.p.anon.tokens {
+		if v.denied || v.value != "tok" {
+			t.Fatalf("%q: %+v", k, v)
+		}
+	}
+	if len(top.p.anon.tokens) != 1 {
+		t.Fatalf("%d entries", len(top.p.anon.tokens))
 	}
 }
