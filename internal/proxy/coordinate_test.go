@@ -331,3 +331,45 @@ func TestOnlyAResponseHeaderTimeoutCountsAsSlow(t *testing.T) {
 		t.Fatal("a refused connection was taken for a slow start")
 	}
 }
+
+// Why a node did without its coordinator is logged (once a minute per reason),
+// so that a run that fell back can say why: here the registry wants a token the
+// coordinator does not have.
+func TestWhyACoordinatorDidNotDeliverIsLogged(t *testing.T) {
+	body := []byte(strings.Repeat("private", 5000))
+	d := digestOf(body)
+	reg := newTokenRegistry(t, body, testManifest)
+	host := reg.Listener.Addr().String()
+	nodes := cluster(t, 3, host, reg.Client())
+	top := coordinatorOf(nodes, d)
+	var asker *node
+	for _, n := range nodes {
+		if n != top {
+			asker = n
+		}
+	}
+	var mu sync.Mutex
+	var lines []string
+	asker.p.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	resp, _ := get(t, asker.srv.URL+"/v2/lib/app/blobs/"+d+"?ns="+host, "Authorization", "Bearer tok")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	waitCount(t, &asker.m.CoordFallbacks, 1)
+	mu.Lock()
+	defer mu.Unlock()
+	t.Logf("log: %q", lines)
+	var found bool
+	for _, l := range lines {
+		if strings.Contains(l, "coordinator "+top.srv.URL) && strings.Contains(l, d) && strings.Contains(l, "fetching without it") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no line says why the coordinator was not used: %q", lines)
+	}
+}
