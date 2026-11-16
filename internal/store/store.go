@@ -599,11 +599,15 @@ func (s *Store) Stat(d string) (os.FileInfo, error) {
 	// streaming callers use Stat to check that an unfinished blob is not
 	// visible, and must not have to wait for the download to finish.
 	unlock, locked := s.tryRLockBlob(d)
-	if locked {
-		defer unlock()
+	if !locked {
+		// Do not inspect or clean up the path without the lock. A writer may
+		// still be creating it, or may have renamed an unverified partial file
+		// into place before rejecting it. Report the same miss as Open.
+		return nil, fmt.Errorf("blob %s is still being written: %w", d, os.ErrNotExist)
 	}
+	defer unlock()
 	fi, err := os.Stat(p)
-	if locked && errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) {
 		// A containerd GC may have removed the target of an imported symlink.
 		// Treat that as a cache miss and remove the stale directory entry.
 		dropDanglingLink(p)
