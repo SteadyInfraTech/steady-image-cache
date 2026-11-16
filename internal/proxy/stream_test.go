@@ -410,3 +410,88 @@ func TestStreamEndsWhenTheDownloadPanics(t *testing.T) {
 		t.Fatalf("StreamAborts = %d, want 1", a.m.StreamAborts.Load())
 	}
 }
+
+// A follower that joined a shared download must keep receiving it after the
+// client that started the download disconnects.
+func TestStreamingDownloadSurvivesLeaderClientCancellation(t *testing.T) {
+	body := []byte(strings.Repeat("shared after leader leaves ", 4000))
+	d := digestOf(body)
+	src, release, calls := halfSource(t, body, 10000, false)
+	a := newNode(t, Options{})
+	a.fin.urls.Store(&[]string{src})
+
+	// Observe the leader's handler returning: closing its client body only
+	// initiates a disconnect, and the server may not have noticed it yet.
+	leaderHandlerDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Client") == "leader" {
+			defer close(leaderHandlerDone)
+		}
+		a.p.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	url := srv.URL + "/v2/lib/app/blobs/" + d
+
+	leaderReq, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderReq.Header.Set("X-Test-Client", "leader")
+	leader, err := http.DefaultClient.Do(leaderReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderFirst := make([]byte, 100)
+	if _, err := io.ReadFull(leader.Body, leaderFirst); err != nil {
+		leader.Body.Close()
+		t.Fatalf("leader did not receive the initial bytes: %v", err)
+	}
+
+	follower, err := http.Get(url)
+	if err != nil {
+		leader.Body.Close()
+		t.Fatal(err)
+	}
+	if follower.StatusCode != http.StatusOK || follower.ContentLength != int64(len(body)) {
+		leader.Body.Close()
+		follower.Body.Close()
+		t.Fatalf("follower status %d, length %d", follower.StatusCode, follower.ContentLength)
+	}
+	followerFirst := make([]byte, 100)
+	if _, err := io.ReadFull(follower.Body, followerFirst); err != nil {
+		leader.Body.Close()
+		follower.Body.Close()
+		t.Fatalf("follower did not join the in-flight stream: %v", err)
+	}
+
+	// Closing the leader cancels its handler context. The shared fetch must
+	// continue because the follower is still consuming the same download.
+	if err := leader.Body.Close(); err != nil {
+		t.Fatalf("close leader response: %v", err)
+	}
+	select {
+	case <-leaderHandlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader handler did not observe the client disconnect")
+	}
+	release()
+
+	got := followerFirst
+	rest, err := io.ReadAll(follower.Body)
+	follower.Body.Close()
+	if err != nil {
+		t.Fatalf("follower response failed after leader left: %v", err)
+	}
+	got = append(got, rest...)
+	if string(got) != string(body) {
+		t.Fatalf("follower received %d bytes, want %d", len(got), len(body))
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("upstream was asked %d times, want exactly one", calls.Load())
+	}
+	cached, err := a.st.Open(d)
+	if err != nil {
+		t.Fatalf("verified blob was not retained in the cache: %v", err)
+	}
+	cached.Close()
+}
