@@ -408,7 +408,8 @@ pilot_concurrent() {
   local nodes=("$@") n idx pid f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes="" throttled=() pct
   log "pilot: $img on ${#nodes[@]} workers at once, coordination on"
   kubectl -n kube-system set env daemonset/steady-image-cache \
-    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=true
+    SIC_UPSTREAM_ENABLED=true SIC_UPSTREAM_REGISTRIES="public.ecr.aws,ghcr.io" SIC_COORDINATE=true \
+    SIC_COORDINATE_ANONYMOUS_TOKEN=true # ignored by a SIC without the setting
   kubectl -n kube-system rollout status daemonset/steady-image-cache --timeout=180s
   all_see() { for n in "${nodes[@]}"; do sees_all_peers "$n" || return 1; done; }
   wait_for "every worker to see all its peers" 120 all_see
@@ -431,7 +432,8 @@ pilot_concurrent() {
     bytes=$b; peers_total=$(( peers_total + pe )); reg_total=$(( reg_total + re ))
   done
   # Integrity and peer errors are checked on every node whatever else happened.
-  # The pods were restarted for this phase, so the counters are this phase's.
+  # The pods were restarted for this phase (the environment changed from
+  # SIC_COORDINATE=false), so the counters are this phase's.
   # How much the coordinators saved is reported, not asserted: it is not stable
   # (see the README, "Status").
   local w v coord_hits=0 coord_served=0 coord_fallbacks=0
@@ -440,9 +442,10 @@ pilot_concurrent() {
     [ "$v" = 0 ] || fail "$w had verification errors"
     v=$(metric_strict "$w" sic_peer_errors_total) || fail "could not read the peer error counter of $w"
     [ "$v" = 0 ] || fail "$w had $v peer errors"
-    coord_hits=$(( coord_hits + $(metric_strict "$w" sic_coordinator_hits_total) ))
-    coord_served=$(( coord_served + $(metric_strict "$w" sic_coordinator_served_total) ))
-    coord_fallbacks=$(( coord_fallbacks + $(metric_strict "$w" sic_coordinator_fallbacks_total) ))
+    # Informational only: a missing counter reads as 0 instead of failing the run.
+    coord_hits=$(( coord_hits + $(metric "$w" sic_coordinator_hits_total) ))
+    coord_served=$(( coord_served + $(metric "$w" sic_coordinator_served_total) ))
+    coord_fallbacks=$(( coord_fallbacks + $(metric "$w" sic_coordinator_fallbacks_total) ))
   done
   if [ "${#throttled[@]}" -gt 0 ]; then
     echo "::warning::the concurrent preload was throttled by the registry on: ${throttled[*]}; it was not measured"
