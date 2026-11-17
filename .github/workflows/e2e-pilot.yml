@@ -4,8 +4,9 @@ name: End-to-end (pilot measurement)
 # from a public registry and then on the others (four workers here), and the run
 # prints how many of their bytes were not fetched from the registry (the job
 # summary has it). The control-plane node also runs SIC and so is one more peer,
-# though its bytes are not measured. A second image is then preloaded on every worker at once, with
-# coordination on, as a rollout would. Needs the internet, so it does not gate pull requests:
+# though its bytes are not measured.
+# A second image is then preloaded on every worker at once, with coordination
+# on, as a rollout would. Needs the internet, so it does not gate pull requests:
 # it runs weekly, by hand, and on pull requests that change this workflow or the
 # test script. PILOT_IMAGES (space separated) replaces the default image.
 
@@ -29,7 +30,7 @@ concurrency:
 jobs:
   pilot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60 # four workers, two images, and a slow registry that the run tolerates
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

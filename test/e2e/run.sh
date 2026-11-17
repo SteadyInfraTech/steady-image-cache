@@ -392,7 +392,11 @@ pilot_phase() {
     echo "pilot result: $l"
     [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $l" >> "$GITHUB_STEP_SUMMARY"
   done
-  if [ "${#others[@]}" -gt 0 ]; then pilot_concurrent "${workers[@]}"; fi
+  if [ "${#others[@]}" -gt 0 ]; then
+    pilot_concurrent "${workers[@]}"
+  else
+    echo "pilot: the concurrent preload needs more than two workers (PILOT_WORKERS), so it did not run"
+  fi
   log "pilot passed: ${checked[*]}"
 }
 
@@ -420,13 +424,21 @@ pilot_concurrent() {
     f=$WORK/concurrent.$idx; rm -f "$f"; files+=("$f")
     # A failure inside the subshell ends it without writing the result file (the
     # FAIL line it printed is in the log).
-    ( preload_on "$n" "$img" && rc=0 || rc=$?; echo "$rc $PL_BYTES $PL_PEERS $PL_REG" > "$f" ) &
+    # Each node writes its output to its own log, printed below, so the lines
+    # of four preloads do not interleave.
+    ( preload_on "$n" "$img" && rc=0 || rc=$?; echo "$rc $PL_BYTES $PL_PEERS $PL_REG" > "$f" ) > "$f.log" 2>&1 &
     pids+=($!); idx=$((idx + 1))
   done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
+  local st=()
+  for pid in "${pids[@]}"; do wait "$pid" && st+=(0) || st+=($?); done
   for idx in "${!nodes[@]}"; do
-    [ -s "${files[$idx]}" ] || fail "the preload of $img on ${nodes[$idx]} failed"
+    echo "--- preload of $img on ${nodes[$idx]} (exit status ${st[$idx]})"
+    cat "${files[$idx]}.log"
+  done
+  for idx in "${!nodes[@]}"; do
+    [ -s "${files[$idx]}" ] || fail "the preload of $img on ${nodes[$idx]} failed (exit status ${st[$idx]}, its output is above)"
     read -r rc b pe re < "${files[$idx]}"
+    [ -n "$rc" ] && [ -n "$b" ] && [ -n "$pe" ] && [ -n "$re" ] || fail "incomplete result for $img on ${nodes[$idx]}"
     if [ "$rc" = 2 ]; then throttled+=("${nodes[$idx]}"); continue; fi
     [ "$rc" = 0 ] || fail "the preload of $img on ${nodes[$idx]} ended with status $rc"
     # Every node reports the image's blobs, whoever served them.
@@ -460,7 +472,7 @@ pilot_concurrent() {
   local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry; coordinators: $coord_hits blobs taken from one, $coord_served requests answered as one, $coord_fallbacks times a node had to do without one)"
   echo "pilot result: $line"
   [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $line" >> "$GITHUB_STEP_SUMMARY"
-  if [ "$reg_total" -ge $(( 2 * bytes )) ]; then
+  if [[ $bytes =~ ^[0-9]+$ ]] && [ "$reg_total" -ge $(( 2 * bytes )) ]; then
     echo "::warning::with coordination on the workers took $reg_total bytes from the registries for an image of $bytes bytes ($coord_fallbacks fallbacks): some layers were fetched by more than one node"
   fi
 }
@@ -601,6 +613,9 @@ kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 KIND_CONFIG=$ROOT/test/e2e/kind-config.yaml
 # The pilot can run on more workers (PILOT_WORKERS, at least 2): with more than
 # two nodes the saving is (N-1)/N and a node has several holders to choose from.
+case ${PILOT_WORKERS:-2} in ''|*[!0-9]*) fail "PILOT_WORKERS must be a number, got '${PILOT_WORKERS:-}'" ;; esac
+[ "${PILOT_WORKERS:-2}" -ge 2 ] || fail "PILOT_WORKERS must be at least 2, got $PILOT_WORKERS"
+# test/e2e/kind-config.yaml already has worker and worker2: add PILOT_WORKERS-2.
 if [ "$MODE" = pilot ] && [ "${PILOT_WORKERS:-2}" -gt 2 ]; then
   KIND_CONFIG=$WORK/kind-config.yaml
   cp "$ROOT/test/e2e/kind-config.yaml" "$KIND_CONFIG"
