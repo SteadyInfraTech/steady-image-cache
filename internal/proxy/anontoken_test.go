@@ -78,8 +78,10 @@ func TestCoordinatorWithAnAnonymousTokenFetchesForTheAsker(t *testing.T) {
 	if resp.StatusCode != 200 || string(got) != string(body) {
 		t.Fatalf("status %d, %d bytes", resp.StatusCode, len(got))
 	}
-	if asker.m.CoordHits.Load() != 1 || asker.m.CoordFallbacks.Load() != 0 {
-		t.Fatalf("coordinator hits %d, fallbacks %d", asker.m.CoordHits.Load(), asker.m.CoordFallbacks.Load())
+	// The counters are bumped just after the client has its last byte.
+	waitCount(t, &asker.m.CoordHits, 1)
+	if asker.m.CoordFallbacks.Load() != 0 {
+		t.Fatalf("%d fallbacks", asker.m.CoordFallbacks.Load())
 	}
 	if asker.m.UpstreamHits.Load() != 0 || asker.m.BytesFromUpstream.Load() != 0 {
 		t.Fatal("the asking node went to the registry")
@@ -108,6 +110,7 @@ func TestCoordinatorWhoseAnonymousTokenIsRefusedLeavesItToTheAsker(t *testing.T)
 		t.Fatalf("status %d, %d bytes", resp.StatusCode, len(got))
 	}
 	waitCount(t, &asker.m.CoordFallbacks, 1)
+	eventually(t, "the asker's own fetch", func() bool { return asker.m.UpstreamHits.Load() == 1 })
 	if asker.m.UpstreamHits.Load() != 1 {
 		t.Fatalf("the asker fetched %d times itself, want 1", asker.m.UpstreamHits.Load())
 	}
