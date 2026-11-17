@@ -426,11 +426,11 @@ preload_to_file() {
 # (the default: one node fetches a blob from the registry and the others take it
 # from it). Nothing is known beforehand about who fetches what, so the check is
 # loose: the workers together must take less from the registries than if each
-# had gone there itself, and nobody may see a verification error. The numbers are
-# printed either way.
+# had gone there itself (more than twice the image is reported), and nobody may
+# see a verification error. The numbers are printed either way.
 pilot_concurrent() {
   local img=${PILOT_CONCURRENT_IMAGE:-public.ecr.aws/docker/library/python:3.11-slim}
-  local nodes=("$@") n idx pid f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes="" throttled=() pct
+  local nodes=("$@") n idx pid f rc b pe re pids=() files=() reg_total=0 peers_total=0 bytes="" throttled=() pct everyone
   log "pilot: $img on ${#nodes[@]} workers at once, coordination on"
   # SIC_COORDINATE_ANONYMOUS_TOKEN only exists from the release that adds it; an
   # older SIC ignores an environment variable it does not know.
@@ -472,8 +472,8 @@ pilot_concurrent() {
   # Integrity and peer errors are checked on every node whatever else happened.
   # The pods were restarted for this phase (the environment changed from
   # SIC_COORDINATE=false), so the counters are this phase's.
-  # How much the coordinators saved is reported, not asserted: it is not stable
-  # (see the README, "Status").
+  # How much the coordinators saved is reported; only no saving at all fails
+  # (below), because the amount is not stable (README, "Status").
   local w v c
   local -A coord=([hits]=0 [served]=0 [fallbacks]=0)
   for w in "${nodes[@]}"; do
@@ -501,6 +501,15 @@ pilot_concurrent() {
   local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry; coordinators: ${coord[hits]} blobs taken from one, ${coord[served]} requests answered as one, ${coord[fallbacks]} times a node had to do without one)"
   echo "pilot result: $line"
   [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $line" >> "$GITHUB_STEP_SUMMARY"
+  # The check this phase exists for: if every worker had fetched the image itself
+  # the registries would have served it ${#nodes[@]} times, so anything at or
+  # above that means coordination saved nothing. Well short of that but still
+  # over twice the image is only reported, because the saving varies from run to
+  # run (README, "Status").
+  everyone=$(( ${#nodes[@]} * bytes ))
+  if [ "$reg_total" -ge "$everyone" ]; then
+    fail "$img: the workers took $reg_total bytes from the registries, as much as the $everyone they would have taken without coordination (${#nodes[@]} x $bytes), with ${coord[fallbacks]} fallbacks"
+  fi
   if [ "$reg_total" -ge $(( 2 * bytes )) ]; then
     echo "::warning::with coordination on the workers took $reg_total bytes from the registries for an image of $bytes bytes (${coord[fallbacks]} fallbacks): some layers were fetched by more than one node"
   fi
