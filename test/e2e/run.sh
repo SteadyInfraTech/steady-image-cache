@@ -325,11 +325,14 @@ preload_on() {
   return 2
 }
 
-# pilot_phase: the measurement the project is for, on two nodes. A real image
-# from a public registry is preloaded on one node (the registry serves it), then
-# on the other (the first node should): how many registry bytes were not needed.
-# It is a measurement on kind with the images named by PILOT_IMAGES, not a
-# result for a cluster; with N nodes the share saved tends to (N-1)/N.
+# pilot_phase: the measurement the project is for, on PILOT_WORKERS nodes. A
+# real image from a public registry is preloaded on one node (the registry serves
+# it), then on the next (the first node should), then on each further worker, one
+# after another: how many registry bytes were not needed. With more than two
+# workers a second image is then preloaded on all of them at once
+# (pilot_concurrent). It is a measurement on kind with the images named by
+# PILOT_IMAGES, not a result for a cluster; with N nodes the share saved tends
+# to (N-1)/N.
 pilot_phase() {
   log "pilot: upstream on for public registries, coordination off (a coordinator would fetch for the other node and the split would depend on who it is)"
   kubectl -n kube-system set env daemonset/steady-image-cache \
