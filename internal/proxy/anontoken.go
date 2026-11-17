@@ -3,6 +3,8 @@ package proxy
 import (
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,8 +26,12 @@ import (
 //
 // Only a coordinator does this, only for the registries SIC is configured to
 // reach, only over https, without following redirects, and no credential of any
-// client is involved. The token is kept for a short time, per registry, service
-// and scope.
+// client is involved. The token service is a destination like any other: its
+// host must itself be on SIC_UPSTREAM_REGISTRIES (SPEC 6.2), so a registry
+// cannot send SIC to a host the operator did not name. For most registries that
+// is the registry's own host (public.ecr.aws, ghcr.io); Docker Hub's is
+// auth.docker.io. The token is kept for a short time, per registry, service and
+// scope.
 
 const (
 	maxAnonTokens  = 256
@@ -163,6 +169,22 @@ func (a *anonTokens) deny(key string, wait time.Duration) {
 	a.store(key, anonToken{denied: true, expires: a.now().Add(wait)})
 }
 
+// anonRealmAllowed reports whether the host of a token realm is on the
+// allowlist of upstream registries. A realm that is not is logged (once a
+// minute per registry, which bounds the log's keys) and never contacted.
+func (p *Proxy) anonRealmAllowed(registry, realm string) bool {
+	u, err := url.Parse(realm)
+	if err == nil && p.registries[strings.ToLower(u.Host)] {
+		return true
+	}
+	shown := realm
+	if err == nil {
+		shown = u.Host
+	}
+	p.warn("anon-realm:"+registry, "%s names the token service %q, which is not in SIC_UPSTREAM_REGISTRIES: no anonymous token is requested, so a node that asked this coordinator fetches for itself", registry, shown)
+	return false
+}
+
 // upstreamBlobGet asks the registry for a blob. For a coordinator whose request
 // is refused with a Bearer challenge it gets an anonymous token and asks once
 // more; in every other case it is one plain request.
@@ -177,11 +199,15 @@ func (p *Proxy) upstreamBlobGet(in info, host, path string) (resp *http.Response
 	var tok, key string
 	var ok, tried bool
 	for _, ch := range challengeOf(resp) {
-		if _, bearer := regauth.ParseBearer(ch); !bearer {
+		pr, bearer := regauth.ParseBearer(ch)
+		if !bearer {
 			continue
 		}
-		tok, key, ok = p.anon.get(in, host, ch)
 		tried = true
+		if !p.anonRealmAllowed(host, pr["realm"]) {
+			break
+		}
+		tok, key, ok = p.anon.get(in, host, ch)
 		break
 	}
 	if !tried || !ok {

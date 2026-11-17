@@ -43,6 +43,7 @@ func newTokenService(t *testing.T, token string) *tokenService {
 
 func enableAnonymousTokens(nodes []*node, ts *tokenService) {
 	for _, n := range nodes {
+		n.p.registries[ts.Listener.Addr().String()] = true // the token service is on the allowlist
 		n.p.anon = newAnonTokens(time.Now, nil)
 		c := *ts.Client()
 		c.CheckRedirect = noRedirect
@@ -447,5 +448,42 @@ func TestACancelledMissDoesNotDenyTheRealm(t *testing.T) {
 	defer a.mu.Unlock()
 	if len(a.tokens) != 0 || len(a.flying) != 0 {
 		t.Fatalf("%d cached, %d in flight after a cancelled request", len(a.tokens), len(a.flying))
+	}
+}
+
+// The token service is a destination like any other: one that is not on
+// SIC_UPSTREAM_REGISTRIES is never contacted, however the registry names it, and
+// the operator is told what to add. The asking node fetches for itself.
+func TestATokenServiceOffTheAllowlistIsNeverContacted(t *testing.T) {
+	_, top, asker, reg, ts, d, body := anonymousSetup(t, "tok")
+	sink := &logSink{}
+	top.p.logf = sink.logf
+	delete(top.p.registries, ts.Listener.Addr().String())
+	host := reg.Listener.Addr().String()
+	resp, got := get(t, asker.srv.URL+"/v2/lib/app/blobs/"+d+"?ns="+host, "Authorization", "Bearer tok")
+	if resp.StatusCode != 200 || string(got) != string(body) {
+		t.Fatalf("the asking node did not get the blob itself: %d", resp.StatusCode)
+	}
+	if ts.asks.Load() != 0 || top.m.CoordAnonymousTokens.Load() != 0 {
+		t.Fatalf("a token service off the allowlist was asked %d times", ts.asks.Load())
+	}
+	if !strings.Contains(sink.all(), "not in SIC_UPSTREAM_REGISTRIES") {
+		t.Fatalf("the operator was not told why: %q", sink.all())
+	}
+}
+
+// A registry the operator has marked protected is never read with an anonymous
+// token, even if the registry would give one for public content.
+func TestACoordinatorDoesNotReadAProtectedRegistryAnonymously(t *testing.T) {
+	_, top, _, reg, ts, d, _ := anonymousSetup(t, "tok")
+	host := reg.Listener.Addr().String()
+	path := "/v2/lib/app/blobs/" + d + "?ns=" + host
+	for _, protected := range []bool{true, false} {
+		top.p.protected = map[string]bool{host: protected}
+		asks := ts.asks.Load()
+		top.p.coordinate(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil), "lib/app", d)
+		if got := ts.asks.Load() - asks; (got != 0) == protected {
+			t.Fatalf("protected %v: the token service was asked %d times", protected, got)
+		}
 	}
 }

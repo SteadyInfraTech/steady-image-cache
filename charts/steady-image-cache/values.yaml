@@ -73,7 +73,8 @@ config:
   # A coordinator may ask a registry's token service for a token without
   # credentials, so that it can fetch public content from registries that want
   # a token even for that (Docker Hub, public.ecr.aws, ghcr.io). See the README,
-  # "Simultaneous pulls". Off by default: it makes SIC call a token service.
+  # "Simultaneous pulls". Off by default: it makes SIC call a token service,
+  # whose host must be in upstreamRegistries (Docker Hub: auth.docker.io).
   coordAnonymousToken: false
   peerWatch: true
   minFreeBytes: 1073741824       # 1 GiB reserve
