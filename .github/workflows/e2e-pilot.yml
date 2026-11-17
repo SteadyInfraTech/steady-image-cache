@@ -32,7 +32,9 @@ concurrency:
 jobs:
   pilot:
     runs-on: ubuntu-latest
-    timeout-minutes: 60 # four workers, two images, and a slow registry that the run tolerates
+    # Sized for the four workers set below, two images and a slow registry. Each
+    # worker more is one more sequential preload: raise it with PILOT_WORKERS.
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
