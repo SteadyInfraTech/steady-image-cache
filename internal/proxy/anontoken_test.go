@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SteadyInfraTech/steady-image-cache/internal/metrics"
 	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
 
@@ -464,5 +465,34 @@ func TestACoordinatorDoesNotReadAProtectedRegistryAnonymously(t *testing.T) {
 		if got := ts.asks.Load() - asks; (got != 0) == protected {
 			t.Fatalf("protected %v: the token service was asked %d times", protected, got)
 		}
+	}
+}
+
+// A setting that cannot do anything is said so at start, whichever of its
+// requirements is missing.
+func TestTheAnonymousTokenSettingWarnsWhenItCannotWork(t *testing.T) {
+	for name, tc := range map[string]struct {
+		coordinate bool
+		self       string
+		upstream   bool
+		regs       []string
+		warns      bool
+	}{
+		"everything there":     {true, "https://a", true, []string{"ghcr.io"}, false},
+		"no coordination":      {false, "https://a", true, []string{"ghcr.io"}, true},
+		"no own address":       {true, "", true, []string{"ghcr.io"}, true},
+		"upstream off":         {true, "https://a", false, []string{"ghcr.io"}, true},
+		"no upstream registry": {true, "https://a", true, nil, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var logged []string
+			if _, err := New(nil, nil, &metrics.Metrics{}, Options{Coordinate: tc.coordinate, Self: tc.self, Upstream: tc.upstream, UpstreamRegistries: tc.regs,
+				CoordAnonymousToken: true, Logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }}); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(strings.Join(logged, "|"), "SIC_COORDINATE_ANONYMOUS_TOKEN has no effect"); got != tc.warns {
+				t.Fatalf("warned %v, want %v (%q)", got, tc.warns, logged)
+			}
+		})
 	}
 }

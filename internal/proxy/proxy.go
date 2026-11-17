@@ -234,8 +234,8 @@ func New(s *store.Store, p peer.Finder, m *metrics.Metrics, o Options) (*Proxy, 
 		lastLog:         map[string]time.Time{},
 		skipped:         map[string]int{},
 	}
-	if o.CoordAnonymousToken && (!o.Coordinate || o.Self == "") && o.Logf != nil {
-		o.Logf("SIC_COORDINATE_ANONYMOUS_TOKEN has no effect: it needs SIC_COORDINATE and this node's own address (HOST_IP)")
+	if o.CoordAnonymousToken && o.Logf != nil && (!o.Coordinate || o.Self == "" || !o.Upstream || len(regs) == 0) {
+		o.Logf("SIC_COORDINATE_ANONYMOUS_TOKEN has no effect: it needs SIC_COORDINATE, this node's own address (HOST_IP) and SIC_UPSTREAM_ENABLED with SIC_UPSTREAM_REGISTRIES, because a coordinator fetches from the registry")
 	}
 	if o.Coordinate {
 		px.self = o.Self

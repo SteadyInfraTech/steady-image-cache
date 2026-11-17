@@ -147,9 +147,10 @@ func (a *anonTokens) store(key string, t anonToken) {
 		if len(a.tokens) >= maxAnonTokens { // none expired: drop the one that expires first
 			var oldest string
 			var oldestExp time.Time
+			first := true
 			for k, v := range a.tokens {
-				if oldest == "" || v.expires.Before(oldestExp) {
-					oldest, oldestExp = k, v.expires
+				if first || v.expires.Before(oldestExp) {
+					oldest, oldestExp, first = k, v.expires, false
 				}
 			}
 			delete(a.tokens, oldest)
