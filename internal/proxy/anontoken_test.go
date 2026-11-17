@@ -1,14 +1,20 @@
 package proxy
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/store"
 )
 
 // tokenService answers anonymous token requests and records them.
@@ -332,3 +338,52 @@ func TestADefiniteRefusalIsRememberedLongerThanAHiccup(t *testing.T) {
 		}
 	}
 }
+
+// A download that resumes asks the registry for the rest of the blob, and the
+// anonymous token goes with that request, together with the Range: nothing of
+// the first attempt's headers is reused.
+func TestAnonymousTokenGoesWithTheRangeOfAResumedDownload(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string // "Authorization|Range" of every request
+	ts := newTokenService(t, "tok")
+	reg := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization")+"|"+r.Header.Get("Range"))
+		mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="reg",scope="repository:lib/app:pull"`, ts.URL))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusPartialContent)
+	}))
+	defer reg.Close()
+	host := reg.Listener.Addr().String()
+	nodes := cluster(t, 1, host, reg.Client())
+	enableAnonymousTokens(nodes, ts)
+	n := nodes[0]
+
+	// A first attempt that failed after some bytes leaves a prefix to resume.
+	part := []byte(strings.Repeat("x", 1000))
+	var res store.Resume
+	_, err := n.st.PutResumable(digestOf(append(part, part...)), io.MultiReader(bytes.NewReader(part), failingReader{}), 2000, nil, &res)
+	if err == nil || res.Size() != 1000 {
+		t.Fatalf("setup: err %v, resumable %d", err, res.Size())
+	}
+	dl := &download{resume: res}
+	resp, ranged, err := n.p.upstreamBlobGet(info{ctx: t.Context(), dl: dl, anon: true}, host, "/v2/lib/app/blobs/sha256:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"|bytes=1000-", "Bearer tok|bytes=1000-"}
+	if !ranged || resp.StatusCode != http.StatusPartialContent || !slices.Equal(seen, want) {
+		t.Fatalf("ranged %v, status %d, requests %q, want %q", ranged, resp.StatusCode, seen, want)
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }

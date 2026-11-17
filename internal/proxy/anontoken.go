@@ -117,10 +117,10 @@ func (a *anonTokens) store(key string, t anonToken) {
 	a.tokens[key] = t
 }
 
-// forget replaces a token the registry refused with a short "denied", so that
+// deny replaces a token the registry refused with a "denied" entry, so that
 // repeated misses on content an anonymous client may not read do not each ask
 // the token service again (private content is the common case for this).
-func (a *anonTokens) forget(key string) {
+func (a *anonTokens) deny(key string) {
 	a.store(key, anonToken{denied: true, expires: a.now().Add(anonDenied)})
 }
 
@@ -149,13 +149,17 @@ func (p *Proxy) upstreamBlobGet(in info, host, path string) (resp *http.Response
 		return resp, ranged, nil
 	}
 	resp.Body.Close()
-	hdr["Authorization"] = "Bearer " + tok
-	resp, err = p.get(in.ctx, p.upstreamClient, "https://"+host+path, hdr)
+	// A new map: hdr came from resumeHeader, which may return its argument.
+	authed := map[string]string{"Authorization": "Bearer " + tok}
+	if ranged {
+		authed["Range"] = hdr["Range"]
+	}
+	resp, err = p.get(in.ctx, p.upstreamClient, "https://"+host+path, authed)
 	if err != nil {
 		return resp, ranged, err // the registry never answered: the token may be fine
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		p.anon.forget(key) // the registry refused it: an anonymous client may not read this
+		p.anon.deny(key) // the registry refused it: an anonymous client may not read this
 		return resp, ranged, nil
 	}
 	p.metrics.CoordAnonymousTokens.Add(1) // counts the tokens that got a blob request through
