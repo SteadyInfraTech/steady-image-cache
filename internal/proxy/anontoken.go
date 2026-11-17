@@ -92,12 +92,11 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 	}
 	if call, waiting := a.flying[key]; waiting {
 		a.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.token, key, call.err == nil
-		case <-in.ctx.Done():
-			return "", key, false
-		}
+		// The request is bounded by the client's timeout, and a blob fetch's
+		// context is detached from its client (SPEC 5.3), so this wait is short
+		// and nothing else can end it.
+		<-call.done
+		return call.token, key, call.err == nil
 	}
 	call := &tokenCall{done: make(chan struct{})}
 	a.flying[key] = call
@@ -118,9 +117,6 @@ func (a *anonTokens) request(in info, key, challenge string, call *tokenCall) {
 	tok, ttl, err := regauth.AnonymousToken(in.ctx, a.client, challenge)
 	if err != nil {
 		call.err = err
-		if in.ctx.Err() != nil {
-			return // this client gave up: that says nothing about the service
-		}
 		// A definite refusal (the service says no) is remembered for a minute; a
 		// network error, a 5xx or a 429 only for a few seconds, so one hiccup
 		// does not turn anonymous fetching off.

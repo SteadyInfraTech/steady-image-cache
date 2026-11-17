@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -425,29 +424,6 @@ func TestConcurrentMissesShareOneTokenRequest(t *testing.T) {
 	wg.Wait()
 	if asks.Load() != 1 || got.Load() != n {
 		t.Fatalf("%d token requests, %d of %d misses got the token", asks.Load(), got.Load(), n)
-	}
-}
-
-// A client that gave up while the realm was asked is not a verdict on the realm.
-func TestACancelledMissDoesNotDenyTheRealm(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer srv.Close()
-	a := newAnonTokens(time.Now, nil)
-	c := *srv.Client()
-	c.CheckRedirect = noRedirect
-	a.client = &c
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-	defer cancel()
-	ch := fmt.Sprintf(`Bearer realm="%s/t",service="s",scope="r:a:pull"`, srv.URL)
-	if _, _, ok := a.get(info{ctx: ctx}, "reg", ch); ok {
-		t.Fatal("a cancelled request gave a token")
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if len(a.tokens) != 0 || len(a.flying) != 0 {
-		t.Fatalf("%d cached, %d in flight after a cancelled request", len(a.tokens), len(a.flying))
 	}
 }
 
