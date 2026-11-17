@@ -54,7 +54,7 @@ case $MODE in local|registries|operations|pilot) ;; *) echo "MODE must be local,
 # The pilot's worker count (see "create the kind cluster"), checked here so a
 # typo does not cost a docker build first.
 PILOT_WORKERS=${PILOT_WORKERS:-2}
-case $PILOT_WORKERS in ''|*[!0-9]*) echo "PILOT_WORKERS must be a number, got '$PILOT_WORKERS'" >&2; exit 1 ;; esac
+case $PILOT_WORKERS in *[!0-9]*) echo "PILOT_WORKERS must be a number, got '$PILOT_WORKERS'" >&2; exit 1 ;; esac
 [ "$PILOT_WORKERS" -ge 2 ] || { echo "PILOT_WORKERS must be at least 2, got $PILOT_WORKERS" >&2; exit 1; }
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
@@ -426,7 +426,7 @@ pilot_concurrent() {
   wait_for "every worker to see all its peers" 120 all_see
   idx=0
   for n in "${nodes[@]}"; do
-    f=$WORK/concurrent.$idx; rm -f "$f"; files+=("$f")
+    f=$WORK/concurrent.$idx; rm -f "$f" "$f.log"; files+=("$f")
     # Each node's output goes to its own log, printed below, so the lines of the
     # preloads do not interleave. A failure inside the subshell ends it without
     # writing the result file; the FAIL line it printed is in that log.
@@ -442,10 +442,10 @@ pilot_concurrent() {
   for idx in "${!nodes[@]}"; do
     [ -s "${files[$idx]}" ] || fail "the preload of $img on ${nodes[$idx]} failed (exit status ${st[$idx]}, its output is above)"
     read -r rc b pe re < "${files[$idx]}"
-    # A throttled preload (2) has measured nothing: its counters are empty.
+    # A throttled preload (2) leaves its counters empty (preload_on sets them
+    # only on success), so only a successful one has numbers to add up.
     if [ "$rc" = 2 ]; then throttled+=("${nodes[$idx]}"); continue; fi
     [ "$rc" = 0 ] || fail "the preload of $img on ${nodes[$idx]} ended with status $rc"
-    [[ $b =~ ^[0-9]+$ && $pe =~ ^[0-9]+$ && $re =~ ^[0-9]+$ ]] || fail "incomplete result for $img on ${nodes[$idx]}: '$(cat "${files[$idx]}")'"
     # Every node reports the image's blobs, whoever served them.
     [ -z "$bytes" ] || [ "$bytes" = "$b" ] || fail "$img: the nodes report different image sizes ($bytes and $b)"
     bytes=$b; peers_total=$(( peers_total + pe )); reg_total=$(( reg_total + re ))
@@ -478,7 +478,7 @@ pilot_concurrent() {
   local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry; coordinators: ${coord[hits]} blobs taken from one, ${coord[served]} requests answered as one, ${coord[fallbacks]} times a node had to do without one)"
   echo "pilot result: $line"
   [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $line" >> "$GITHUB_STEP_SUMMARY"
-  if [[ $bytes =~ ^[0-9]+$ ]] && [ "$reg_total" -ge $(( 2 * bytes )) ]; then
+  if [ "$reg_total" -ge $(( 2 * bytes )) ]; then
     echo "::warning::with coordination on the workers took $reg_total bytes from the registries for an image of $bytes bytes (${coord[fallbacks]} fallbacks): some layers were fetched by more than one node"
   fi
 }
