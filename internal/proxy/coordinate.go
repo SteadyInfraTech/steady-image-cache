@@ -72,6 +72,8 @@ func (p *Proxy) fetchCoordinator(in info, base, path, d string) fetchResult {
 func (p *Proxy) coordinate(w http.ResponseWriter, r *http.Request, repo, d string) bool {
 	in := newInfo(r)
 	in.auth = "" // a peer's request carries none, and none is borrowed from another client
+	// in.auth is empty above: a request with no credentials is the precondition
+	// for asking a token service on its behalf (see upstreamBlobGet).
 	in.anon = p.anon != nil
 	dl := p.join(d, "", p.missFetch(in, "/v2/"+repo+"/blobs/"+d, d, false))
 	if p.stream(w, r, d, dl, false, true) {

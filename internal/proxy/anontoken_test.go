@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -387,3 +388,64 @@ func TestAnonymousTokenGoesWithTheRangeOfAResumedDownload(t *testing.T) {
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+// Misses that start together for one (service, scope) make one token request.
+func TestConcurrentMissesShareOneTokenRequest(t *testing.T) {
+	var asks atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asks.Add(1)
+		<-release
+		fmt.Fprint(w, `{"token":"T","expires_in":300}`)
+	}))
+	defer srv.Close()
+	a := newAnonTokens(time.Now, nil)
+	c := *srv.Client()
+	c.CheckRedirect = noRedirect
+	a.client = &c
+	ch := fmt.Sprintf(`Bearer realm="%s/t",service="s",scope="r:a:pull"`, srv.URL)
+	const n = 8
+	var wg sync.WaitGroup
+	var got atomic.Int32
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if tok, _, ok := a.get(info{ctx: t.Context()}, "reg", ch); ok && tok == "T" {
+				got.Add(1)
+			}
+		}()
+	}
+	for asks.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // the others are waiting by now
+	close(release)
+	wg.Wait()
+	if asks.Load() != 1 || got.Load() != n {
+		t.Fatalf("%d token requests, %d of %d misses got the token", asks.Load(), got.Load(), n)
+	}
+}
+
+// A client that gave up while the realm was asked is not a verdict on the realm.
+func TestACancelledMissDoesNotDenyTheRealm(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	a := newAnonTokens(time.Now, nil)
+	c := *srv.Client()
+	c.CheckRedirect = noRedirect
+	a.client = &c
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	ch := fmt.Sprintf(`Bearer realm="%s/t",service="s",scope="r:a:pull"`, srv.URL)
+	if _, _, ok := a.get(info{ctx: ctx}, "reg", ch); ok {
+		t.Fatal("a cancelled request gave a token")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.tokens) != 0 || len(a.flying) != 0 {
+		t.Fatalf("%d cached, %d in flight after a cancelled request", len(a.tokens), len(a.flying))
+	}
+}

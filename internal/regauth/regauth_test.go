@@ -108,3 +108,17 @@ func TestParseBearerOfATruncatedChallenge(t *testing.T) {
 		t.Fatalf("%v, %v", p, ok)
 	}
 }
+
+// URL schemes are case-insensitive; net/url lowercases them, so a realm spelled
+// in capitals is used, not refused.
+func TestAnonymousTokenAcceptsAnUppercaseScheme(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"token":"T"}`)
+	}))
+	defer srv.Close()
+	realm := "HTTPS" + strings.TrimPrefix(srv.URL, "https")
+	tok, _, err := AnonymousToken(context.Background(), client(srv), fmt.Sprintf(`Bearer realm="%s/token"`, realm))
+	if err != nil || tok != "T" {
+		t.Fatalf("%q, %v", tok, err)
+	}
+}

@@ -47,6 +47,16 @@ type anonTokens struct {
 	client *http.Client
 	mu     sync.Mutex
 	tokens map[string]anonToken
+	flying map[string]*tokenCall // token requests in progress, by key
+}
+
+// tokenCall is one request to a realm that every miss for the same key waits
+// on: a coordinator that starts several downloads at once (the layers of one
+// image share a scope) makes one request, not one per layer.
+type tokenCall struct {
+	done  chan struct{} // closed when token and err are final
+	token string
+	err   error
 }
 
 // newAnonTokens makes the cache; rt is how the token service is reached (the
@@ -57,10 +67,12 @@ func newAnonTokens(now func() time.Time, rt http.RoundTripper) *anonTokens {
 		now:    now,
 		client: &http.Client{Transport: rt, Timeout: anonTokenWait, CheckRedirect: noRedirect},
 		tokens: map[string]anonToken{},
+		flying: map[string]*tokenCall{},
 	}
 }
 
-// get returns a token for the challenge, from the cache or from the realm.
+// get returns a token for the challenge, from the cache or from the realm. A
+// miss that finds a request for the same key in progress waits for it.
 func (a *anonTokens) get(in info, host string, challenge string) (token, key string, ok bool) {
 	pr, valid := regauth.ParseBearer(challenge)
 	if !valid {
@@ -68,13 +80,41 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 	}
 	key = host + "\x00" + pr["service"] + "\x00" + pr["scope"]
 	a.mu.Lock()
-	t, hit := a.tokens[key]
-	a.mu.Unlock()
-	if hit && a.now().Before(t.expires) {
+	if t, hit := a.tokens[key]; hit && a.now().Before(t.expires) {
+		a.mu.Unlock()
 		return t.value, key, !t.denied
 	}
+	if call, waiting := a.flying[key]; waiting {
+		a.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.token, key, call.err == nil
+		case <-in.ctx.Done():
+			return "", key, false
+		}
+	}
+	call := &tokenCall{done: make(chan struct{})}
+	a.flying[key] = call
+	a.mu.Unlock()
+	a.request(in, key, challenge, call)
+	return call.token, key, call.err == nil
+}
+
+// request asks the realm for call's key and records the outcome in the cache
+// before it wakes the misses waiting for it.
+func (a *anonTokens) request(in info, key, challenge string, call *tokenCall) {
+	defer func() {
+		a.mu.Lock()
+		delete(a.flying, key)
+		a.mu.Unlock()
+		close(call.done)
+	}()
 	tok, ttl, err := regauth.AnonymousToken(in.ctx, a.client, challenge)
 	if err != nil {
+		call.err = err
+		if in.ctx.Err() != nil {
+			return // this client gave up: that says nothing about the service
+		}
 		// A definite refusal (the service says no) is remembered for a minute; a
 		// network error, a 5xx or a 429 only for a few seconds, so one hiccup
 		// does not turn anonymous fetching off.
@@ -83,15 +123,14 @@ func (a *anonTokens) get(in info, host string, challenge string) (token, key str
 		if errors.As(err, &se) && se.Code >= 400 && se.Code < 500 && se.Code != http.StatusRequestTimeout && se.Code != http.StatusTooManyRequests {
 			wait = anonDenied
 		}
-		a.store(key, anonToken{denied: true, expires: a.now().Add(wait)})
-		return "", key, false
+		a.deny(key, wait)
+		return
 	}
+	call.token = tok
 	ttl = ttl * anonTTLPercent / 100
-	if ttl < minAnonTTL {
-		return tok, key, true // too short to be worth keeping: used for this request only
+	if ttl >= minAnonTTL { // shorter is not worth keeping: used by these requests only
+		a.store(key, anonToken{value: tok, expires: a.now().Add(ttl)})
 	}
-	a.store(key, anonToken{value: tok, expires: a.now().Add(ttl)})
-	return tok, key, true
 }
 
 func (a *anonTokens) store(key string, t anonToken) {
@@ -117,11 +156,11 @@ func (a *anonTokens) store(key string, t anonToken) {
 	a.tokens[key] = t
 }
 
-// deny replaces a token the registry refused with a "denied" entry, so that
-// repeated misses on content an anonymous client may not read do not each ask
-// the token service again (private content is the common case for this).
-func (a *anonTokens) deny(key string) {
-	a.store(key, anonToken{denied: true, expires: a.now().Add(anonDenied)})
+// deny replaces a token the registry refused with a "denied" entry that lasts
+// for wait, so that repeated misses on content an anonymous client may not read
+// do not each ask the token service again (private content is the common case).
+func (a *anonTokens) deny(key string, wait time.Duration) {
+	a.store(key, anonToken{denied: true, expires: a.now().Add(wait)})
 }
 
 // upstreamBlobGet asks the registry for a blob. For a coordinator whose request
@@ -149,17 +188,30 @@ func (p *Proxy) upstreamBlobGet(in info, host, path string) (resp *http.Response
 		return resp, ranged, nil
 	}
 	resp.Body.Close()
-	// A new map: hdr came from resumeHeader, which may return its argument.
-	authed := map[string]string{"Authorization": "Bearer " + tok}
-	if ranged {
-		authed["Range"] = hdr["Range"]
+	// A copy of what the first request sent (hdr may be the caller's own map)
+	// with the token in place of the missing credential.
+	authed := make(map[string]string, len(hdr))
+	for k, v := range hdr {
+		authed[k] = v
 	}
+	authed["Authorization"] = "Bearer " + tok
 	resp, err = p.get(in.ctx, p.upstreamClient, "https://"+host+path, authed)
 	if err != nil {
 		return resp, ranged, err // the registry never answered: the token may be fine
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		p.anon.deny(key) // the registry refused it: an anonymous client may not read this
+		// The registry refused the token: an anonymous client may not read this.
+		// A new Bearer challenge instead says it wants something else (a
+		// different scope, a throttled realm): that is not a verdict on the
+		// content, so only a short pause.
+		wait := anonDenied
+		for _, ch := range challengeOf(resp) {
+			if _, bearer := regauth.ParseBearer(ch); bearer {
+				wait = anonBackoff
+				break
+			}
+		}
+		p.anon.deny(key, wait)
 		return resp, ranged, nil
 	}
 	p.metrics.CoordAnonymousTokens.Add(1) // counts the tokens that got a blob request through
