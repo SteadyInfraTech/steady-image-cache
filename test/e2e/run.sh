@@ -54,8 +54,11 @@ case $MODE in local|registries|operations|pilot) ;; *) echo "MODE must be local,
 # The pilot's worker count (see "create the kind cluster"), checked here so a
 # typo does not cost a docker build first.
 PILOT_WORKERS=${PILOT_WORKERS:-2}
-case $PILOT_WORKERS in *[!0-9]*) echo "PILOT_WORKERS must be a number, got '$PILOT_WORKERS'" >&2; exit 1 ;; esac
-[ "$PILOT_WORKERS" -ge 2 ] || { echo "PILOT_WORKERS must be at least 2, got $PILOT_WORKERS" >&2; exit 1; }
+# Only the pilot reads it, so only the pilot is stopped by a bad value.
+if [ "${MODE}" = pilot ]; then
+  case $PILOT_WORKERS in *[!0-9]*) echo "PILOT_WORKERS must be a number, got '$PILOT_WORKERS'" >&2; exit 1 ;; esac
+  { [ "$PILOT_WORKERS" -ge 2 ] && [ "$PILOT_WORKERS" -le 10 ]; } || { echo "PILOT_WORKERS must be between 2 and 10, got $PILOT_WORKERS" >&2; exit 1; }
+fi
 # The image the manifest names, so that bumping the tag there for a release does
 # not need a change here. It is built locally and loaded into the nodes.
 SIC_IMAGE=$(awk '/^ *image: ghcr.io\/steadyinfratech\/steady-image-cache[:@]/ {print $2; exit}' "$ROOT/deploy/daemonset.yaml")
@@ -337,6 +340,9 @@ pilot_phase() {
   for w in "${NODES[@]}"; do
     case $w in *-control-plane|"$A"|"$B") ;; *) others+=("$w") ;; esac
   done
+  # The generated kind config and the node names must agree with PILOT_WORKERS,
+  # or the measurement is quietly smaller than the workflow says.
+  [ "${#others[@]}" -eq $(( PILOT_WORKERS - 2 )) ] || fail "found ${#others[@]} worker(s) besides $A and $B, want $(( PILOT_WORKERS - 2 )) (check PILOT_WORKERS and the kind config)"
   local workers=("$A" "$B" "${others[@]}")
   all_see_peers() { local n; for n in "${workers[@]}"; do sees_all_peers "$n" || return 1; done; }
   wait_for "every worker to see all its peers" 120 all_see_peers
@@ -398,11 +404,21 @@ pilot_phase() {
     [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "* $l" >> "$GITHUB_STEP_SUMMARY"
   done
   if [ "${#others[@]}" -gt 0 ]; then
+    # Last on purpose: it leaves coordination switched on, and nothing follows.
     pilot_concurrent "${workers[@]}"
   else
     echo "pilot: the concurrent preload needs more than two workers (PILOT_WORKERS), so it did not run"
   fi
   log "pilot passed: ${checked[*]}"
+}
+
+# preload_to_file NODE IMAGE FILE: preload_on, with what it prints in FILE.log
+# and "status bytes peers registry" in FILE. Meant to run in the background, one
+# per node: a failure inside (fail exits) ends it without writing FILE, and the
+# FAIL line is in FILE.log. Everything it needs comes in as an argument.
+preload_to_file() {
+  local node=$1 img=$2 out=$3 rc
+  ( preload_on "$node" "$img" && rc=0 || rc=$?; echo "$rc $PL_BYTES $PL_PEERS $PL_REG" > "$out" ) > "$out.log" 2>&1
 }
 
 # pilot_concurrent NODE...: a rollout, as far as kind can show one: a second
@@ -428,9 +444,8 @@ pilot_concurrent() {
   for n in "${nodes[@]}"; do
     f=$WORK/concurrent.$idx; rm -f "$f" "$f.log"; files+=("$f")
     # Each node's output goes to its own log, printed below, so the lines of the
-    # preloads do not interleave. A failure inside the subshell ends it without
-    # writing the result file; the FAIL line it printed is in that log.
-    ( preload_on "$n" "$img" && rc=0 || rc=$?; echo "$rc $PL_BYTES $PL_PEERS $PL_REG" > "$f" ) > "$f.log" 2>&1 &
+    # preloads do not interleave.
+    preload_to_file "$n" "$img" "$f" &
     pids+=($!); idx=$((idx + 1))
   done
   local st=()
@@ -446,6 +461,10 @@ pilot_concurrent() {
     # only on success), so only a successful one has numbers to add up.
     if [ "$rc" = 2 ]; then throttled+=("${nodes[$idx]}"); continue; fi
     [ "$rc" = 0 ] || fail "the preload of $img on ${nodes[$idx]} ended with status $rc"
+    # The result file is the one thing a child hands its parent, and a child that
+    # was killed can leave it short; bash arithmetic on an empty field would then
+    # abort with a syntax error instead of saying which node it was.
+    [[ $b =~ ^[0-9]+$ && $pe =~ ^[0-9]+$ && $re =~ ^[0-9]+$ ]] || fail "incomplete result for $img on ${nodes[$idx]}: '$(cat "${files[$idx]}")'"
     # Every node reports the image's blobs, whoever served them.
     [ -z "$bytes" ] || [ "$bytes" = "$b" ] || fail "$img: the nodes report different image sizes ($bytes and $b)"
     bytes=$b; peers_total=$(( peers_total + pe )); reg_total=$(( reg_total + re ))
@@ -462,8 +481,9 @@ pilot_concurrent() {
     [ "$v" = 0 ] || fail "$w had verification errors"
     v=$(metric_strict "$w" sic_peer_errors_total) || fail "could not read the peer error counter of $w"
     [ "$v" = 0 ] || fail "$w had $v peer errors"
-    # Informational only: a node whose counters cannot be read counts as 0 (the
-    # strict read prints why to the log) and does not fail the run.
+    # Informational only: a node whose counters cannot be read counts as 0 and
+    # does not fail the run. metric_strict's fail exits only the subshell of the
+    # command substitution, so the || branch runs and the script goes on.
     for c in hits served fallbacks; do
       v=$(metric_strict "$w" "sic_coordinator_${c}_total") || { echo "::warning::no coordinator ${c} counter from $w"; v=0; }
       coord[$c]=$(( ${coord[$c]} + v ))
@@ -474,6 +494,9 @@ pilot_concurrent() {
     return 0
   fi
   [ "$reg_total" -gt 0 ] || fail "$img: no bytes came from a registry, so the nodes were not cold"
+  if [ "$(( ${coord[hits]} + ${coord[served]} ))" = 0 ]; then
+    echo "::warning::no node took a blob from a coordinator or answered as one: the run did not exercise coordination (a SIC without it, or no peer saw the others in time?)"
+  fi
   pct=$(( 100 * peers_total / (peers_total + reg_total) ))
   local line="$img on ${#nodes[@]} workers at once, coordination on: $reg_total bytes from the registries in all, $peers_total from peers, so $pct% of the workers' bytes were not fetched from a registry (the image is $bytes bytes; $(( ${#nodes[@]} * bytes )) if every node had gone to the registry; coordinators: ${coord[hits]} blobs taken from one, ${coord[served]} requests answered as one, ${coord[fallbacks]} times a node had to do without one)"
   echo "pilot result: $line"
