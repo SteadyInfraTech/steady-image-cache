@@ -4,6 +4,7 @@ Releases follow [semantic versioning](https://semver.org/). The settings (`SIC_*
 
 ## Unreleased
 
+- The pilot e2e (`e2e-pilot.yml`) now runs on four workers (`PILOT_WORKERS`): the image is preloaded on one node from the registry and then on each of the others, and a second image (`PILOT_CONCURRENT_IMAGE`) on all workers at once with coordination on, which saved 66% in one run and 8% in the next (README, "Status"). Tests only.
 - A node that does without its coordinator now logs why (once a minute per reason: no answer, slow start, or the status the coordinator answered), and the README says that for registries that require a token even for public content (Docker Hub, `public.ecr.aws`, `ghcr.io`) coordination helps only for blobs the coordinator already holds or is downloading itself. No change to behaviour. Refs #138.
 - The cost of choosing whom to ask on a miss is now measured (`BenchmarkPeerOrder`) and stated in the README, "Peer requests": 120 µs at 5 000 peers, so no change to the code. The README also puts the two-node limit of the pilot measurement next to the number. No code change.
 - Tests for the EndpointSlice discovery client (listing, watch, bookmarks, "410 gone", a refused watch, poke, broken events, service account files), for the digest-filter ranking (`Classify`, `Holders`, `SelfBytes`) and for the gossip loop. The `peer` package goes from 64% to 90% statement coverage. Tests only: nothing that runs changes, and the features stay experimental.

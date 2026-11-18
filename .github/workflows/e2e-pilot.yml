@@ -1,11 +1,16 @@
 name: End-to-end (pilot measurement)
 
-# The measurement the project is for, on two nodes: a real image is preloaded
-# on one node from a public registry and then on the other, and the run prints
-# how many of the second node's bytes were not fetched from the registry (the
-# job summary has it). Needs the internet, so it does not gate pull requests:
+# The measurement the project is for: a real image is preloaded on one node
+# from a public registry and then on the others (four workers here), and the run
+# prints how many of their bytes were not fetched from the registry (the job
+# summary has it). The control-plane node also runs SIC and so is one more peer,
+# though its bytes and error counters are not measured.
+# A second image is then preloaded on every worker at once, with coordination
+# on, as a rollout would. Needs the internet, so it does not gate pull requests:
 # it runs weekly, by hand, and on pull requests that change this workflow or the
-# test script. PILOT_IMAGES (space separated) replaces the default image.
+# test script (four kind nodes and two images through public registries: it can
+# take most of the 60 minutes below, so a pull request that edits test/e2e pays
+# for that). PILOT_IMAGES (space separated) replaces the default image.
 
 on:
   pull_request:
@@ -27,7 +32,10 @@ concurrency:
 jobs:
   pilot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Sized for PILOT_WORKERS=4 (set in the step below), two images and a slow
+    # registry. Each worker more is one more sequential preload, so if
+    # PILOT_WORKERS is raised, raise this timeout with it.
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,5 +48,8 @@ jobs:
       - name: Install kind
         run: go install sigs.k8s.io/kind@v0.27.0
 
-      - name: Measure what a second node does not take from the registry
+      - name: Measure what the other nodes do not take from the registry
+        env:
+          # Four measured workers; the control-plane node is a peer only.
+          PILOT_WORKERS: "4"
         run: MODE=pilot test/e2e/run.sh
