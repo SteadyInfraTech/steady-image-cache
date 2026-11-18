@@ -509,9 +509,9 @@ pilot_concurrent() {
   # above that means coordination saved nothing. Well short of that but still
   # over twice the image is only reported, because the saving varies from run to
   # run (README, "Status").
-  # Bytes the nodes reported is the image's size; zero beside registry bytes
-  # means the report was not read, and the comparison below would mean nothing.
-  [ "$bytes" -gt 0 ] || fail "$img: the nodes report an image of 0 bytes, but $reg_total bytes came from a registry"
+  # preload_on fails when the preload report has no size, so a zero here is a
+  # report in a format it did not expect; the comparison below would mean nothing.
+  [ "$bytes" -gt 0 ] || fail "$img: the preload report gives an image of 0 bytes, but $reg_total bytes came from a registry (has the report's format changed?)"
   everyone=$(( ${#nodes[@]} * bytes ))
   if [ "$reg_total" -ge "$everyone" ]; then
     fail "$img: the workers took $reg_total bytes from the registries, as much as the $everyone they would have taken without coordination (${#nodes[@]} x $bytes), with ${coord[fallbacks]} fallbacks"

@@ -32,8 +32,9 @@ concurrency:
 jobs:
   pilot:
     runs-on: ubuntu-latest
-    # Sized for the four workers set below, two images and a slow registry. Each
-    # worker more is one more sequential preload: raise it with PILOT_WORKERS.
+    # Sized for PILOT_WORKERS=4 (set in the step below), two images and a slow
+    # registry. Each worker more is one more sequential preload, so if
+    # PILOT_WORKERS is raised, raise this timeout with it.
     timeout-minutes: 60
     steps:
       - name: Check out repository
