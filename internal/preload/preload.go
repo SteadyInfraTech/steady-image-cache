@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SteadyInfraTech/steady-image-cache/internal/regauth"
 )
 
 // Options configures a run.
@@ -388,7 +390,7 @@ func (r *runner) get(ctx context.Context, ref Ref, path, accept string) (*http.R
 
 // token answers a Bearer challenge with the registry's token service.
 func (r *runner) token(ctx context.Context, challenge, scope, registry string) (string, error) {
-	p, ok := parseBearer(challenge)
+	p, ok := regauth.ParseBearer(challenge)
 	if !ok {
 		return "", fmt.Errorf("the registry wants authentication this tool cannot answer (%q)", challenge)
 	}
@@ -458,51 +460,6 @@ func (r *runner) token(ctx context.Context, challenge, scope, registry string) (
 		return t.AccessToken, nil
 	}
 	return "", errors.New("token service gave no token")
-}
-
-func parseBearer(h string) (map[string]string, bool) {
-	// The scheme name is case-insensitive (RFC 9110).
-	scheme, rest, ok := strings.Cut(strings.TrimSpace(h), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return nil, false
-	}
-	p := map[string]string{}
-	// key=value pairs separated by commas; a value may be a quoted string, in
-	// which a comma is part of the value and a backslash escapes the next byte.
-	for i := 0; i < len(rest); {
-		for i < len(rest) && (rest[i] == ' ' || rest[i] == ',') {
-			i++
-		}
-		j := i
-		for j < len(rest) && rest[j] != '=' && rest[j] != ',' {
-			j++
-		}
-		if j >= len(rest) || rest[j] != '=' {
-			i = j
-			continue
-		}
-		key := strings.TrimSpace(rest[i:j])
-		i = j + 1
-		var val strings.Builder
-		if i < len(rest) && rest[i] == '"' {
-			i++
-			for i < len(rest) && rest[i] != '"' {
-				if rest[i] == '\\' && i+1 < len(rest) {
-					i++
-				}
-				val.WriteByte(rest[i])
-				i++
-			}
-			i++ // the closing quote
-		} else {
-			for i < len(rest) && rest[i] != ',' {
-				val.WriteByte(rest[i])
-				i++
-			}
-		}
-		p[key] = strings.TrimSpace(val.String())
-	}
-	return p, p["realm"] != ""
 }
 
 // counters reads the two byte counters from the admin address.

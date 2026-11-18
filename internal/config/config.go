@@ -35,6 +35,10 @@ type Config struct {
 	// Kubernetes discovery) and is otherwise off.
 	Coordinate bool
 	CoordWait  time.Duration
+	// CoordAnonymousToken lets a coordinator ask a registry's token service for
+	// a token without credentials when the registry wants one, so that it can
+	// fetch public content for the nodes that ask it.
+	CoordAnonymousToken bool
 	// PeerWatch makes Kubernetes discovery follow pod changes with a watch
 	// instead of listing every 30 seconds. It falls back to listing when the
 	// service account may not watch.
@@ -142,6 +146,7 @@ func FromEnv() Config {
 		Coordinate:          boolenv("SIC_COORDINATE", true),
 		PeerWatch:           boolenv("SIC_PEER_WATCH", true),
 		CoordWait:           20 * time.Second,
+		CoordAnonymousToken: boolenv("SIC_COORDINATE_ANONYMOUS_TOKEN", false),
 		MinFreeBytes:        1 << 30,
 		MinFreePercent:      20,
 		ScrubInterval:       24 * time.Hour,

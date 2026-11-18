@@ -105,6 +105,8 @@ SIC does not store registry credentials. It relays registry authentication chall
 
 Upstream access is disabled by default. When enabled, the destination registry MUST be on `SIC_UPSTREAM_REGISTRIES`; a request namespace MUST never enable arbitrary outbound connections.
 
+With `SIC_COORDINATE_ANONYMOUS_TOKEN` a coordinator that a registry refuses with a Bearer challenge may ask the challenge's token service for a token without any credential and retry once. That token service is an outbound destination like a registry: its host MUST be on `SIC_UPSTREAM_REGISTRIES` too, it is reached over HTTPS only and without following redirects, and no client's credential is sent to it. It is never used for a registry in `SIC_PROTECTED_REGISTRIES`. The token is used only by the coordinator, for content it fetches for others; content an anonymous client may not read is still fetched by the node that holds the credentials.
+
 ### 6.3 Protected registries
 
 When `SIC_PROTECTED_REGISTRIES` is configured, SIC treats content from those registries as protected. Before serving protected content from cache, SIC checks with the registry using the requesting client's credentials and the same repository path. A successful check is cached only for the documented short interval. If the registry cannot confirm access, SIC does not serve that protected content.

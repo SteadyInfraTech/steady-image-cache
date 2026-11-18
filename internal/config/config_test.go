@@ -224,3 +224,12 @@ func TestPeerWatchIsOnUnlessTurnedOff(t *testing.T) {
 		t.Fatal("a typo turned it off")
 	}
 }
+
+func TestCoordinateAnonymousTokenIsOffUnlessTurnedOn(t *testing.T) {
+	for env, want := range map[string]bool{"": false, "false": false, "x": false, "true": true} {
+		t.Setenv("SIC_COORDINATE_ANONYMOUS_TOKEN", env)
+		if got := FromEnv().CoordAnonymousToken; got != want {
+			t.Fatalf("SIC_COORDINATE_ANONYMOUS_TOKEN=%q: got %v, want %v", env, got, want)
+		}
+	}
+}

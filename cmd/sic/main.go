@@ -271,6 +271,7 @@ func main() {
 		Self:                self,
 		Coordinate:          cfg.Coordinate,
 		CoordWait:           cfg.CoordWait,
+		CoordAnonymousToken: cfg.CoordAnonymousToken,
 		TagTTL:              cfg.TagTTL,
 		Upstream:            cfg.UpstreamEnabled,
 		UpstreamRegistries:  cfg.UpstreamRegistries,
